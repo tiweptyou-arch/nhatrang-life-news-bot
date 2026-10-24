@@ -23,7 +23,8 @@
     "https://news.google.com/rss/articles/CBMizgFBVV95cUxOTG1QSjB0QnhWZ1QwZTc2TmlVQ2VqYlN2Ym1rTTcxODBGMzdFd3EwNVBVVVBJcFhlZjRPYjROekpkMXRkRnNidmptLWZocFFZVktwWjgwdDVZeVpla2dha1hqRklFeldGQXdFYldOWjlveEdfTUl1ZnBCb050ZXlXX1Y4WW9Ia0I2YnlydTgzeWpJenNNY3pScEN1VVJJY2EyTW11dXl4Z3ZEM0ZOY0M0dEkxX3RTVzZBSjlVOEJvZjNOZjZuMDhRcUxnZnJYdw?oc=5",
     "https://news.google.com/rss/articles/CBMioAFBVV95cUxNcktKeHVSdHlQdnNvOUlESWFDSTZjbmEwOUhLaVhaV09Oek0wVmlpVmZDYkxJalpBa2JLNUY4b2xxLWNJOGVQRGtmNC1oZGNrUFVWRzNBVmJ4LVMtMUZHUHJ0SkdQQXhULWVveUpsTVpILUZJWUxyRjRnTlY0QUlhWV8tdW13TEpjdkRnTUpGVng0M3ZXOVNfSGt4ZnRINV8x?oc=5",
     "https://news.google.com/rss/articles/CBMinAFBVV95cUxPQTVlRnI4RVBrcHZuRXJ6cFZZdk1MVWd6UkU3Ymk0WW9fUXN5Q29WNi1TRjR6b0lrcHRxOXlQaGhIODQ2ZW1NdGs3dVNwTEx6VmpiQVlhSHN3dndNWGJYZFpXejllblNrdmZrTnhyVGlyRnVHZ3lZN0tEVjBVRmlzMk9qUml0RE8xd091MnBUd3dTZDhBV185UkhwWjQ?oc=5",
-    "https://news.google.com/rss/articles/CBMioAFBVV95cUxPX0gwLVNDT3ZJSzU1OFJCNVRMWVVMSVFZSXR6b1pGQzFwUnBsZmdCbWwzZFl3ajhLSDdONUt1YXZIUjA0RG1POUl3UmpWa1lqMDM0emU1ak5jczZKZ1BHTVNiV3hZQVU4VzlGTElPd2VJdFozQU1WcnVMUVFucTlOQ0hsN0hfZjFhd0lQYkwyVFdTZ3FVVVgzdUpSLVBiZW9a?oc=5"
+    "https://news.google.com/rss/articles/CBMioAFBVV95cUxPX0gwLVNDT3ZJSzU1OFJCNVRMWVVMSVFZSXR6b1pGQzFwUnBsZmdCbWwzZFl3ajhLSDdONUt1YXZIUjA0RG1POUl3UmpWa1lqMDM0emU1ak5jczZKZ1BHTVNiV3hZQVU4VzlGTElPd2VJdFozQU1WcnVMUVFucTlOQ0hsN0hfZjFhd0lQYkwyVFdTZ3FVVVgzdUpSLVBiZW9a?oc=5",
+    "https://news.google.com/rss/articles/CBMixAFBVV95cUxOSG1mamhUcU1Gam9vOFZFeFJpLVRSbTlpWlM3bkNQc1pqdXVoVVpXUnd5Z29KcG96dEtfZXVhTEpfX3dzVkFQbHZzcjR3SDJpRmxyN1B6Nkp0cks4bktyOTVsYlVYUVFTQzlOa1QxckpsMmlqOEJqakZiWUFVYVpYX1FnS1hpZjJQcGV1bnpPYkpOM0I3eFVTZnQwN0hhZmxBVkFFRE5IUVJJaGVwTFRmMzF5T09Lb2VEaEhWVWlCX1R3d3Jp?oc=5"
   ],
   "seen_titles": [
     "81ad2659c044ab5b3959bd5bf50991b824ba9f7027554127e94c3dceb4216621",
@@ -55,5 +56,18 @@
   "last_update_id": 420020161,
   "last_weather_date": "2026-10-24",
   "last_weather_morning_date": "2026-10-24",
-  "last_weather_evening_date": "2026-10-24"
+  "last_weather_evening_date": "2026-10-24",
+  "pending_ad": {},
+  "ads": [],
+  "paused": false,
+  "pause_until": "",
+  "daily_counts": {
+    "2026-10-24": 3
+  },
+  "last_slots": {
+    "weather_morning": "2026-10-24",
+    "weather_evening": "2026-10-24"
+  },
+  "game_history": [],
+  "last_news_hour": "2026-10-24-20"
 }

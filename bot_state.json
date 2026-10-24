@@ -53,11 +53,16 @@
     "b47f7e654319de63bc970f409ae95384b18e75c01da4fb829af3b4bb7526d5b5"
   ],
   "manual_posts": [],
-  "last_update_id": 420020161,
+  "last_update_id": 420020165,
   "last_weather_date": "2026-10-24",
   "last_weather_morning_date": "2026-10-24",
   "last_weather_evening_date": "2026-10-24",
-  "pending_ad": {},
+  "pending_ad": {
+    "format": "1/24",
+    "top_hours": 1,
+    "life_hours": 24,
+    "awaiting_content": true
+  },
   "ads": [],
   "paused": false,
   "pause_until": "",

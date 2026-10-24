@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL = os.environ["TELEGRAM_CHAT_ID"]
+
 SUBSCRIBE_URL = "https://t.me/NhaTrangLifeNews"
 STATE_FILE = "bot_state.json"
 TZ = ZoneInfo("Asia/Ho_Chi_Minh")
@@ -38,7 +39,17 @@ STOP_WORDS = {
 }
 
 
-def request_json(url, data=None, timeout=25):
+def get_url(url):
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0"}
+    )
+    with urllib.request.urlopen(request, timeout=25) as response:
+        return response.read()
+
+
+def api_call(method, data=None):
+    url = f"https://api.telegram.org/bot{TOKEN}/{method}"
     body = None
     headers = {"User-Agent": "Mozilla/5.0"}
 
@@ -46,17 +57,15 @@ def request_json(url, data=None, timeout=25):
         body = urllib.parse.urlencode(data).encode()
         headers["Content-Type"] = "application/x-www-form-urlencoded"
 
-    req = urllib.request.Request(url, data=body, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"))
+    request = urllib.request.Request(url, data=body, headers=headers)
 
+    with urllib.request.urlopen(request, timeout=25) as response:
+        result = json.loads(response.read().decode("utf-8"))
 
-def get_url(url):
-    req = urllib.request.Request(
-        url, headers={"User-Agent": "Mozilla/5.0"}
-    )
-    with urllib.request.urlopen(req, timeout=25) as response:
-        return response.read()
+    if not result.get("ok"):
+        raise RuntimeError(f"Telegram API error: {result}")
+
+    return result["result"]
 
 
 def clean_text(value):
@@ -76,12 +85,19 @@ def load_state():
     state.setdefault("seen_titles", [])
     state.setdefault("manual_posts", [])
     state.setdefault("last_update_id", 0)
-    state.setdefault("last_weather_date", "")
+    state.setdefault("last_weather_morning_date", "")
+    state.setdefault("last_weather_evening_date", "")
+
+    # Preserve the old version's weather record to avoid
+    # sending the morning forecast twice on the same day.
+    old_weather_date = state.get("last_weather_date", "")
+    if old_weather_date:
+        state.setdefault("last_weather_morning_date", old_weather_date)
+
     return state
 
 
 def save_state(state):
-    # GitHub Actions commits this file after the script finishes.
     with open(STATE_FILE, "w", encoding="utf-8") as file:
         json.dump(state, file, ensure_ascii=False, indent=2)
 
@@ -98,6 +114,7 @@ def translate(text):
         "dt": "t",
         "q": text[:4000]
     })
+
     url = (
         "https://translate.googleapis.com/translate_a/single?"
         + params
@@ -113,43 +130,27 @@ def translate(text):
         return ""
 
 
-def telegram_api(method, data=None):
-    url = f"https://api.telegram.org/bot{TOKEN}/{method}"
-    return request_json(url, data=data)
-
-
 def send_message(text):
-    result = telegram_api("sendMessage", {
+    api_call("sendMessage", {
         "chat_id": CHANNEL,
         "text": text,
         "parse_mode": "HTML",
         "disable_web_page_preview": "true"
     })
-    if not result.get("ok"):
-        raise RuntimeError(f"Telegram API error: {result}")
-
-
-def get_bot_id():
-    result = telegram_api("getMe")
-    return result["result"]["id"]
 
 
 def collect_manual_posts(state, bot_id):
-    # Read channel posts since the last saved update.
-    offset = state["last_update_id"] + 1
-    result = telegram_api("getUpdates", {
-        "offset": offset,
+    # Telegram only keeps pending updates for a limited time.
+    # The bot must be an administrator of the channel.
+    result = api_call("getUpdates", {
+        "offset": state["last_update_id"] + 1,
         "timeout": 0,
         "allowed_updates": json.dumps(
             ["channel_post", "edited_channel_post"]
         )
     })
 
-    if not result.get("ok"):
-        print(f"getUpdates error: {result}")
-        return
-
-    for update in result.get("result", []):
+    for update in result:
         state["last_update_id"] = max(
             state["last_update_id"], update["update_id"]
         )
@@ -162,8 +163,9 @@ def collect_manual_posts(state, bot_id):
             continue
 
         chat = post.get("chat", {})
-        if str(chat.get("id")) != str(CHANNEL) and (
-            chat.get("username", "").lower()
+        if (
+            str(chat.get("id")) != str(CHANNEL)
+            and chat.get("username", "").lower()
             != str(CHANNEL).lstrip("@").lower()
         ):
             continue
@@ -172,23 +174,43 @@ def collect_manual_posts(state, bot_id):
         if sender.get("id") == bot_id or sender.get("is_bot"):
             continue
 
-        text = clean_text(post.get("text") or post.get("caption") or "")
+        text = clean_text(
+            post.get("text") or post.get("caption") or ""
+        )
         if text:
             state["manual_posts"].append(text)
 
     state["manual_posts"] = state["manual_posts"][-100:]
 
 
+def words(text):
+    return [
+        word for word in re.findall(
+            r"[a-zа-яё0-9]+", text.casefold()
+        )
+        if len(word) > 2 and word not in STOP_WORDS
+    ]
+
+
+def title_key(title):
+    normalized = " ".join(words(title))
+    return hashlib.sha256(
+        normalized.encode("utf-8")
+    ).hexdigest()
+
+
 def short_headline(title):
     title = clean_text(title)
 
-    # Remove the news outlet suffix often appended to RSS titles.
+    # Remove the news outlet's name after a dash or separator.
     title = re.split(r"\s[-–|]\s", title, maxsplit=1)[0].strip()
+
     translated = translate(title)
     if not translated:
         return ""
 
     translated = re.sub(r"\s+", " ", translated).strip()
+
     if len(translated) > 100:
         translated = translated[:97].rsplit(" ", 1)[0] + "…"
 
@@ -196,7 +218,6 @@ def short_headline(title):
 
 
 def make_summary(description, headline):
-    description = clean_text(description)
     if not description:
         return ""
 
@@ -206,43 +227,35 @@ def make_summary(description, headline):
 
     text = re.sub(r"\s+", " ", text).strip()
 
-    # Remove a repeated headline at the beginning of the description.
+    # Remove a repeated headline at the beginning.
     if headline and text.casefold().startswith(headline.casefold()):
         text = text[len(headline):].lstrip(" :-—–.,;!?")
 
-    # If the description contains the headline as its first sentence,
-    # remove that sentence rather than publishing it twice.
-    parts = re.split(r"(?<=[.!?])\s+", text)
-    if len(parts) > 1 and headline:
-        first_words = set(words(parts[0]))
+    sentences = re.split(r"(?<=[.!?])\s+", text)
+
+    # Drop the first sentence if it mostly repeats the headline.
+    if len(sentences) > 1 and headline:
         title_words = set(words(headline))
-        if title_words and len(first_words & title_words) / len(title_words) >= 0.65:
-            parts = parts[1:]
+        first_words = set(words(sentences[0]))
 
-    text = " ".join(part for part in parts if part).strip()
+        if title_words:
+            overlap = len(title_words & first_words) / len(title_words)
+            if overlap >= 0.65:
+                sentences = sentences[1:]
 
-    if not text or len(words(text)) < 5:
+    text = " ".join(part for part in sentences if part).strip()
+
+    if len(words(text)) < 5:
         return ""
 
-    sentences = re.split(r"(?<=[.!?])\s+", text)
-    text = " ".join(sentences[:3]).strip()
+    text = " ".join(sentences for sentences in re.split(
+        r"(?<=[.!?])\s+", text
+    )[:3]).strip()
 
     if len(text) > 650:
         text = text[:647].rsplit(" ", 1)[0] + "..."
 
     return text
-
-
-def words(text):
-    return [
-        word for word in re.findall(r"[a-zа-яё0-9]+", text.casefold())
-        if len(word) > 2 and word not in STOP_WORDS
-    ]
-
-
-def title_key(title):
-    normalized = " ".join(words(title))
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def already_posted(headline, link, state):
@@ -253,10 +266,12 @@ def already_posted(headline, link, state):
         return True
 
     title_words = set(words(headline))
+
     if len(title_words) >= 4:
         for post in state["manual_posts"]:
             post_words = set(words(post))
             overlap = len(title_words & post_words) / len(title_words)
+
             if overlap >= 0.65:
                 print(f"Skipped likely manual duplicate: {headline}")
                 return True
@@ -342,10 +357,24 @@ def weather_description(code):
 
 def publish_weather(state):
     now = datetime.now(TZ)
+    hour = now.hour
     today = now.date().isoformat()
 
-    if state["last_weather_date"] == today:
+    if hour < 8:
         return
+
+    if hour < 18:
+        period = "morning"
+        if state["last_weather_morning_date"] == today:
+            return
+        index = 0
+        title = "☀️ <b>Погода в Нячанге на сегодня</b>"
+    else:
+        period = "evening"
+        if state["last_weather_evening_date"] == today:
+            return
+        index = 1
+        title = "🌙 <b>Погода в Нячанге на завтра</b>"
 
     url = (
         "https://api.open-meteo.com/v1/forecast?"
@@ -353,7 +382,7 @@ def publish_weather(state):
         "&current=temperature_2m,apparent_temperature,weather_code"
         "&daily=temperature_2m_max,temperature_2m_min,"
         "precipitation_probability_max,weather_code"
-        "&timezone=Asia%2FHo_Chi_Minh&forecast_days=1"
+        "&timezone=Asia%2FHo_Chi_Minh&forecast_days=2"
     )
 
     try:
@@ -361,32 +390,52 @@ def publish_weather(state):
         current = data["current"]
         daily = data["daily"]
 
-        icon, condition = weather_description(
+        current_icon, current_condition = weather_description(
             int(current["weather_code"])
         )
-        low = round(daily["temperature_2m_min"][0])
-        high = round(daily["temperature_2m_max"][0])
-        rain = daily.get("precipitation_probability_max", [None])[0]
-        rain_text = (
-            f"{rain}%" if rain is not None
-            else "нет данных"
+        forecast_icon, forecast_condition = weather_description(
+            int(daily["weather_code"][index])
         )
 
+        low = round(daily["temperature_2m_min"][index])
+        high = round(daily["temperature_2m_max"][index])
+        rain = daily.get(
+            "precipitation_probability_max", [None, None]
+        )[index]
+        rain_text = f"{rain}%" if rain is not None else "нет данных"
+
+        if period == "morning":
+            details = (
+                f"Сейчас: {round(current['temperature_2m'])}°C, "
+                f"{current_condition} {current_icon}.\n"
+                f"Ощущается как: "
+                f"{round(current['apparent_temperature'])}°C.\n"
+            )
+        else:
+            details = (
+                f"Сейчас: {round(current['temperature_2m'])}°C, "
+                f"{current_condition} {current_icon}.\n"
+                f"На завтра ожидается: {forecast_condition} "
+                f"{forecast_icon}.\n"
+            )
+
         post = (
-            f"{icon} <b>Погода в Нячанге на сегодня</b>\n\n"
-            f"Сейчас: {round(current['temperature_2m'])}°C, "
-            f"{condition}.\n"
-            f"Ощущается как: "
-            f"{round(current['apparent_temperature'])}°C.\n"
-            f"За день: от {low}°C до {high}°C.\n"
+            f"{title}\n\n"
+            f"{details}"
+            f"Температура: от {low}°C до {high}°C.\n"
             f"Вероятность осадков: {rain_text}.\n\n"
             f'🇻🇳 <a href="{SUBSCRIBE_URL}">'
             f"Нячанг Лайф | Подписаться</a>"
         )
 
         send_message(post)
-        state["last_weather_date"] = today
-        print("Weather published.")
+
+        if period == "morning":
+            state["last_weather_morning_date"] = today
+        else:
+            state["last_weather_evening_date"] = today
+
+        print(f"Weather {period} published.")
 
     except Exception as exc:
         print(f"Weather error: {exc}")
@@ -396,7 +445,7 @@ def main():
     state = load_state()
 
     try:
-        bot_id = get_bot_id()
+        bot_id = api_call("getMe")["id"]
         collect_manual_posts(state, bot_id)
     except Exception as exc:
         print(f"Channel update check error: {exc}")
@@ -417,9 +466,10 @@ def main():
                     continue
                 if link in links_in_feed:
                     continue
-                links_in_feed.add(link)
 
+                links_in_feed.add(link)
                 combined = (title + " " + description).casefold()
+
                 if not any(word in combined for word in KEYWORDS):
                     continue
 
@@ -454,7 +504,8 @@ def main():
         except Exception as exc:
             print(f"Publish error: {exc}")
 
-    # Publish the weather once daily, on the first run after 08:00 local time.
+    # Morning forecast after 08:00; evening forecast after 18:00.
+    # The workflow runs every 30 minutes.
     if datetime.now(TZ).hour >= 8:
         publish_weather(state)
 

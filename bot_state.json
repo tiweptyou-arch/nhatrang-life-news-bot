@@ -24,7 +24,8 @@
     "https://news.google.com/rss/articles/CBMioAFBVV95cUxNcktKeHVSdHlQdnNvOUlESWFDSTZjbmEwOUhLaVhaV09Oek0wVmlpVmZDYkxJalpBa2JLNUY4b2xxLWNJOGVQRGtmNC1oZGNrUFVWRzNBVmJ4LVMtMUZHUHJ0SkdQQXhULWVveUpsTVpILUZJWUxyRjRnTlY0QUlhWV8tdW13TEpjdkRnTUpGVng0M3ZXOVNfSGt4ZnRINV8x?oc=5",
     "https://news.google.com/rss/articles/CBMinAFBVV95cUxPQTVlRnI4RVBrcHZuRXJ6cFZZdk1MVWd6UkU3Ymk0WW9fUXN5Q29WNi1TRjR6b0lrcHRxOXlQaGhIODQ2ZW1NdGs3dVNwTEx6VmpiQVlhSHN3dndNWGJYZFpXejllblNrdmZrTnhyVGlyRnVHZ3lZN0tEVjBVRmlzMk9qUml0RE8xd091MnBUd3dTZDhBV185UkhwWjQ?oc=5",
     "https://news.google.com/rss/articles/CBMioAFBVV95cUxPX0gwLVNDT3ZJSzU1OFJCNVRMWVVMSVFZSXR6b1pGQzFwUnBsZmdCbWwzZFl3ajhLSDdONUt1YXZIUjA0RG1POUl3UmpWa1lqMDM0emU1ak5jczZKZ1BHTVNiV3hZQVU4VzlGTElPd2VJdFozQU1WcnVMUVFucTlOQ0hsN0hfZjFhd0lQYkwyVFdTZ3FVVVgzdUpSLVBiZW9a?oc=5",
-    "https://news.google.com/rss/articles/CBMixAFBVV95cUxOSG1mamhUcU1Gam9vOFZFeFJpLVRSbTlpWlM3bkNQc1pqdXVoVVpXUnd5Z29KcG96dEtfZXVhTEpfX3dzVkFQbHZzcjR3SDJpRmxyN1B6Nkp0cks4bktyOTVsYlVYUVFTQzlOa1QxckpsMmlqOEJqakZiWUFVYVpYX1FnS1hpZjJQcGV1bnpPYkpOM0I3eFVTZnQwN0hhZmxBVkFFRE5IUVJJaGVwTFRmMzF5T09Lb2VEaEhWVWlCX1R3d3Jp?oc=5"
+    "https://news.google.com/rss/articles/CBMixAFBVV95cUxOSG1mamhUcU1Gam9vOFZFeFJpLVRSbTlpWlM3bkNQc1pqdXVoVVpXUnd5Z29KcG96dEtfZXVhTEpfX3dzVkFQbHZzcjR3SDJpRmxyN1B6Nkp0cks4bktyOTVsYlVYUVFTQzlOa1QxckpsMmlqOEJqakZiWUFVYVpYX1FnS1hpZjJQcGV1bnpPYkpOM0I3eFVTZnQwN0hhZmxBVkFFRE5IUVJJaGVwTFRmMzF5T09Lb2VEaEhWVWlCX1R3d3Jp?oc=5",
+    "https://news.google.com/rss/articles/CBMikgFBVV95cUxON0ZKeU5zNm9RTkN3aEVhZThtd2lUZEVUazBjcGxxUkpwY1ZuY2Ywa0JKOVdrNWE3S3JSeHJOblJMTUR2SHRYY0hTTWozV1NKUHk3UjlIUk5lVGZYelY5am1Ld0xncE55NFNrWW9iSFJPWUNRcmtDVlgtOWdCWmZMaDZUWWdmS0pocVNhaXJWVUdPZw?oc=5"
   ],
   "seen_titles": [
     "81ad2659c044ab5b3959bd5bf50991b824ba9f7027554127e94c3dceb4216621",
@@ -50,7 +51,8 @@
     "50e58375516c3a633a3d3389c7c26e65f24f44f2d7b8add396d7802c53fee1c3",
     "85c4c0ac01c1c4311513a28bca0c7187531b11726b4ccefd78504f3ce13eebd4",
     "87794ebfca3641e7108a91b5cbb2fc855f3f83fe1ddbba232a9dddf623212cf0",
-    "b47f7e654319de63bc970f409ae95384b18e75c01da4fb829af3b4bb7526d5b5"
+    "b47f7e654319de63bc970f409ae95384b18e75c01da4fb829af3b4bb7526d5b5",
+    "Khu vực Nha Trang: Giá thuê nhà tăng mạnh - Báo Khánh Hòa"
   ],
   "manual_posts": [],
   "last_update_id": 420020168,
@@ -67,13 +69,15 @@
   "paused": false,
   "pause_until": "",
   "daily_counts": {
-    "2026-10-24": 3
+    "2026-10-24": 4
   },
   "last_slots": {
     "weather_morning": "2026-10-24",
     "weather_evening": "2026-10-24"
   },
   "game_history": [],
-  "last_news_hour": "2026-10-24-20",
-  "seen_fingerprints": []
+  "last_news_hour": "2026-10-24-21",
+  "seen_fingerprints": [
+    "daeaad4357dd60ca5edb9bfef3860995a6c5ffb5d2597484f3c8b464002ab6ec"
+  ]
 }

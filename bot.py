@@ -1,5 +1,6 @@
 
 import os
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -34,10 +35,14 @@ def send_message(text):
         "parse_mode": "HTML",
         "disable_web_page_preview": "true"
     }).encode()
-    with urllib.request.urlopen(url, data=data, timeout=20) as response:
-        result = response.read().decode()
-        if '"ok":true' not in result:
-            raise RuntimeError(result)
+
+    try:
+        with urllib.request.urlopen(url, data=data, timeout=20) as response:
+            print(response.read().decode())
+    except urllib.error.HTTPError as exc:
+        print("Telegram API error:", exc.code)
+        print(exc.read().decode())
+        raise
 
 def main():
     seen = set()

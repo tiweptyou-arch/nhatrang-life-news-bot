@@ -6,6 +6,9 @@ from zoneinfo import ZoneInfo
 TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 CHANNEL = os.environ.get('TELEGRAM_CHAT_ID', '@NhaTrangLifeNews')
 ADMIN_USER_ID = os.environ.get('ADMIN_USER_ID', '').strip()
+# Allowed private-chat managers. The environment ID remains supported for compatibility.
+ADMIN_USER_IDS = {x.strip() for x in os.environ.get('ADMIN_USER_IDS', '1335496436,8563451956').split(',') if x.strip()}
+if ADMIN_USER_ID: ADMIN_USER_IDS.add(ADMIN_USER_ID)
 TZ = ZoneInfo('Asia/Ho_Chi_Minh')
 STATE_FILE = 'bot_state.json'
 SUBSCRIBE_URL = 'https://t.me/NhaTrangLifeNews'
@@ -36,6 +39,12 @@ def api(method, data=None):
     with urllib.request.urlopen(req, timeout=25) as r: result = json.loads(r.read().decode())
     if not result.get('ok'): raise RuntimeError(f'Telegram API {method}: {result}')
     return result['result']
+
+def main_menu():
+    return {'keyboard': [[{'text':'📰 Новости'}, {'text':'📥 Предложить пост'}], [{'text':'📣 Добавить рекламу'}, {'text':'📋 Активная реклама'}], [{'text':'📊 Статус'}, {'text':'⏸ Пауза / ▶️ Продолжить'}]], 'resize_keyboard': True, 'is_persistent': True}
+
+def ad_actions(ad_id):
+    return {'inline_keyboard': [[{'text':'🗑 Удалить сейчас','callback_data':f'ad_delete:{ad_id}'}, {'text':'📌 Открепить','callback_data':f'ad_unpin:{ad_id}'}]]}
 
 def send_dm(user_id, text, markup=None):
     data = {'chat_id': user_id, 'text': text, 'parse_mode':'HTML', 'disable_web_page_preview':'true'}
@@ -173,7 +182,7 @@ def is_paused(s): return top_pause_until(s) > now()
 
 def handle_admin_message(msg,s):
     user = msg.get('from') or {}; uid = str(user.get('id',''))
-    if not ADMIN_USER_ID or uid != ADMIN_USER_ID: return
+    if uid not in ADMIN_USER_IDS: return
     chat_id = str((msg.get('chat') or {}).get('id',''))
     if chat_id != uid: return  # management is private-chat only
     text = (msg.get('text') or msg.get('caption') or '').strip()
@@ -192,17 +201,20 @@ def handle_admin_message(msg,s):
         pending.update(content); pending['awaiting_content']=False; s['pending_ad']=pending
         send_dm(uid, f'Черновик готов. Формат <b>{pending["format"]}</b>.\n\nПубликуем сейчас: /publish\nОтложить: /schedule ГГГГ-ММ-ДД ЧЧ:ММ\nОтменить: /cancel')
         return
+    aliases = {'📰 Новости':'/newsqueue', '📥 Предложить пост':'/suggest', '📣 Добавить рекламу':'/ad', '📋 Активная реклама':'/ads', '📊 Статус':'/status', '⏸ Пауза / ▶️ Продолжить':'/togglepause'}
+    if text in aliases: text = aliases[text]
     parts=text.split(maxsplit=1); cmd=parts[0].split('@')[0].lower() if parts else ''
     arg=parts[1].strip() if len(parts)>1 else ''
     if cmd in ('/start','/menu','/help'):
-        send_dm(uid, '<b>Панель Нячанг Лайф</b>\n/ad 1/24 — создать рекламу\n/publish — опубликовать черновик\n/schedule 2026-10-25 14:30 — отложить черновик\n/ads — активные и запланированные рекламы\n/cancelad ID — удалить рекламу досрочно\n/editad ID | новый текст — изменить подпись рекламы\n/pause — остановить новости вручную\n/resume — снять ручную паузу\n/status — статус бота\n/cancel — отменить черновик\n/delete ID — удалить пост по ID из списка реклам\n/preview — прислать предпросмотр черновика')
+        send_dm(uid, '<b>Панель Нячанг Лайф</b>\nВыбери действие кнопками ниже.\n\nРеклама: /ad 1/24 → отправь содержимое → /preview → /publish.\nДругие команды: /ads, /status, /pause, /resume, /cancel.', main_menu())
     elif cmd=='/ad':
+        if not arg: arg='1/24'
         m=re.fullmatch(r'(\d{1,2})\s*/\s*(\d{1,3})',arg)
-        if not m: send_dm(uid,'Формат: <code>/ad 1/24</code> — 1 час без новостей, удаление через 24 часа.'); return
+        if not m: send_dm(uid,'Формат: <code>/ad 1/24</code> — 1 час без новостей, удаление через 24 часа.', main_menu()); return
         top_hours, life_hours=map(int,m.groups())
         if not (1<=top_hours<=72 and top_hours<=life_hours<=720): send_dm(uid,'Допустимо: время в топе 1–72 часа, срок жизни не меньше времени в топе и не больше 720 часов.'); return
         s['pending_ad']={'format':f'{top_hours}/{life_hours}','top_hours':top_hours,'life_hours':life_hours,'awaiting_content':True}
-        send_dm(uid,f'Пришли следующим сообщением рекламный текст, фото или видео.\nФормат: <b>{top_hours}/{life_hours}</b>.\nПервые {top_hours} ч. бот не будет публиковать обычные новости; реклама удалится через {life_hours} ч.\n/cancel — отмена.')
+        send_dm(uid,f'Пришли следующим сообщением рекламный текст, фото или видео.\nФормат: <b>{top_hours}/{life_hours}</b>.\nПервые {top_hours} ч. бот не будет публиковать обычные новости и рубрики; реклама удалится через {life_hours} ч.\n/cancel — отмена.', main_menu())
     elif cmd=='/preview':
         ad=s.get('pending_ad') or {}
         if not ad or ad.get('awaiting_content') or not (ad.get('text') or ad.get('file_id')):
@@ -226,12 +238,23 @@ def handle_admin_message(msg,s):
         ad['scheduled_at']=iso(when); ad['awaiting_content']=False; ad['id']=str(int(time.time()))
         s['ads'].append(ad); s['pending_ad']={}
         send_dm(uid,f'Реклама запланирована на {when.strftime("%d.%m.%Y %H:%M")} по времени Нячанга. ID: <code>{ad["id"]}</code>.')
+    elif cmd=='/togglepause':
+        s['paused']=not s.get('paused',False); s['pause_until']=iso(now()+timedelta(days=3650)) if s['paused'] else ''
+        send_dm(uid, 'Пауза включена: обычные посты остановлены.' if s['paused'] else 'Ручная пауза снята. Рекламная пауза, если действует, сохранится.', main_menu())
+    elif cmd=='/suggest':
+        s['pending_manual_post']={'user_id':uid,'awaiting_content':True}
+        send_dm(uid,'Пришли текст новости, ссылку и при необходимости фото/видео. Это пока только черновик; публикация появится после отдельного этапа проверки.', main_menu())
+    elif cmd=='/newsqueue':
+        send_dm(uid,'Очередь проверки новостей пока будет добавлена следующим этапом. Сейчас можно управлять рекламой и статусом кнопками.', main_menu())
     elif cmd=='/ads':
         rows=[]
         for a in s['ads'][-30:]:
             status='удалена' if a.get('deleted') else ('запланирована на '+parse_dt(a['scheduled_at']).strftime('%d.%m %H:%M') if a.get('scheduled_at') and not a.get('message_id') else 'активна')
             rows.append(f'ID <code>{a.get("id","?")}</code> · {a.get("format","?")} · {status}')
-        send_dm(uid,'<b>Реклама</b>\n'+'\n'.join(rows) if rows else 'Реклам пока нет.')
+        send_dm(uid,'<b>Реклама</b>\n'+'\n'.join(rows) if rows else 'Реклам пока нет.', main_menu())
+        for a in s['ads'][-10:]:
+            if a.get('message_id') and not a.get('deleted'):
+                send_dm(uid, f'Реклама ID <code>{a.get("id","?")}</code> · удаление: {parse_dt(a["expires_at"]).strftime("%d.%m %H:%M") if a.get("expires_at") else "не задано"} · закрепление можно проверить кнопкой ниже.', ad_actions(a.get('id','?')))
     elif cmd=='/editad':
         if '|' not in arg: send_dm(uid,'Формат: <code>/editad ID | новый текст</code>'); return
         target,new_text=arg.split('|',1); target=target.strip(); new_text=new_text.strip()
@@ -277,6 +300,18 @@ def publish_ad(ad,s,uid=None):
     s['pending_ad']={}; bump_today(s)
     if uid: send_dm(uid,f'Опубликовано! ID: <code>{ad["id"]}</code>. Окно без новостей до {parse_dt(ad["top_until"]).strftime("%d.%m %H:%M")}; автоматическое удаление {parse_dt(ad["expires_at"]).strftime("%d.%m %H:%M")} (Нячанг).')
 
+def delete_ad_message(ad):
+    chat_id = ad.get('chat_id', CHANNEL)
+    message_ids = ad.get('message_ids') or ([ad['message_id']] if ad.get('message_id') else [])
+    errors = []
+    for mid in message_ids:
+        # Unpin explicitly first. If it was not pinned, Telegram returns an error; deletion still proceeds.
+        try: api('unpinChatMessage', {'chat_id': chat_id, 'message_id': mid})
+        except Exception as e: print('Unpin skipped/failed for', mid, e)
+        try: api('deleteMessage', {'chat_id': chat_id, 'message_id': mid})
+        except Exception as e: errors.append(f'{mid}: {e}')
+    if errors: raise RuntimeError('; '.join(errors))
+
 def process_ad_timers(s):
     for ad in s['ads']:
         if ad.get('deleted'): continue
@@ -285,23 +320,49 @@ def process_ad_timers(s):
             except Exception as e: print('Scheduled ad error',ad.get('id'),e)
         if ad.get('message_id') and ad.get('expires_at') and parse_dt(ad['expires_at'])<=now():
             try:
-                api('deleteMessage',{'chat_id':ad.get('chat_id',CHANNEL),'message_id':ad['message_id']})
+                delete_ad_message(ad)
                 ad['deleted']=True; ad['deleted_at']=iso(now()); print('Deleted expired ad',ad.get('id'))
             except Exception as e:
                 # Retry on next workflow run; Telegram may reject old/already deleted messages.
                 print('Ad deletion error',ad.get('id'),e)
 
+def handle_callback(q,s):
+    user=q.get('from') or {}; uid=str(user.get('id',''))
+    if uid not in ADMIN_USER_IDS: return
+    data=q.get('data',''); msg=q.get('message') or {}
+    if str((msg.get('chat') or {}).get('id','')) != uid: return
+    try:
+        if data.startswith('ad_delete:'):
+            target=data.split(':',1)[1]; ad=next((a for a in s['ads'] if str(a.get('id'))==target and not a.get('deleted')),None)
+            if not ad: send_dm(uid,'Реклама не найдена или уже удалена.',main_menu()); return
+            delete_ad_message(ad); ad['deleted']=True; ad['deleted_at']=iso(now()); send_dm(uid,f'Реклама {target} удалена и откреплена, если была закреплена.',main_menu())
+        elif data.startswith('ad_unpin:'):
+            target=data.split(':',1)[1]; ad=next((a for a in s['ads'] if str(a.get('id'))==target and not a.get('deleted')),None)
+            if not ad: send_dm(uid,'Реклама не найдена или уже удалена.',main_menu()); return
+            for mid in (ad.get('message_ids') or [ad.get('message_id')]):
+                if mid:
+                    try: api('unpinChatMessage',{'chat_id':ad.get('chat_id',CHANNEL),'message_id':mid})
+                    except Exception as e: print('Unpin action:',e)
+            send_dm(uid,f'Команда открепления выполнена для рекламы {target}.',main_menu())
+    except Exception as e: send_dm(uid,'Не удалось выполнить действие. Проверь права бота и журнал GitHub Actions.'); print('Callback error:',e)
+    try: api('answerCallbackQuery',{'callback_query_id':q['id']})
+    except Exception: pass
+
 def get_updates(s):
     try:
-        updates=api('getUpdates',{'offset':int(s.get('last_update_id',0))+1,'timeout':0,'allowed_updates':json.dumps(['message'])})
+        updates=api('getUpdates',{'offset':int(s.get('last_update_id',0))+1,'timeout':0,'allowed_updates':json.dumps(['message','callback_query'])})
     except Exception as e:
         print('getUpdates error:',e); return
     for u in updates:
         s['last_update_id']=max(int(s.get('last_update_id',0)),int(u['update_id']))
         msg=u.get('message')
-        if msg: 
+        if msg:
             try: handle_admin_message(msg,s)
             except Exception as e: print('Admin command error:',e)
+        callback=u.get('callback_query')
+        if callback:
+            try: handle_callback(callback,s)
+            except Exception as e: print('Admin callback error:',e)
 
 def slot_once(s,key):
     day=now().date().isoformat(); return s['last_slots'].get(key)==day

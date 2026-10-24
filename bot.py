@@ -47,7 +47,7 @@ def load_state():
         with open(STATE_FILE, encoding='utf-8') as f: s = json.load(f)
     except (OSError, json.JSONDecodeError): s = {}
     defaults = {
-      'seen_links': [], 'seen_titles': [], 'last_update_id': 0, 'pending_ad': {},
+      'seen_links': [], 'seen_titles': [], 'seen_fingerprints': [], 'last_update_id': 0, 'pending_ad': {},
       'ads': [], 'paused': False, 'pause_until': '', 'daily_counts': {}, 'last_slots': {},
       'game_history': [], 'last_news_hour': '', 'manual_posts': []
     }
@@ -60,6 +60,66 @@ def save_state(s):
 def clean(value):
     value = re.sub(r'<[^>]+>',' ',value or '')
     return re.sub(r'\s+',' ',html.unescape(value)).strip()
+
+def normalized_title(value):
+    value = clean(value).casefold()
+    value = re.sub(r'https?://\S+', ' ', value)
+    value = re.sub(r'[^a-zа-яё0-9\s]', ' ', value)
+    return re.sub(r'\s+', ' ', value).strip()
+
+def title_fingerprint(value):
+    # Stable title fingerprint catches duplicate articles even if RSS URLs differ.
+    words = [w for w in normalized_title(value).split() if len(w) > 2]
+    return hashlib.sha256(' '.join(words).encode('utf-8')).hexdigest()
+
+def is_duplicate_news(s, title, link):
+    norm = normalized_title(title)
+    fp = title_fingerprint(title)
+    if link in s.get('seen_links', []) or fp in s.get('seen_fingerprints', []):
+        return True
+    # Catch near-identical titles from different RSS feeds.
+    words = set(norm.split())
+    if len(words) >= 5:
+        for old in s.get('seen_titles', [])[-300:]:
+            old_words = set(normalized_title(old).split())
+            if not old_words: continue
+            overlap = len(words & old_words) / max(1, min(len(words), len(old_words)))
+            if overlap >= 0.82:
+                return True
+    return False
+
+def commons_image(query):
+    """Find a reusable Wikimedia Commons thumbnail for atmosphere/illustration only."""
+    try:
+        params = urllib.parse.urlencode({
+            'action':'query','generator':'search','gsrsearch':query+' filetype:bitmap',
+            'gsrnamespace':6,'gsrlimit':8,'prop':'imageinfo','iiprop':'url|extmetadata',
+            'iiurlwidth':1000,'format':'json'
+        })
+        data=json.loads(get_url('https://commons.wikimedia.org/w/api.php?'+params).decode())
+        pages=(data.get('query') or {}).get('pages') or {}
+        for page in pages.values():
+            info=(page.get('imageinfo') or [{}])[0]
+            url=info.get('thumburl') or info.get('url')
+            if url and url.lower().split('?')[0].endswith(('.jpg','.jpeg','.png','.webp')):
+                return url
+    except Exception as e:
+        print('Commons image search error:',e)
+    return None
+
+def post_with_image(text, image_url=None, illustration=False):
+    """Publish image and caption together; fall back to text if photo sending fails."""
+    if image_url:
+        caption=text
+        if illustration:
+            # Explicitly avoid implying a stock image depicts the reported event.
+            caption=caption.replace(FOOTER, '📷 Фото: иллюстрация\n\n'+FOOTER)
+        if len(caption) <= 1024:
+            try:
+                return api('sendPhoto', {'chat_id':CHANNEL,'photo':image_url,'caption':caption,'parse_mode':'HTML'})
+            except Exception as e:
+                print('Photo send failed, fallback to text:',e)
+    return post_text(text)
 
 def translate(text):
     text = clean(text)
@@ -135,7 +195,7 @@ def handle_admin_message(msg,s):
     parts=text.split(maxsplit=1); cmd=parts[0].split('@')[0].lower() if parts else ''
     arg=parts[1].strip() if len(parts)>1 else ''
     if cmd in ('/start','/menu','/help'):
-        send_dm(uid, '<b>Панель Нячанг Лайф</b>\n/ad 1/24 — создать рекламу\n/publish — опубликовать черновик\n/schedule 2026-10-25 14:30 — отложить черновик\n/ads — активные и запланированные рекламы\n/cancelad ID — удалить рекламу досрочно\n/editad ID | новый текст — изменить подпись рекламы\n/pause — остановить новости вручную\n/resume — снять ручную паузу\n/status — статус бота\n/cancel — отменить черновик\n/delete ID — удалить пост по ID из списка реклам')
+        send_dm(uid, '<b>Панель Нячанг Лайф</b>\n/ad 1/24 — создать рекламу\n/publish — опубликовать черновик\n/schedule 2026-10-25 14:30 — отложить черновик\n/ads — активные и запланированные рекламы\n/cancelad ID — удалить рекламу досрочно\n/editad ID | новый текст — изменить подпись рекламы\n/pause — остановить новости вручную\n/resume — снять ручную паузу\n/status — статус бота\n/cancel — отменить черновик\n/delete ID — удалить пост по ID из списка реклам\n/preview — прислать предпросмотр черновика')
     elif cmd=='/ad':
         m=re.fullmatch(r'(\d{1,2})\s*/\s*(\d{1,3})',arg)
         if not m: send_dm(uid,'Формат: <code>/ad 1/24</code> — 1 час без новостей, удаление через 24 часа.'); return
@@ -143,6 +203,14 @@ def handle_admin_message(msg,s):
         if not (1<=top_hours<=72 and top_hours<=life_hours<=720): send_dm(uid,'Допустимо: время в топе 1–72 часа, срок жизни не меньше времени в топе и не больше 720 часов.'); return
         s['pending_ad']={'format':f'{top_hours}/{life_hours}','top_hours':top_hours,'life_hours':life_hours,'awaiting_content':True}
         send_dm(uid,f'Пришли следующим сообщением рекламный текст, фото или видео.\nФормат: <b>{top_hours}/{life_hours}</b>.\nПервые {top_hours} ч. бот не будет публиковать обычные новости; реклама удалится через {life_hours} ч.\n/cancel — отмена.')
+    elif cmd=='/preview':
+        ad=s.get('pending_ad') or {}
+        if not ad or ad.get('awaiting_content') or not (ad.get('text') or ad.get('file_id')):
+            send_dm(uid,'Сначала создай черновик через /ad 1/24 и отправь содержимое.'); return
+        preview=(ad.get('text') or '') + footer()
+        if ad.get('type')=='photo': api('sendPhoto',{'chat_id':uid,'photo':ad['file_id'],'caption':preview[:1024],'parse_mode':'HTML'})
+        elif ad.get('type')=='video': api('sendVideo',{'chat_id':uid,'video':ad['file_id'],'caption':preview[:1024],'parse_mode':'HTML'})
+        else: send_dm(uid,preview)
     elif cmd=='/publish':
         ad=s.get('pending_ad') or {}
         if not ad or ad.get('awaiting_content') or not ad.get('text','') and not ad.get('file_id'):
@@ -244,16 +312,17 @@ def routine_posts(s):
     n=now(); hour=n.hour; minute=n.minute
     if is_paused(s): return
     # The fixed routine posts are counted against the daily 10-post cap.
-    if hour==6 and minute>=30 and not slot_once(s,'morning') and count_today(s)<10:
+    if hour==6 and 30<=minute<35 and not slot_once(s,'morning') and count_today(s)<10:
         greetings=[
           '🌅 <b>Нячанг просыпается</b>\n\nПусть утро будет спокойным, кофе — вкусным, а планы — приятными. Как настроение? ☕\n\n👍 — уже на ногах\n😴 — ещё просыпаюсь',
           '🌤️ <b>Новое утро у моря</b>\n\nЖелаем лёгкого старта и побольше хороших новостей сегодня. Что выбираешь?\n\n☕ — сначала кофе\n🌊 — хочу к морю',
           '☀️ <b>Доброе утро, Нячанг!</b>\n\nГород начинает новый день — пусть у вас он сложится удачно. Какие планы?\n\n🚶 — прогуляться\n💻 — рабочий день'
         ]
         idx=int(n.strftime('%j'))%len(greetings)
-        post_text(greetings[idx]+footer()); bump_today(s); mark_slot(s,'morning')
+        img=commons_image('Nha Trang Vietnam beach sunrise')
+        post_with_image(greetings[idx]+footer(), img, illustration=bool(img)); bump_today(s); mark_slot(s,'morning')
     # Weather handled separately at 08:00 and 18:00.
-    if hour>=22 and minute>=30 and not slot_once(s,'night') and count_today(s)<10:
+    if hour==22 and 30<=minute<35 and not slot_once(s,'night') and count_today(s)<10:
         words=['Сериал','Кофе','Море','Закат','Монтаж','Пальма','Волна','Нячанг','Дождь','Кокос','Билет','Путешествие','Музыка','Ветер','Лагуна']
         idx=(int(n.strftime('%j'))*7)%len(words); word=words[idx]
         hist=s.get('game_history',[])
@@ -262,12 +331,17 @@ def routine_posts(s):
             if candidate.casefold() not in [x.casefold() for x in hist[-14:]]: word=candidate; break
         next_letter=word[-1].upper()
         if next_letter in 'ЬЪЫ': next_letter=word[-2].upper()
-        post_text(f'🌙 <b>Доброй ночи!</b>\n\nПеред сном давайте поиграем в слова! Мы начинаем:\n\n«{html.escape(word)}» — вам на «{html.escape(next_letter)}»!'+footer())
+        night_text=f'🌙 <b>Доброй ночи!</b>\n\nПеред сном давайте поиграем в слова! Мы начинаем:\n\n«{html.escape(word)}» — вам на «{html.escape(next_letter)}»!'+footer()
+        img=commons_image('Nha Trang Vietnam night beach city')
+        post_with_image(night_text, img, illustration=bool(img))
         s['game_history']=(hist+[word])[-100:]; bump_today(s); mark_slot(s,'night')
 
 def weather_post(s,period):
     key='weather_'+period
     if slot_once(s,key) or count_today(s)>=10 or is_paused(s): return
+    n=now()
+    if period=='morning' and not (n.hour==8 and 0<=n.minute<10): return
+    if period=='evening' and not (n.hour==18 and 0<=n.minute<10): return
     n=now()
     url=('https://api.open-meteo.com/v1/forecast?latitude=12.2388&longitude=109.1967'
          '&current=temperature_2m,apparent_temperature,weather_code'
@@ -281,7 +355,9 @@ def weather_post(s,period):
         title='Погода в Нячанге на сегодня' if period=='morning' else 'Погода в Нячанге: вечер и завтра'
         extra=(f'Сейчас: {round(cur["temperature_2m"])}°C, {names.get(cc,"переменная погода")} {icons.get(cc,"🌤️")} (ощущается как {round(cur["apparent_temperature"])}°C).\n' if period=='morning' else f'Сейчас: {round(cur["temperature_2m"])}°C. Завтра: {names.get(code,"переменная погода")} {icons.get(code,"🌤️")}.\n')
         advice='Возьми зонт или дождевик, если собираешься надолго выходить.' if rain is not None and rain>=40 else 'Не забудь воду и защиту от солнца в дневные часы.'
-        post_text(f'{"☀️" if period=="morning" else "🌆"} <b>{title}</b>\n\n{extra}Температура: {round(daily["temperature_2m_min"][i])}–{round(daily["temperature_2m_max"][i])}°C.\nВероятность осадков: {str(rain)+"%" if rain is not None else "нет данных"}.\n\n{advice}'+footer())
+        weather_text=f'{"☀️" if period=="morning" else "🌆"} <b>{title}</b>\n\n{extra}Температура: {round(daily["temperature_2m_min"][i])}–{round(daily["temperature_2m_max"][i])}°C.\nВероятность осадков: {str(rain)+"%" if rain is not None else "нет данных"}.\n\n{advice}\n\nКак вам такая погода? Оставьте реакцию ☀️ или 🌧️.'+footer()
+        img=commons_image('Nha Trang Vietnam beach weather sea')
+        post_with_image(weather_text, img, illustration=bool(img))
         bump_today(s); mark_slot(s,key)
     except Exception as e: print('Weather error:',e)
 
@@ -299,10 +375,19 @@ def publish_news(s):
                 title=clean(item.findtext('title')); desc=clean(item.findtext('description')); link=(item.findtext('link') or '').strip()
                 if not title or not desc or not link or link in links: continue
                 links.add(link); combined=(title+' '+desc).casefold()
-                if any(k in combined for k in KEYWORDS): items.append((title,desc,link))
+                if any(k in combined for k in KEYWORDS):
+                    image_url=None
+                    for node in list(item):
+                        tag=node.tag.lower()
+                        if tag.endswith('}content') or tag.endswith('}thumbnail') or tag.endswith('enclosure'):
+                            candidate=node.attrib.get('url') or node.attrib.get('href')
+                            typ=node.attrib.get('type','')
+                            if candidate and (typ.startswith('image/') or re.search(r'\.(jpg|jpeg|png|webp)(\?|$)',candidate,re.I)):
+                                image_url=candidate; break
+                    items.append((title,desc,link,image_url))
         except Exception as e: print('Feed error:',e)
-    for title,desc,link in items:
-        if link in s['seen_links']: continue
+    for title,desc,link,image_url in items:
+        if is_duplicate_news(s, title, link): continue
         headline=translate(re.split(r'\s[-–|]\s',title,maxsplit=1)[0])
         summary=translate(desc)
         if not headline or not summary: continue
@@ -310,8 +395,18 @@ def publish_news(s):
         if len(summary)<60: continue
         if len(summary)>600: summary=summary[:597].rsplit(' ',1)[0]+'…'
         emoji='⚠️' if any(x in (headline+' '+summary).casefold() for x in ['шторм','наводнен','пожар','авари','опасност','предупрежден']) else '📰'
-        post_text(f'{emoji} <b>{html.escape(headline[:180])}</b>\n\n{html.escape(summary)}'+footer())
-        s['seen_links']=(s['seen_links']+[link])[-500:]; bump_today(s); s['last_news_hour']=hour_key
+        news_text=f'{emoji} <b>{html.escape(headline[:180])}</b>\n\n{html.escape(summary)}\n\nЧто думаете об этой новости? Оставьте реакцию 👀'+footer()
+        if not image_url:
+            # Generic city image is clearly marked as an illustration, never presented as event evidence.
+            image_url=commons_image('Nha Trang Vietnam city street beach')
+            illustration=bool(image_url)
+        else:
+            illustration=False
+        post_with_image(news_text, image_url, illustration=illustration)
+        s['seen_links']=(s['seen_links']+[link])[-1000:]
+        s['seen_titles']=(s['seen_titles']+[title])[-500:]
+        s['seen_fingerprints']=(s['seen_fingerprints']+[title_fingerprint(title)])[-1000:]
+        bump_today(s); s['last_news_hour']=hour_key
         print('Published news:',headline); return
 
 def main():
@@ -322,8 +417,8 @@ def main():
     if not is_paused(s):
         n=now()
         routine_posts(s)
-        if n.hour>=8: weather_post(s,'morning')
-        if n.hour>=18: weather_post(s,'evening')
+        weather_post(s,'morning')
+        weather_post(s,'evening')
         publish_news(s)
     save_state(s)
     print('Finished:',now().isoformat(),'posts_today=',count_today(s),'paused=',is_paused(s))

@@ -11,8 +11,8 @@ TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHANNEL = os.environ["TELEGRAM_CHAT_ID"]
 
 FEEDS = [
-    "https://news.google.com/rss/search?q=Nha+Trang+Vietnam&hl=en-US&gl=US&ceid=US:en",
-    "https://news.google.com/rss/search?q=Khanh+Hoa+Vietnam&hl=en-US&gl=US&ceid=US:en",
+    "https://news.google.com/rss/search?q=Nha+Trang&hl=vi&gl=VN&ceid=VN:vi",
+    "https://news.google.com/rss/search?q=Kh%C3%A1nh+H%C3%B2a&hl=vi&gl=VN&ceid=VN:vi",
 ]
 
 KEYWORDS = [

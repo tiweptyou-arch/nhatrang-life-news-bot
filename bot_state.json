@@ -69,5 +69,6 @@
     "weather_evening": "2026-10-24"
   },
   "game_history": [],
-  "last_news_hour": "2026-10-24-20"
+  "last_news_hour": "2026-10-24-20",
+  "seen_fingerprints": []
 }

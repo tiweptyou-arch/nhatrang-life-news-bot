@@ -59,7 +59,7 @@
     "120 triệu tặng 2 nữ SV Nha Trang mồ côi, làm lụng không ngừng để đi vào được đại học - Tuổi Trẻ"
   ],
   "manual_posts": [],
-  "last_update_id": 420020170,
+  "last_update_id": 420020173,
   "last_weather_date": "2026-10-24",
   "last_weather_morning_date": "2026-10-24",
   "last_weather_evening_date": "2026-10-24",
@@ -67,7 +67,8 @@
     "format": "1/24",
     "top_hours": 1,
     "life_hours": 24,
-    "awaiting_content": true
+    "awaiting_content": false,
+    "text": "📊 Статус"
   },
   "ads": [],
   "paused": false,

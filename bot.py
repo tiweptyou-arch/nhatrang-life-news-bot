@@ -897,15 +897,17 @@ def handle_callback(q,s):
 
 
 def ensure_polling_no_webhook():
-    """Fail safe if a webhook is configured; never remove another integration's webhook automatically."""
-    info = api('getWebhookInfo')
+    """Return whether polling is safe. Never disable a webhook or stop scheduled posts."""
+    try:
+        info = api('getWebhookInfo')
+    except Exception as e:
+        print('Could not verify webhook status; polling skipped this run:', type(e).__name__)
+        return False
     webhook_url = (info or {}).get('url') or ''
     if webhook_url.strip():
         print('Webhook is configured; polling skipped and webhook left unchanged.')
-        raise RuntimeError(
-            'У Telegram-бота настроен webhook, который конфликтует с getUpdates. '
-            'Webhook не отключён автоматически; сначала проверь, какой сервис его использует.'
-        )
+        return False
+    return True
 
 
 def get_updates(s):
@@ -1215,8 +1217,10 @@ def publish_news(s):
 
 def main():
     s = load_state()
-    ensure_polling_no_webhook()
-    get_updates(s)
+    if ensure_polling_no_webhook():
+        get_updates(s)
+    else:
+        print('Admin polling skipped; scheduled content and ad timers will still run.')
     process_ad_timers(s)
     if not is_paused(s):
         routine_posts(s)

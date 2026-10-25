@@ -418,7 +418,7 @@ def normalize_image_url(candidate, base_url=''):
     """Return a safe absolute image URL, rejecting obvious logos and tracking pixels."""
     if not isinstance(candidate, str):
         return None
-    candidate = html.unescape(candidate.strip()).replace('\\\\/', '/')
+    candidate = html.unescape(candidate.strip()).replace('\\/', '/')
     if not candidate:
         return None
     if candidate.startswith('//'):
@@ -451,7 +451,7 @@ def extract_rss_image(item, article_url=''):
                 candidates.append(raw)
     raw_description = item.findtext('description') or ''
     decoded_description = html.unescape(raw_description)
-    for match in re.finditer(r'<img\\b[^>]*(?:src|data-src)\\s*=\\s*(["\\'])(.*?)\\1', decoded_description, re.I | re.S):
+    for match in re.finditer(r'<img\b[^>]*(?:src|data-src)\s*=\s*(["\'])(.*?)\1', decoded_description, re.I | re.S):
         candidates.append(match.group(2))
     for candidate in candidates:
         normalized = normalize_image_url(candidate, article_url)
@@ -465,10 +465,10 @@ def extract_article_image(page_html, article_url=''):
     if not page_html:
         return None
     meta_candidates = []
-    for tag in re.findall(r'<meta\\b[^>]*>', page_html, re.I | re.S):
+    for tag in re.findall(r'<meta\b[^>]*>', page_html, re.I | re.S):
         attrs = {
             key.casefold(): html.unescape(value)
-            for key, _, value in re.findall(r'([\\w:-]+)\\s*=\\s*(["\\'])(.*?)\\2', tag, re.I | re.S)
+            for key, _, value in re.findall(r'([\w:-]+)\s*=\s*(["\'])(.*?)\2', tag, re.I | re.S)
         }
         key = (attrs.get('property') or attrs.get('name') or attrs.get('itemprop') or '').casefold()
         if key in ('og:image', 'og:image:url', 'twitter:image', 'twitter:image:src', 'image'):
@@ -481,15 +481,15 @@ def extract_article_image(page_html, article_url=''):
             return normalized
 
     # Some local publishers omit Open Graph metadata; use a substantial image inside <article>.
-    article_match = re.search(r'<article\\b[^>]*>(.*?)</article>', page_html, re.I | re.S)
+    article_match = re.search(r'<article\b[^>]*>(.*?)</article>', page_html, re.I | re.S)
     area = article_match.group(1) if article_match else page_html
-    for tag in re.findall(r'<img\\b[^>]*>', area, re.I | re.S)[:20]:
+    for tag in re.findall(r'<img\b[^>]*>', area, re.I | re.S)[:20]:
         attrs = {
             key.casefold(): html.unescape(value)
-            for key, _, value in re.findall(r'([\\w:-]+)\\s*=\\s*(["\\'])(.*?)\\2', tag, re.I | re.S)
+            for key, _, value in re.findall(r'([\w:-]+)\s*=\s*(["\'])(.*?)\2', tag, re.I | re.S)
         }
-        width = re.sub(r'\\D', '', attrs.get('width', ''))
-        height = re.sub(r'\\D', '', attrs.get('height', ''))
+        width = re.sub(r'\D', '', attrs.get('width', ''))
+        height = re.sub(r'\D', '', attrs.get('height', ''))
         if width and int(width) < 250:
             continue
         if height and int(height) < 150:
@@ -503,10 +503,10 @@ def extract_article_image(page_html, article_url=''):
 
 def split_photo_caption(text, limit=900):
     """Split text into a Telegram photo caption and a continuation without cutting markup."""
-    paragraphs = [part.strip() for part in re.split(r'\\n\\s*\\n', (text or '').strip()) if part.strip()]
+    paragraphs = [part.strip() for part in re.split(r'\n\s*\n', (text or '').strip()) if part.strip()]
     caption_parts, remaining = [], []
     for index, paragraph in enumerate(paragraphs):
-        candidate = paragraph if not caption_parts else '\\n\\n'.join(caption_parts + [paragraph])
+        candidate = paragraph if not caption_parts else '\n\n'.join(caption_parts + [paragraph])
         if len(candidate) <= limit:
             caption_parts.append(paragraph)
             continue
@@ -529,8 +529,8 @@ def split_photo_caption(text, limit=900):
         else:
             remaining = paragraphs[index:]
         break
-    caption = '\\n\\n'.join(caption_parts).strip()
-    continuation = '\\n\\n'.join(remaining).strip()
+    caption = '\n\n'.join(caption_parts).strip()
+    continuation = '\n\n'.join(remaining).strip()
     return caption, continuation
 
 
@@ -620,41 +620,38 @@ def split_html_text(text, limit=3900):
 
 
 
+
 def post_with_image(text, image_url=None, illustration=False, image_query=None):
-    """Publish a photo-led post, preferring the article photo and falling back to a topical illustration."""
+    """Publish a photo-led post: article image first, topical illustration as fallback."""
     if not text or not text.strip():
         return None
-
-    original_text = text
     query = image_query or news_image_query('', clean(text))
-    candidates = []
-    if image_url:
-        candidates.append(image_url)
-    # Always have a topical fallback if the article's photo is absent or Telegram cannot fetch it.
-    fallback = commons_image(query)
-    if fallback:
-        if not any(
-            (x.get('url') if isinstance(x, dict) else x) == (fallback.get('url') if isinstance(fallback, dict) else fallback)
-            for x in candidates
-        ):
-            candidates.append(fallback)
+    candidates = [image_url] if image_url else []
+    fallback_loaded = False
 
-    result = None
-    used_candidate = None
-    for candidate in candidates:
+    while True:
+        if not candidates and not fallback_loaded:
+            fallback_loaded = True
+            fallback = commons_image(query)
+            if fallback:
+                candidates.append(fallback)
+        if not candidates:
+            break
+
+        candidate = candidates.pop(0)
         photo_url = candidate.get('url') if isinstance(candidate, dict) else candidate
         photo_url = normalize_image_url(photo_url)
         if not photo_url:
             continue
-        content = original_text
+
+        content = text
         credit = candidate.get('credit_html') if isinstance(candidate, dict) else None
         if credit:
             if FOOTER in content:
-                content = content.replace(FOOTER, '\\n\\n' + credit + FOOTER, 1)
+                content = content.replace(FOOTER, '\n\n' + credit + FOOTER, 1)
             else:
-                content = content.rstrip() + '\\n\\n' + credit
-        caption_limit = 800 if credit else 950
-        caption, continuation = split_photo_caption(content, limit=caption_limit)
+                content = content.rstrip() + '\n\n' + credit
+        caption, continuation = split_photo_caption(content, limit=800 if credit else 950)
         if not caption:
             caption = '🇻🇳 Новости Нячанга'
         try:
@@ -662,20 +659,23 @@ def post_with_image(text, image_url=None, illustration=False, image_query=None):
                 'chat_id': CHANNEL, 'photo': photo_url,
                 'caption': caption, 'parse_mode': 'HTML'
             })
-            used_candidate = candidate
             if continuation:
                 for part in split_html_text(continuation, limit=3900):
                     post_text(part)
                     time.sleep(0.2)
             return result
         except Exception as e:
-            print('Photo send failed; trying the next image:', type(e).__name__)
+            print('Photo send failed; trying a topical fallback:', type(e).__name__)
+            if not fallback_loaded:
+                fallback_loaded = True
+                fallback = commons_image(query)
+                if fallback:
+                    candidates.append(fallback)
 
     # Last-resort delivery protects urgent information if every image host is unavailable.
-    # With healthy image sources the normal path always publishes a picture.
     print('No usable image could be sent; publishing text fallback.')
     result = None
-    for part in split_html_text(original_text, limit=3900):
+    for part in split_html_text(text, limit=3900):
         result = post_text(part)
         time.sleep(0.2)
     return result
@@ -1459,9 +1459,9 @@ def routine_posts(s):
 
     if n.hour == 6 and 0 <= n.minute < 5 and not slot_once(s, 'morning'):
         greetings = [
-            '☀️ Доброе утро, Нячанг! Пусть день начнётся спокойно. Вы уже проснулись?\\n\\n👍 — уже на ногах\\n❤️ — проснулся, но ещё не включился\\n🙏 — пусть день будет хорошим.',
-            '☀️ Доброе утро! Какой план на сегодня?\\n\\n👍 — дела и работа\\n❤️ — море и прогулка\\n🙏 — пока хочу ещё поспать.',
-            '☀️ Доброе утро, Нячанг! Желаю лёгкого дня и хороших новостей. Как настроение?\\n\\n❤️ — всё отлично\\n👍 — постепенно просыпаюсь\\n🙏 — нужен спокойный день.'
+            '☀️ Доброе утро, Нячанг! Пусть день начнётся спокойно. Вы уже проснулись?\n\n👍 — уже на ногах\n❤️ — проснулся, но ещё не включился\n🙏 — пусть день будет хорошим.',
+            '☀️ Доброе утро! Какой план на сегодня?\n\n👍 — дела и работа\n❤️ — море и прогулка\n🙏 — пока хочу ещё поспать.',
+            '☀️ Доброе утро, Нячанг! Желаю лёгкого дня и хороших новостей. Как настроение?\n\n❤️ — всё отлично\n👍 — постепенно просыпаюсь\n🙏 — нужен спокойный день.'
         ]
         text = greetings[int(n.strftime('%j')) % len(greetings)] + footer()
         post_with_image(text, image_query='Nha Trang Vietnam sunrise coastal city beach')
@@ -1482,7 +1482,7 @@ def routine_posts(s):
         summary = clean_multiline(item.get('summary', ''))
         if not summary:
             continue
-        first_sentence = re.split(r'(?<=[.!?])\\s+', summary.replace('\\n', ' '), maxsplit=1)[0]
+        first_sentence = re.split(r'(?<=[.!?])\s+', summary.replace('\n', ' '), maxsplit=1)[0]
         if len(first_sentence) > 260:
             first_sentence = first_sentence[:257].rsplit(' ', 1)[0] + '…'
         if first_sentence and first_sentence not in recap:
@@ -1519,7 +1519,7 @@ def routine_posts(s):
     if tomorrow_warning:
         parts.append(tomorrow_warning)
     parts.append('Перед сном выбери реакцию: ❤️ — день удался; 🙏 — завтра хочется спокойствия; 🤣 — сегодня было над чем посмеяться.')
-    text = '\\n\\n'.join(parts) + footer()
+    text = '\n\n'.join(parts) + footer()
     post_with_image(text, image_query='Nha Trang Vietnam night city beach coastline')
     bump_today(s)
     mark_slot(s, 'night')
@@ -1577,7 +1577,7 @@ def weather_post(s, period):
         else:
             advice = 'Перед длительной поездкой проверь прогноз ещё раз.'
 
-        text = current_text + '\\n' + forecast_text + '\\n' + rain_text + '\\n\\n' + advice
+        text = current_text + '\n' + forecast_text + '\n' + rain_text + '\n\n' + advice
         if period == 'morning':
             cutoff = n - timedelta(hours=24)
             recent = []
@@ -1591,19 +1591,19 @@ def weather_post(s, period):
             snippets = []
             for entry in recent[-3:]:
                 summary = clean_multiline(entry.get('summary', ''))
-                first_sentence = re.split(r'(?<=[.!?])\\s+', summary.replace('\\n', ' '), maxsplit=1)[0]
+                first_sentence = re.split(r'(?<=[.!?])\s+', summary.replace('\n', ' '), maxsplit=1)[0]
                 if len(first_sentence) > 220:
                     first_sentence = first_sentence[:217].rsplit(' ', 1)[0] + '…'
                 if first_sentence and first_sentence not in snippets:
                     snippets.append(first_sentence)
             if snippets:
-                text += '\\n\\nЗа последние сутки: ' + ' '.join(snippets)
+                text += '\n\nЗа последние сутки: ' + ' '.join(snippets)
             image_query = 'Nha Trang Vietnam morning weather city coastal view'
         elif rain is not None and rain >= 35:
             image_query = 'Nha Trang Vietnam rainy weather wet street tropical rain'
         else:
             image_query = 'Nha Trang Vietnam coastal city weather seaside'
-        text += '\\n\\n👍 — прогноз полезен; ❤️ — следим за погодой вместе.' + footer()
+        text += '\n\n👍 — прогноз полезен; ❤️ — следим за погодой вместе.' + footer()
         post_with_image(text, image_query=image_query)
         bump_today(s)
         mark_slot(s, key)

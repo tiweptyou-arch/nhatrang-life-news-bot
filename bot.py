@@ -14,7 +14,14 @@ STATE_FILE = 'bot_state.json'
 SUBSCRIBE_URL = 'https://t.me/NhaTrangLifeNews'
 SUGGEST_URL = 'https://t.me/fsfinesed'
 FOOTER = f'🇻🇳 <a href="{SUBSCRIBE_URL}">ПОДПИСАТЬСЯ</a> | <a href="{SUGGEST_URL}">ПРЕДЛОЖИТЬ НОВОСТЬ</a>'
+# Official local sources are searched first. Google News RSS is used only as a lightweight
+# discovery layer; the published link remains the original publisher's URL.
 FEEDS = [
+ 'https://news.google.com/rss/search?q=site%3Akhanhhoa.gov.vn+Nha+Trang&hl=vi&gl=VN&ceid=VN:vi',
+ 'https://news.google.com/rss/search?q=site%3Anhatrang.khanhhoa.gov.vn+Nha+Trang&hl=vi&gl=VN&ceid=VN:vi',
+ 'https://news.google.com/rss/search?q=site%3Anews.baokhanhhoa.vn+Nha+Trang&hl=vi&gl=VN&ceid=VN:vi',
+ 'https://news.google.com/rss/search?q=site%3Acongan.khanhhoa.gov.vn+Kh%C3%A1nh+H%C3%B2a&hl=vi&gl=VN&ceid=VN:vi',
+ 'https://news.google.com/rss/search?q=site%3Akhituongvietnam.gov.vn+Kh%C3%A1nh+H%C3%B2a&hl=vi&gl=VN&ceid=VN:vi',
  'https://news.google.com/rss/search?q=Nha+Trang&hl=vi&gl=VN&ceid=VN:vi',
  'https://news.google.com/rss/search?q=Kh%C3%A1nh+H%C3%B2a&hl=vi&gl=VN&ceid=VN:vi',
  'https://news.google.com/rss/search?q=Nha+Trang+Kh%C3%A1nh+H%C3%B2a&hl=en&gl=US&ceid=US:en',
@@ -42,7 +49,7 @@ def parse_dt_strict(value):
 
 def get_url(url):
     req = urllib.request.Request(url, headers={'User-Agent':'Mozilla/5.0 NhaTrangLifeNewsBot/2.0'})
-    with urllib.request.urlopen(req, timeout=20) as r: return r.read()
+    with urllib.request.urlopen(req, timeout=12) as r: return r.read()
 
 def api(method, data=None):
     """Call Telegram without putting the secret bot token in exception messages or logs."""
@@ -179,6 +186,8 @@ PRACTICAL_NEWS_TERMS = (
     'miễn phí', 'dịch vụ công', 'giờ hoạt động', 'bãi biển', 'cấm tắm biển',
     'thực phẩm', 'giá xăng', 'giá cả', 'chi phí sinh hoạt', 'bất động sản',
     'động đất', 'dịch vụ', 'lễ hội', 'sự kiện', 'đình chỉ', 'thu hồi',
+    'thông báo', 'hướng dẫn', 'thủ tục', 'cải cách hành chính', 'quyết định',
+    'lệ phí', 'đường dây nóng', 'phân phối nước', 'lịch cúp điện', 'xét nghiệm',
     # English-language sources need the same practical-life filter.
     'weather', 'heavy rain', 'flood warning', 'typhoon', 'storm warning', 'road closure',
     'traffic', 'public transport', 'bus route', 'airport', 'hospital', 'clinic', 'pharmacy',

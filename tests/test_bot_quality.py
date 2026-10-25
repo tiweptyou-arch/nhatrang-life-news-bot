@@ -221,6 +221,23 @@ class NewsQualityTests(unittest.TestCase):
         ]
         self.assertEqual(len(deleted), 3)
 
+    def test_admin_can_pin_published_ad(self):
+        uid = "1335496436"
+        state = {"ads": [{"id": "ad-1", "message_id": 301, "message_ids": [301, 302], "chat_id": -1001}]}
+        callback = {
+            "id": "callback-1",
+            "from": {"id": int(uid)},
+            "data": "ad_pin:ad-1",
+            "message": {"chat": {"id": int(uid)}}
+        }
+        with patch.object(bot, "api", return_value={}) as api_mock:
+            with patch.object(bot, "send_dm") as send_dm_mock:
+                bot.handle_callback(callback, state)
+        self.assertEqual(api_mock.call_args_list[0].args[0], "pinChatMessage")
+        self.assertEqual(api_mock.call_args_list[0].args[1]["message_id"], 301)
+        send_dm_mock.assert_called()
+        self.assertIn("📌 Закрепить", str(bot.ad_actions("ad-1")))
+
     def test_invalid_ad_timestamps_never_publish_or_delete_automatically(self):
         state = {
             "ads": [

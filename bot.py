@@ -33,12 +33,21 @@ def get_url(url):
     with urllib.request.urlopen(req, timeout=20) as r: return r.read()
 
 def api(method, data=None):
+    """Call Telegram without putting the secret bot token in exception messages or logs."""
     url = f'https://api.telegram.org/bot{TOKEN}/{method}'
     body = urllib.parse.urlencode(data or {}).encode() if data is not None else None
-    req = urllib.request.Request(url, data=body, headers={'User-Agent':'Mozilla/5.0'})
-    with urllib.request.urlopen(req, timeout=25) as r: result = json.loads(r.read().decode())
-    if not result.get('ok'): raise RuntimeError(f'Telegram API {method}: {result}')
+    req = urllib.request.Request(url, data=body, headers={'User-Agent': 'Mozilla/5.0'})
+    try:
+        with urllib.request.urlopen(req, timeout=25) as response:
+            result = json.loads(response.read().decode())
+    except Exception as e:
+        # urllib exceptions can include the full request URL, which contains the bot token.
+        raise RuntimeError(f'Telegram API {method} transport error ({type(e).__name__})') from None
+    if not result.get('ok'):
+        description = result.get('description') or 'unknown Telegram API error'
+        raise RuntimeError(f'Telegram API {method} failed: {description}')
     return result['result']
+
 
 def main_menu():
     return {'keyboard': [[{'text':'📰 Новости'}, {'text':'📥 Предложить пост'}], [{'text':'📣 Добавить рекламу'}, {'text':'📋 Активная реклама'}], [{'text':'📊 Статус'}, {'text':'⏸ Пауза / ▶️ Продолжить'}]], 'resize_keyboard': True, 'is_persistent': True}
@@ -101,9 +110,22 @@ def save_state(s):
             pass
 
 
+
 def clean(value):
-    value = re.sub(r'<[^>]+>',' ',value or '')
-    return re.sub(r'\s+',' ',html.unescape(value)).strip()
+    value = re.sub(r'<[^>]+>', ' ', value or '')
+    return re.sub(r'\\s+', ' ', html.unescape(value)).strip()
+
+
+def clean_multiline(value):
+    """Remove markup while preserving paragraph boundaries in long articles."""
+    value = re.sub(r'<(script|style|noscript|svg)\\b[^>]*>.*?</\\1>', ' ', value or '', flags=re.I | re.S)
+    value = re.sub(r'<br\\s*/?>|</(p|div|li|h[1-6])\\s*>', '\\n\\n', value, flags=re.I)
+    value = re.sub(r'<[^>]+>', ' ', value)
+    value = html.unescape(value)
+    value = re.sub(r'[ \\t\\r\\f\\v]+', ' ', value)
+    value = re.sub(r' *\\n *', '\\n', value)
+    value = re.sub(r'\\n{3,}', '\\n\\n', value)
+    return value.strip()
 
 
 def normalized_title(value):
@@ -188,12 +210,15 @@ def is_urgent_news(text):
     return any(contains_term(value, term) for term in URGENT_NEWS_TERMS)
 
 
+
 def remove_repeated_lead(headline, body):
-    """Remove a repeated first sentence while keeping later facts and context."""
-    body = clean(body)
+    """Remove a repeated first sentence while preserving remaining facts and paragraphs."""
+    body = clean_multiline(body)
     if not body:
         return ''
-    sentences = re.split(r'(?<=[.!?…])\s+', body, maxsplit=1)
+    paragraphs = body.split('\\n\\n')
+    first_paragraph = paragraphs[0].strip()
+    sentences = re.split(r'(?<=[.!?…])\\s+', first_paragraph, maxsplit=1)
     first = sentences[0].strip()
     h_words = set(normalized_title(headline).split())
     f_words = set(normalized_title(first).split())
@@ -202,7 +227,12 @@ def remove_repeated_lead(headline, body):
         same_start = normalized_title(first) == normalized_title(headline)
         similar_length = len(f_words) <= max(8, int(len(h_words) * 1.35))
         if same_start or (jaccard >= 0.78 and similar_length):
-            return sentences[1].strip() if len(sentences) > 1 else ''
+            remainder = sentences[1].strip() if len(sentences) > 1 else ''
+            if remainder:
+                paragraphs[0] = remainder
+            else:
+                paragraphs = paragraphs[1:]
+            return '\\n\\n'.join(p.strip() for p in paragraphs if p.strip())
     return body
 
 
@@ -1016,7 +1046,7 @@ def publish_news(s):
                     raw_article = '\n'.join(paragraphs[:35])
                 raw_article = re.sub(r'<(script|style|noscript|svg)\b[^>]*>.*?</\1>', ' ', raw_article, flags=re.I | re.S)
                 raw_article = re.sub(r'</?(p|div|br|li|h[1-6])\b[^>]*>', '\n', raw_article, flags=re.I)
-                raw_article = clean(raw_article)
+                raw_article = clean_multiline(raw_article)
                 if len(raw_article) > len(desc) + 100:
                     translated_body = translate(raw_article)
             except Exception as e:

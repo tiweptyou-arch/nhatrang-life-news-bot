@@ -595,7 +595,7 @@ class NewsQualityTests(unittest.TestCase):
         commons_mock.assert_not_called()
         queue_mock.assert_called_once()
         candidate = queue_mock.call_args.args[1]
-        self.assertIn("Город объявил", candidate["body"])
+        self.assertIn("Местные власти объявили", candidate["body"])
         self.assertNotIn("Ремонт дороги в жилом районе Нячанга", candidate["body"])
         self.assertNotIn("publisher.example/story-123", candidate["body"])
         self.assertNotIn("<b>", candidate["body"])

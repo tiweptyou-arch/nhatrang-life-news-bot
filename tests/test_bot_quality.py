@@ -181,9 +181,9 @@ class NewsQualityTests(unittest.TestCase):
                 {"id": "bad-expiry", "message_id": 301, "expires_at": "not-a-date"},
             ]
         }
-        with patch.object(bot, "publish_ad") as publish_mock, \\
-             patch.object(bot, "delete_ad_message") as delete_mock:
-            bot.process_ad_timers(state)
+        with patch.object(bot, "publish_ad") as publish_mock:
+            with patch.object(bot, "delete_ad_message") as delete_mock:
+                bot.process_ad_timers(state)
         publish_mock.assert_not_called()
         delete_mock.assert_not_called()
 

@@ -412,7 +412,12 @@ def commons_image(query):
             # Skip files whose licence cannot be identified. CC BY variants also need an author credit.
             if not license_name or not page_url:
                 continue
-            if ('cc by' in license_name.casefold() or 'cc-by' in license_name.casefold()) and not artist:
+            license_normalized = license_name.casefold().replace('_', '-')
+            license_reference = (license_url or '').casefold()
+            # The channel may be monetized: reject non-commercial licences.
+            if re.search(r'\\bnon[ -]?commercial\\b|\\bnc\\b|by-nc', license_normalized + ' ' + license_reference):
+                continue
+            if ('cc by' in license_normalized or 'cc-by' in license_normalized) and not artist:
                 continue
             credits = ['📷 Иллюстрация: <a href="' + html.escape(page_url, quote=True) + '">Wikimedia Commons</a>']
             if artist:
@@ -736,7 +741,33 @@ def publish_manual_post(item, s, uid=None):
 
     post_type = item.get('type') or 'text'
     file_id = item.get('file_id')
-    if post_type in ('photo', 'video') and file_id:
+    if post_type == 'album' and item.get('media_items'):
+        media_items = item.get('media_items') or []
+        if len(media_items) < 2:
+            raise ValueError('В альбоме должно быть минимум два фото или видео.')
+        body_excerpt = body[:420].strip()
+        caption = lead + ('\\n\\n' + html.escape(body_excerpt) if body_excerpt else '') + footer()
+        if len(caption) > 1024:
+            raise ValueError('Подпись альбома превышает лимит Telegram 1024 символа.')
+        media = []
+        for media_item in media_items[:10]:
+            if media_item.get('type') not in ('photo', 'video') or not media_item.get('file_id'):
+                continue
+            element = {'type': media_item['type'], 'media': media_item['file_id']}
+            if not media:
+                element['caption'] = caption
+                element['parse_mode'] = 'HTML'
+            media.append(element)
+        if len(media) < 2:
+            raise ValueError('В альбоме должно быть минимум два допустимых медиафайла.')
+        album_result = api('sendMediaGroup', {'chat_id': CHANNEL, 'media': json.dumps(media, ensure_ascii=False)})
+        item['published_message_ids'] = [message.get('message_id') for message in (album_result or []) if message.get('message_id')]
+        result = {'message_id': item['published_message_ids'][0]} if item.get('published_message_ids') else None
+        if len(body) > 420:
+            for part in split_html_text(html.escape(body[420:].strip())):
+                post_text(part)
+                time.sleep(0.2)
+    elif post_type in ('photo', 'video') and file_id:
         # Use a compact caption while sending the full remainder as follow-up text.
         body_excerpt = ''
         remainder = body
@@ -750,8 +781,10 @@ def publish_manual_post(item, s, uid=None):
             body_excerpt, remainder = body, ''
         caption = lead
         if body_excerpt:
-            caption += '\n\n' + html.escape(body_excerpt)
+            caption += '\\n\\n' + html.escape(body_excerpt)
         caption += footer()
+        if len(caption) > 1024:
+            raise ValueError('Подпись к медиа превышает лимит Telegram 1024 символа.')
         method, field = ('sendPhoto', 'photo') if post_type == 'photo' else ('sendVideo', 'video')
         result = api(method, {
             'chat_id': CHANNEL, field: file_id,
@@ -793,7 +826,7 @@ def publish_manual_post(item, s, uid=None):
 
 
 def handle_admin_album(messages, s):
-    """Treat a Telegram media group as one ad draft, retaining every media file ID."""
+    """Capture a Telegram media group as one manual tip or one ad draft."""
     if not messages:
         return
     messages = sorted(messages, key=lambda m: int(m.get('message_id', 0)))
@@ -801,6 +834,32 @@ def handle_admin_album(messages, s):
     uid = str(((first.get('from') or {}).get('id', '')))
     if uid not in ADMIN_USER_IDS or str((first.get('chat') or {}).get('id', '')) != uid:
         return
+
+    manual_pending = s.get('pending_manual_post') or {}
+    if manual_pending.get('awaiting_content'):
+        media_items = []
+        for msg in messages:
+            if msg.get('photo'):
+                media_items.append({'type': 'photo', 'file_id': msg['photo'][-1]['file_id']})
+            elif msg.get('video'):
+                media_items.append({'type': 'video', 'file_id': msg['video']['file_id']})
+        content = (first.get('caption') or '').strip()
+        if not content:
+            content = next(((m.get('caption') or '').strip() for m in messages if (m.get('caption') or '').strip()), '')
+        if not content:
+            send_dm(uid, 'Добавь заголовок или описание к альбому и отправь его снова. Для отмены: /cancel')
+            return
+        item_id = f'{uid}-{first.get("message_id") or int(time.time() * 1000)}'
+        s.setdefault('manual_posts', []).append({
+            'id': item_id, 'status': 'pending', 'content': content,
+            'type': 'album', 'media_items': media_items,
+            'submitted_by': uid, 'created_at': iso(now())
+        })
+        s['pending_manual_post'] = {}
+        send_dm(uid, f'Альбом добавлен в очередь проверки. ID: <code>{html.escape(item_id)}</code>.\\n'
+                     'Посмотреть очередь: /newsqueue\\nОпубликовать: /approve ID\\nОтклонить: /reject ID')
+        return
+
     pending = s.get('pending_ad') or {}
     if not pending.get('awaiting_content'):
         return
@@ -813,7 +872,6 @@ def handle_admin_album(messages, s):
             media_items.append({'type': 'video', 'file_id': msg['video']['file_id'],
                                 'caption': html.escape((msg.get('caption') or '').strip())})
     if len(media_items) < 2:
-        # A one-item media group is handled by the normal message path.
         handle_admin_message(first, s)
         return
     first_caption = (first.get('caption') or '').strip()
@@ -824,9 +882,9 @@ def handle_admin_album(messages, s):
         'awaiting_content': False
     })
     s['pending_ad'] = pending
-    send_dm(uid, f'Черновик альбома готов: {len(media_items)} медиафайла.\n'
-                 f'Проверь содержимое через /preview.\nПубликуем: /publish\n'
-                 f'Отложить: /schedule ГГГГ-ММ-ДД ЧЧ:ММ\nОтменить: /cancel')
+    send_dm(uid, f'Черновик альбома готов: {len(media_items)} медиафайла.\\n'
+                 f'Проверь содержимое через /preview.\\nПубликуем: /publish\\n'
+                 f'Отложить: /schedule ГГГГ-ММ-ДД ЧЧ:ММ\\nОтменить: /cancel')
 
 
 def handle_admin_message(msg,s):

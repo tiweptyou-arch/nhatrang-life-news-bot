@@ -41,5 +41,27 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add bot_state.json
-          git diff --cached --quiet || git commit -m "Update bot state"
-          git push
+          if git diff --cached --quiet; then
+            echo "Bot state has not changed."
+            exit 0
+          fi
+          git commit -m "Update bot state"
+
+          # Retry non-fast-forward/network failures. If bot_state.json conflicts with
+          # a concurrent manual change, fail rather than replacing someone else's data.
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              echo "Bot state saved."
+              exit 0
+            fi
+            echo "Push attempt $attempt failed; fetching latest main and retrying."
+            git fetch origin main
+            if ! git rebase origin/main; then
+              git rebase --abort || true
+              echo "::error::Could not safely rebase bot state. No conflicting state was overwritten."
+              exit 1
+            fi
+          done
+
+          echo "::error::Could not save bot state after 3 attempts."
+          exit 1

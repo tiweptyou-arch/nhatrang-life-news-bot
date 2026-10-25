@@ -488,6 +488,67 @@ class NewsQualityTests(unittest.TestCase):
         publish_mock.assert_not_called()
         self.assertEqual(state["pending_news_review"]["id"], "rv-test")
 
+
+    def test_due_review_publishes_once_and_updates_published_news_history(self):
+        uid = 1335496436
+        current = datetime(2026, 10, 26, 10, 30, tzinfo=bot.TZ)
+        item = {
+            "id": "rv-publish-1", "kind": "news", "status": "pending_review",
+            "title": "Ремонт дороги в Нячанге",
+            "source_title": "Nha Trang announces road repairs",
+            "body": "Местные власти объявили о ремонте дороги в Нячанге. Жителям стоит учитывать изменения движения.",
+            "link": "https://publisher.example/road-repair",
+            "source_published_at": current.isoformat(),
+            "image_file_id": "reviewed-photo-file",
+            "image_query": "Nha Trang Vietnam road repairs",
+            "planned_at": (current - timedelta(seconds=1)).isoformat(),
+            "preview_messages": [],
+            "urgent": False
+        }
+        state = {
+            "pending_news_review": item, "review_editing": {},
+            "seen_links": [], "seen_titles": [], "seen_fingerprints": [],
+            "published_news": [], "daily_counts": {}, "last_slots": {}
+        }
+        with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "post_with_image", return_value={"message_id": 990}) as post_mock, \
+             patch.object(bot, "delete_review_previews"), \
+             patch.object(bot, "send_dm"), \
+             patch.object(bot, "bump_today"):
+            bot.publish_review_item(state, item)
+        post_mock.assert_called_once()
+        posted_text = post_mock.call_args.args[0]
+        self.assertIn("Местные власти объявили", posted_text)
+        self.assertNotIn("Nha Trang announces road repairs", posted_text)
+        self.assertNotIn("publisher.example/road-repair", posted_text)
+        self.assertEqual(post_mock.call_args.kwargs["image_file_id"], "reviewed-photo-file")
+        self.assertEqual(state["pending_news_review"], {})
+        self.assertEqual(state["published_news"][0]["link"], "https://publisher.example/road-repair")
+        self.assertEqual(state["published_news"][0]["summary"], item["body"])
+        self.assertIn("https://publisher.example/road-repair", state["seen_links"])
+
+    def test_review_timer_publishes_at_due_time_and_marks_routine_slot(self):
+        current = datetime(2026, 10, 26, 8, 0, tzinfo=bot.TZ)
+        item = {
+            "id": "rv-weather-1", "kind": "weather_morning", "status": "pending_review",
+            "planned_at": (current - timedelta(seconds=1)).isoformat(),
+            "slot_key": "weather_morning"
+        }
+        state = {"pending_news_review": item, "paused": False, "pause_until": "", "last_slots": {}}
+
+        def fake_publish(saved_state, queued_item):
+            saved_state["pending_news_review"] = {}
+            return {"message_id": 991}
+
+        with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "is_paused", return_value=False), \
+             patch.object(bot, "publish_review_item", side_effect=fake_publish) as publish_mock, \
+             patch.object(bot, "mark_slot") as mark_mock:
+            bot.process_news_review(state)
+        publish_mock.assert_called_once_with(state, item)
+        mark_mock.assert_called_once_with(state, "weather_morning")
+        self.assertEqual(state["pending_news_review"], {})
+
     def test_rejected_review_is_never_queued_again_from_same_source(self):
         uid = 1335496436
         item = {

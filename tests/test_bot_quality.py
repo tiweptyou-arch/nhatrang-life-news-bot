@@ -2,6 +2,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from unittest.mock import call, patch
 from urllib.parse import parse_qs, urlparse
 
@@ -10,6 +11,29 @@ import bot  # noqa: E402
 
 
 class NewsQualityTests(unittest.TestCase):
+    def test_parse_rss_publication_date(self):
+        parsed = bot.parse_source_date("Sun, 25 Oct 2026 10:00:00 GMT")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.hour, 17)
+        self.assertEqual(parsed.tzinfo, bot.TZ)
+
+    def test_iso_source_publication_date_is_supported(self):
+        parsed = bot.parse_source_date("2026-10-25T10:00:00Z")
+        self.assertEqual(parsed.hour, 17)
+
+    def test_unknown_or_stale_source_date_is_rejected(self):
+        current = datetime(2026, 10, 25, 12, 0, tzinfo=bot.TZ)
+        self.assertFalse(bot.is_recent_source_date(None, current))
+        self.assertFalse(bot.is_recent_source_date(current - timedelta(hours=73), current))
+        self.assertFalse(bot.is_recent_source_date(current - timedelta(hours=25), current, urgent=True))
+
+    def test_recent_source_date_limits_and_future_clock_tolerance(self):
+        current = datetime(2026, 10, 25, 12, 0, tzinfo=bot.TZ)
+        self.assertTrue(bot.is_recent_source_date(current - timedelta(hours=71), current))
+        self.assertTrue(bot.is_recent_source_date(current - timedelta(hours=23), current, urgent=True))
+        self.assertFalse(bot.is_recent_source_date(current + timedelta(minutes=20), current))
+        self.assertTrue(bot.is_recent_source_date(current + timedelta(minutes=10), current))
+
     def test_practical_local_story_is_kept(self):
         self.assertTrue(bot.is_relevant_news(
             "Khánh Hòa cảnh báo mưa lớn tại Nha Trang",

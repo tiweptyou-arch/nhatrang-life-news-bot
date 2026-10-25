@@ -360,6 +360,88 @@ class NewsQualityTests(unittest.TestCase):
         )
 
 
+
+    def test_morning_routine_posts_greeting_at_six_with_reaction_choices(self):
+        current = datetime(2026, 10, 26, 6, 2, tzinfo=bot.TZ)
+        state = {"published_news": [], "daily_counts": {}, "last_slots": {}}
+        with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "is_paused", return_value=False), \
+             patch.object(bot, "count_today", return_value=0), \
+             patch.object(bot, "slot_once", return_value=False), \
+             patch.object(bot, "post_with_image") as post_mock, \
+             patch.object(bot, "bump_today"), \
+             patch.object(bot, "mark_slot") as mark_mock:
+            bot.routine_posts(state)
+        post_mock.assert_called_once()
+        text = post_mock.call_args.args[0]
+        self.assertIn("Доброе утро", text)
+        self.assertIn("👍", text)
+        self.assertIn("❤️", text)
+        self.assertIn("🙏", text)
+        self.assertIn("image_query", post_mock.call_args.kwargs)
+        mark_mock.assert_called_once_with(state, "morning")
+
+    def test_night_routine_includes_goodnight_and_interaction(self):
+        current = datetime(2026, 10, 26, 22, 32, tzinfo=bot.TZ)
+        state = {"published_news": [], "daily_counts": {}, "last_slots": {}}
+        with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "is_paused", return_value=False), \
+             patch.object(bot, "count_today", return_value=0), \
+             patch.object(bot, "slot_once", return_value=False), \
+             patch.object(bot, "get_url", side_effect=OSError("offline")), \
+             patch.object(bot, "post_with_image") as post_mock, \
+             patch.object(bot, "bump_today"), \
+             patch.object(bot, "mark_slot") as mark_mock:
+            bot.routine_posts(state)
+        post_mock.assert_called_once()
+        text = post_mock.call_args.args[0]
+        self.assertIn("Доброй ночи", text)
+        self.assertIn("выбери реакцию", text)
+        self.assertIn("❤️", text)
+        self.assertIn("🙏", text)
+        self.assertIn("🤣", text)
+        self.assertIn("image_query", post_mock.call_args.kwargs)
+        mark_mock.assert_called_once_with(state, "night")
+
+    def test_morning_weather_is_scheduled_for_eight_not_six_thirty(self):
+        early = datetime(2026, 10, 26, 6, 32, tzinfo=bot.TZ)
+        state = {"daily_counts": {}, "last_slots": {}, "published_news": []}
+        with patch.object(bot, "now", return_value=early), \
+             patch.object(bot, "slot_once", return_value=False), \
+             patch.object(bot, "count_today", return_value=0), \
+             patch.object(bot, "is_paused", return_value=False), \
+             patch.object(bot, "get_url") as get_mock, \
+             patch.object(bot, "post_with_image") as post_mock:
+            bot.weather_post(state, "morning")
+        get_mock.assert_not_called()
+        post_mock.assert_not_called()
+
+        current = datetime(2026, 10, 26, 8, 2, tzinfo=bot.TZ)
+        forecast = {
+            "current": {"temperature_2m": 28, "apparent_temperature": 32, "weather_code": 2},
+            "daily": {
+                "weather_code": [2, 3],
+                "temperature_2m_min": [25, 26],
+                "temperature_2m_max": [31, 30],
+                "precipitation_probability_max": [20, 55]
+            }
+        }
+        with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "slot_once", return_value=False), \
+             patch.object(bot, "count_today", return_value=0), \
+             patch.object(bot, "is_paused", return_value=False), \
+             patch.object(bot, "get_url", return_value=json.dumps(forecast).encode("utf-8")), \
+             patch.object(bot, "post_with_image") as post_mock, \
+             patch.object(bot, "bump_today"), \
+             patch.object(bot, "mark_slot"):
+            bot.weather_post(state, "morning")
+        post_mock.assert_called_once()
+        text = post_mock.call_args.args[0]
+        self.assertIn("Сейчас в Нячанге", text)
+        self.assertIn("Сегодня ожидается", text)
+        self.assertNotIn("<b>", text)
+        self.assertIn("image_query", post_mock.call_args.kwargs)
+
     def test_limit_news_body_is_concise_and_removes_urls(self):
         source = ("Первая важная информация для жителей города. " * 30) + " https://publisher.example/story "
         result = bot.limit_news_body(source, max_chars=600)

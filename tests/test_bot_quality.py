@@ -429,6 +429,38 @@ class NewsQualityTests(unittest.TestCase):
         send_dm_mock.assert_called()
         self.assertIn("📌 Закрепить", str(bot.ad_actions("ad-1")))
 
+    def test_scheduled_ad_failure_notifies_owner_once_and_retries(self):
+        uid = "1335496436"
+        ad = {
+            "id": "scheduled-1", "created_by": uid,
+            "scheduled_at": bot.iso(bot.now() - timedelta(minutes=2)),
+            "top_hours": 1, "life_hours": 24, "text": "Scheduled ad"
+        }
+        state = {"ads": [ad]}
+        with patch.object(bot, "publish_ad", side_effect=RuntimeError("test publish failure")) as publish_mock:
+            with patch.object(bot, "send_dm") as send_mock:
+                bot.process_ad_timers(state)
+                bot.process_ad_timers(state)
+        self.assertEqual(publish_mock.call_count, 2)
+        self.assertTrue(ad["_publish_error_notified"])
+        self.assertEqual(send_mock.call_count, 1)
+
+    def test_ad_expiry_failure_notifies_owner_once(self):
+        uid = "1335496436"
+        ad = {
+            "id": "expiry-1", "created_by": uid, "message_id": 900,
+            "message_ids": [900], "chat_id": -1001,
+            "expires_at": bot.iso(bot.now() - timedelta(minutes=2))
+        }
+        state = {"ads": [ad]}
+        with patch.object(bot, "delete_ad_message", side_effect=RuntimeError("test delete failure")) as delete_mock:
+            with patch.object(bot, "send_dm") as send_mock:
+                bot.process_ad_timers(state)
+                bot.process_ad_timers(state)
+        self.assertEqual(delete_mock.call_count, 2)
+        self.assertTrue(ad["_expiry_error_notified"])
+        self.assertEqual(send_mock.call_count, 1)
+
     def test_invalid_ad_timestamps_never_publish_or_delete_automatically(self):
         state = {
             "ads": [

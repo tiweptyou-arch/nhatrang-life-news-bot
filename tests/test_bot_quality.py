@@ -353,7 +353,9 @@ class NewsQualityTests(unittest.TestCase):
              patch.object(bot.time, "sleep"):
             bot.post_with_image(post, image)
         self.assertEqual(api_mock.call_args.args[0], "sendPhoto")
-        self.assertIn("📷 Изображение — иллюстрация", api_mock.call_args.args[1]["caption"])
+        caption = api_mock.call_args.args[1]["caption"]
+        self.assertIn("📷 Иллюстрация:", caption)
+        self.assertNotIn("📷 Изображение — иллюстрация", caption)
         text_mock.assert_not_called()
 
     def test_translation_preserves_paragraph_boundaries(self):

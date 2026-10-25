@@ -439,16 +439,23 @@ def normalize_image_url(candidate, base_url=''):
     return candidate
 
 
+
 def extract_rss_image(item, article_url=''):
     """Prefer image media embedded in the source RSS item over stock illustrations."""
     candidates = []
     for node in list(item):
         tag = node.tag.rsplit('}', 1)[-1].casefold()
-        if tag in ('content', 'thumbnail', 'enclosure', 'image'):
-            media_type = (node.attrib.get('type') or '').casefold()
-            raw = node.attrib.get('url') or node.attrib.get('href') or node.attrib.get('src')
-            if raw and (media_type.startswith('image/') or tag in ('content', 'thumbnail', 'image', 'enclosure')):
-                candidates.append(raw)
+        raw = node.attrib.get('url') or node.attrib.get('href') or node.attrib.get('src')
+        media_type = (node.attrib.get('type') or '').casefold()
+        if not raw:
+            continue
+        is_image_type = media_type.startswith('image/')
+        image_extension = bool(re.search(r'\.(?:jpe?g|png|webp|gif)(?:[?#]|$)', raw, re.I))
+        if tag in ('content', 'thumbnail', 'image') and (is_image_type or image_extension):
+            candidates.append(raw)
+        elif tag == 'enclosure' and (is_image_type or image_extension):
+            candidates.append(raw)
+
     raw_description = item.findtext('description') or ''
     decoded_description = html.unescape(raw_description)
     for match in re.finditer(r'<img\b[^>]*(?:src|data-src)\s*=\s*(["\'])(.*?)\1', decoded_description, re.I | re.S):
@@ -461,26 +468,32 @@ def extract_rss_image(item, article_url=''):
 
 
 def extract_article_image(page_html, article_url=''):
-    """Prefer Open Graph/Twitter image metadata from the original article page."""
+    """Prefer Open Graph image, then Twitter metadata, then a substantial article image."""
     if not page_html:
         return None
-    meta_candidates = []
+    meta_candidates = {'og': [], 'twitter': [], 'other': []}
     for tag in re.findall(r'<meta\b[^>]*>', page_html, re.I | re.S):
         attrs = {
             key.casefold(): html.unescape(value)
             for key, _, value in re.findall(r'([\w:-]+)\s*=\s*(["\'])(.*?)\2', tag, re.I | re.S)
         }
         key = (attrs.get('property') or attrs.get('name') or attrs.get('itemprop') or '').casefold()
-        if key in ('og:image', 'og:image:url', 'twitter:image', 'twitter:image:src', 'image'):
-            value = attrs.get('content') or attrs.get('value')
-            if value:
-                meta_candidates.append(value)
-    for candidate in meta_candidates:
-        normalized = normalize_image_url(candidate, article_url)
-        if normalized:
-            return normalized
+        value = attrs.get('content') or attrs.get('value')
+        if not value:
+            continue
+        if key in ('og:image', 'og:image:url'):
+            meta_candidates['og'].append(value)
+        elif key in ('twitter:image', 'twitter:image:src'):
+            meta_candidates['twitter'].append(value)
+        elif key == 'image':
+            meta_candidates['other'].append(value)
 
-    # Some local publishers omit Open Graph metadata; use a substantial image inside <article>.
+    for priority in ('og', 'twitter', 'other'):
+        for candidate in meta_candidates[priority]:
+            normalized = normalize_image_url(candidate, article_url)
+            if normalized:
+                return normalized
+
     article_match = re.search(r'<article\b[^>]*>(.*?)</article>', page_html, re.I | re.S)
     area = article_match.group(1) if article_match else page_html
     for tag in re.findall(r'<img\b[^>]*>', area, re.I | re.S)[:20]:
@@ -499,7 +512,6 @@ def extract_article_image(page_html, article_url=''):
         if normalized:
             return normalized
     return None
-
 
 def split_photo_caption(text, limit=900):
     """Split text into a Telegram photo caption and a continuation without cutting markup."""

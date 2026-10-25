@@ -65,7 +65,11 @@ def main_menu():
     return {'keyboard': [[{'text':'📰 Новости'}, {'text':'📥 Предложить пост'}], [{'text':'📣 Добавить рекламу'}, {'text':'📋 Активная реклама'}], [{'text':'📊 Статус'}, {'text':'⏸ Пауза / ▶️ Продолжить'}]], 'resize_keyboard': True, 'is_persistent': True}
 
 def ad_actions(ad_id):
-    return {'inline_keyboard': [[{'text':'🗑 Удалить сейчас','callback_data':f'ad_delete:{ad_id}'}, {'text':'📌 Открепить','callback_data':f'ad_unpin:{ad_id}'}]]}
+    return {'inline_keyboard': [[
+        {'text': '📌 Закрепить', 'callback_data': f'ad_pin:{ad_id}'},
+        {'text': '📍 Открепить', 'callback_data': f'ad_unpin:{ad_id}'},
+        {'text': '🗑 Удалить сейчас', 'callback_data': f'ad_delete:{ad_id}'}
+    ]]}
 
 def send_dm(user_id, text, markup=None):
     data = {'chat_id': user_id, 'text': text, 'parse_mode':'HTML', 'disable_web_page_preview':'true'}
@@ -814,6 +818,24 @@ def handle_callback(q,s):
             target=data.split(':',1)[1]; ad=next((a for a in s['ads'] if str(a.get('id'))==target and not a.get('deleted')),None)
             if not ad: send_dm(uid,'Реклама не найдена или уже удалена.',main_menu()); return
             delete_ad_message(ad); ad['deleted']=True; ad['deleted_at']=iso(now()); send_dm(uid,f'Реклама {target} удалена и откреплена, если была закреплена.',main_menu())
+        elif data.startswith('ad_pin:'):
+            target = data.split(':', 1)[1]
+            ad = next((a for a in s['ads'] if str(a.get('id')) == target and not a.get('deleted') and a.get('message_id')), None)
+            if not ad:
+                send_dm(uid, 'Реклама не найдена или ещё не опубликована.', main_menu())
+                return
+            # For an album, pin the first message; Telegram groups the album visually.
+            mid = (ad.get('message_ids') or [ad.get('message_id')])[0]
+            try:
+                api('pinChatMessage', {
+                    'chat_id': ad.get('chat_id', CHANNEL),
+                    'message_id': mid,
+                    'disable_notification': 'true'
+                })
+                send_dm(uid, f'Реклама {target} закреплена. Проверь, что у бота есть право закреплять сообщения.', main_menu())
+            except Exception as e:
+                print('Pin action failed:', type(e).__name__)
+                send_dm(uid, 'Не удалось закрепить рекламу. Проверь права администратора бота в канале.', main_menu())
         elif data.startswith('ad_unpin:'):
             target=data.split(':',1)[1]; ad=next((a for a in s['ads'] if str(a.get('id'))==target and not a.get('deleted')),None)
             if not ad: send_dm(uid,'Реклама не найдена или уже удалена.',main_menu()); return

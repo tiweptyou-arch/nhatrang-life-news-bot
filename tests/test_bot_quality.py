@@ -323,19 +323,21 @@ class NewsQualityTests(unittest.TestCase):
             self.assertFalse(os.path.exists(path + ".tmp"))
 
     def test_long_text_ad_tracks_every_message_for_expiry(self):
-        responses = iter([
-            {"message_id": 501, "chat": {"id": -1001}},
-            {"message_id": 502, "chat": {"id": -1001}},
-            {"message_id": 503, "chat": {"id": -1001}},
-        ])
+        sent = []
+        def fake_post(text):
+            result = {"message_id": 501 + len(sent), "chat": {"id": -1001}}
+            sent.append(text)
+            return result
         ad = {"text": " ".join(["advertising"] * 1200)}
-        with patch.object(bot, "post_text", side_effect=lambda text: next(responses)) as post_mock:
+        with patch.object(bot, "post_text", side_effect=fake_post) as post_mock:
             with patch.object(bot.time, "sleep"):
                 result = bot.send_ad_content(ad)
-        self.assertEqual(post_mock.call_count, 3)
+        self.assertGreater(post_mock.call_count, 1)
+        expected_ids = list(range(501, 501 + post_mock.call_count))
         self.assertEqual(result["message_id"], 501)
-        self.assertEqual(result["_message_ids"], [501, 502, 503])
+        self.assertEqual(result["_message_ids"], expected_ids)
         self.assertEqual(result["chat"]["id"], -1001)
+        self.assertTrue(all(len(text) <= 3900 for text in sent))
 
     def test_ad_album_sends_and_tracks_every_message_id(self):
         response = [

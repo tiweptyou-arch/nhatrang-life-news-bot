@@ -2,7 +2,7 @@ import json
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 from urllib.parse import parse_qs, urlparse
 
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token-for-local-unit-tests")

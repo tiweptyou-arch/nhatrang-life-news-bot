@@ -28,7 +28,7 @@ FEEDS = [
  'https://news.google.com/rss/search?q=Kh%C3%A1nh+H%C3%B2a&hl=vi&gl=VN&ceid=VN:vi',
  'https://news.google.com/rss/search?q=Nha+Trang+Kh%C3%A1nh+H%C3%B2a&hl=en&gl=US&ceid=US:en',
 ]
-KEYWORDS = ['nha trang','khánh hòa','khanh hoa','cam ranh','diên khánh','dien khanh','vạn ninh','van ninh','trường sa','truong sa', 'нячанг','кханьхоа','кхань хоа','камрань']
+KEYWORDS = ['nha trang','khánh hòa','khanh hoa','cam ranh','diên khánh','dien khanh','vạn ninh','van ninh','trường sa','truong sa', 'нячанг','нячанге','нячанга','нячангу','кханьхоа','кхань хоа','камрань','камрани']
 
 
 def now(): return datetime.now(TZ)

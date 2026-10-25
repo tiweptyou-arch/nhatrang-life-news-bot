@@ -360,6 +360,39 @@ class NewsQualityTests(unittest.TestCase):
         self.assertEqual(result["_message_ids"], [201, 202, 203])
         self.assertEqual(result["message_id"], 201)
 
+    def test_editing_multipart_text_ad_replaces_all_parts(self):
+        uid = 1335496436
+        ad = {
+            "id": "ad-old", "text": "Old ad", "message_id": 10,
+            "message_ids": [10, 11, 12], "chat_id": -1001,
+            "top_hours": 1, "life_hours": 24
+        }
+        state = {
+            "pending_ad": {}, "pending_manual_post": {}, "ads": [ad],
+            "daily_counts": {}, "last_slots": {}, "paused": False, "pause_until": ""
+        }
+        sent = []
+        def fake_post(text):
+            result = {"message_id": 100 + len(sent), "chat": {"id": -1001}}
+            sent.append(text)
+            return result
+        admin = {
+            "from": {"id": uid}, "chat": {"id": uid},
+            "text": "/editad ad-old | " + "New advertising content " * 500
+        }
+        with patch.object(bot, "post_text", side_effect=fake_post) as post_mock:
+            with patch.object(bot, "api", return_value={}) as api_mock:
+                with patch.object(bot, "send_dm"):
+                    with patch.object(bot.time, "sleep"):
+                        bot.handle_admin_message(admin, state)
+        self.assertGreater(post_mock.call_count, 1)
+        self.assertEqual(ad["message_id"], 100)
+        self.assertEqual(ad["message_ids"], list(range(100, 100 + post_mock.call_count)))
+        self.assertEqual(ad["text"].startswith("New advertising content"), True)
+        deleted = [call.args[1]["message_id"] for call in api_mock.call_args_list if call.args[0] == "deleteMessage"]
+        self.assertEqual(deleted, [10, 11, 12])
+        self.assertEqual(ad.get("stale_message_ids"), [])
+
     def test_expiring_ad_deletes_all_album_messages(self):
         ad = {"chat_id": -1001, "message_id": 201, "message_ids": [201, 202, 203]}
         with patch.object(bot, "api", return_value={}) as api_mock:

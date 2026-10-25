@@ -1043,7 +1043,11 @@ def publish_ad(ad,s,uid=None):
     ad.pop('_publish_error_notified', None)
     notify_uid = uid or ad.get('created_by')
     if notify_uid:
-        send_dm(notify_uid, f'Опубликовано! ID: <code>{ad["id"]}</code>. Окно без новостей до {parse_dt(ad["top_until"]).strftime("%d.%m %H:%M")}; автоматическое удаление {parse_dt(ad["expires_at"]).strftime("%d.%m %H:%M")} (Нячанг).')
+        try:
+            send_dm(notify_uid, f'Опубликовано! ID: <code>{ad["id"]}</code>. Окно без новостей до {parse_dt(ad["top_until"]).strftime("%d.%m %H:%M")}; автоматическое удаление {parse_dt(ad["expires_at"]).strftime("%d.%m %H:%M")} (Нячанг).')
+        except Exception as notify_error:
+            # The ad is already published; a failed confirmation must not make us treat it as unpublished.
+            print('Ad published, but owner notification failed:', type(notify_error).__name__)
 
 def delete_ad_message(ad):
     chat_id = ad.get('chat_id', CHANNEL)

@@ -185,8 +185,8 @@ PRACTICAL_NEWS_TERMS = (
     'hạ tầng', 'công trình', 'sửa chữa', 'đóng cửa', 'khai trương', 'mở cửa',
     'miễn phí', 'dịch vụ công', 'giờ hoạt động', 'bãi biển', 'cấm tắm biển',
     'thực phẩm', 'giá xăng', 'giá cả', 'chi phí sinh hoạt', 'bất động sản',
-    'động đất', 'dịch vụ', 'lễ hội', 'sự kiện', 'đình chỉ', 'thu hồi',
-    'thông báo', 'thủ tục', 'cải cách hành chính', 'quyết định',
+    'động đất', 'lễ hội', 'đình chỉ', 'thu hồi',
+    'thủ tục', 'cải cách hành chính', 'quyết định',
     'lệ phí', 'đường dây nóng', 'phân phối nước', 'lịch cúp điện', 'xét nghiệm',
     # English-language sources need the same practical-life filter.
     'weather', 'heavy rain', 'flood warning', 'typhoon', 'storm warning', 'road closure',

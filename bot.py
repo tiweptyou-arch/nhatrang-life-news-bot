@@ -317,27 +317,52 @@ def reaction_line(text):
 
 
 def news_image_query(title, body=''):
-    """Choose a topic-matched illustration query instead of defaulting to a beach."""
+    """Choose a topical illustration query using the translated Russian story as well as source terms."""
     value = clean(title + ' ' + body).casefold()
     local = 'Nha Trang Khanh Hoa Vietnam'
-    if any(x in value for x in ('bão', 'mưa', 'ngập', 'lũ', 'thời tiết', 'storm', 'flood')):
+    if any(x in value for x in (
+        'bão', 'mưa', 'ngập', 'lũ', 'thời tiết', 'storm', 'flood',
+        'погода', 'дожд', 'ливень', 'шторм', 'наводнен', 'затоплен', 'тайфун',
+        'гроза', 'осадк', 'сильный ветер', 'штормовое предупреждение'
+    )):
         return 'Vietnam tropical storm heavy rain flooded street landscape'
-    if any(x in value for x in ('trường học', 'học sinh', 'giáo dục', 'đại học')):
+    if any(x in value for x in (
+        'trường học', 'học sinh', 'giáo dục', 'đại học',
+        'школ', 'учен', 'образован', 'студент', 'университет', 'обучен'
+    )):
         return 'Vietnamese school students classroom education'
-    if any(x in value for x in ('bệnh viện', 'bác sĩ', 'phòng khám', 'nhà thuốc', 'y tế')):
+    if any(x in value for x in (
+        'bệnh viện', 'bác sĩ', 'phòng khám', 'nhà thuốc', 'y tế',
+        'больниц', 'врач', 'клиник', 'аптек', 'медицин', 'здравоохран'
+    )):
         return 'Vietnam hospital doctor healthcare clinic'
-    if any(x in value for x in ('giao thông', 'đường', 'cầu', 'xe buýt', 'sân bay', 'tai nạn', 'cấm đường')):
+    if any(x in value for x in (
+        'giao thông', 'đường', 'cầu', 'xe buýt', 'sân bay', 'tai nạn', 'cấm đường',
+        'дорог', 'транспорт', 'пробк', 'автобус', 'аэропорт', 'авари', 'перекрыт',
+        'ремонт дороги', 'мост', 'железнодорож'
+    )):
         return 'Nha Trang Vietnam road traffic public transport'
-    if any(x in value for x in ('nước biển', 'bãi biển', 'ô nhiễm', 'môi trường', 'rác thải')):
+    if any(x in value for x in (
+        'nước biển', 'bãi biển', 'ô nhiễm', 'môi trường', 'rác thải',
+        'пляж', 'море', 'загрязнен', 'окружающей сред', 'мусор', 'качество воды'
+    )):
         return 'Nha Trang Vietnam beach coastline environment'
-    if any(x in value for x in ('nhà ở', 'giá thuê', 'giá nhà', 'bất động sản', 'căn hộ')):
+    if any(x in value for x in (
+        'nhà ở', 'giá thuê', 'giá nhà', 'bất động sản', 'căn hộ',
+        'аренд', 'жиль', 'недвижим', 'квартир', 'стоимость жилья'
+    )):
         return 'Nha Trang Vietnam apartment buildings housing'
-    if any(x in value for x in ('visa', 'thị thực', 'xuất nhập cảnh', 'lưu trú', 'người nước ngoài')):
+    if any(x in value for x in (
+        'visa', 'thị thực', 'xuất nhập cảnh', 'lưu trú', 'người nước ngoài',
+        'виза', 'иммиграц', 'миграц', 'иностранц', 'пребыван', 'регистрац'
+    )):
         return 'Vietnam immigration passport paperwork government office'
-    if any(x in value for x in ('điện', 'mất nước', 'internet', 'dịch vụ công', 'hạ tầng')):
+    if any(x in value for x in (
+        'điện', 'mất nước', 'internet', 'dịch vụ công', 'hạ tầng',
+        'электрич', 'отключение воды', 'интернет', 'коммуналь', 'инфраструктур'
+    )):
         return 'Nha Trang Vietnam urban infrastructure utilities'
     return local + ' city street public services'
-
 
 def is_duplicate_news(s, title, link):
     norm = normalized_title(title)

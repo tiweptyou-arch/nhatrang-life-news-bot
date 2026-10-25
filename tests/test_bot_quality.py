@@ -53,10 +53,10 @@ class NewsQualityTests(unittest.TestCase):
 
     def test_telegram_transport_errors_do_not_leak_bot_token(self):
         secret = "BOT_TOKEN_SHOULD_NOT_LEAK"
-        with patch.object(bot, "TOKEN", secret), \\
-             patch.object(bot.urllib.request, "urlopen", side_effect=OSError("failed https://api.telegram.org/bot" + secret + "/getUpdates")):
-            with self.assertRaises(RuntimeError) as raised:
-                bot.api("getUpdates")
+        with patch.object(bot, "TOKEN", secret):
+            with patch.object(bot.urllib.request, "urlopen", side_effect=OSError("failed https://api.telegram.org/bot" + secret + "/getUpdates")):
+                with self.assertRaises(RuntimeError) as raised:
+                    bot.api("getUpdates")
         self.assertNotIn(secret, str(raised.exception))
 
     def test_split_long_text_keeps_all_words(self):

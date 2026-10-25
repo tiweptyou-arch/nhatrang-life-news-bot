@@ -300,39 +300,38 @@ def remove_repeated_lead(headline, body):
     return body
 
 
+
 def limit_news_body(value, max_chars=1450):
-    """Keep the useful beginning of a translated article without turning it into a wall of text."""
-    value = clean_multiline(re.sub(r'https?://\\S+', '', value or ''))
+    """Keep a useful, readable body while avoiding an excessively long post."""
+    value = clean_multiline(re.sub(r'https?://\S+', '', value or ''))
     if len(value) <= max_chars:
         return value
-    paragraphs = [p.strip() for p in value.split('\\n\\n') if p.strip()]
+
+    paragraphs = [part.strip() for part in value.split('\n\n') if part.strip()]
     kept = []
     for paragraph in paragraphs:
-        candidate = paragraph if not kept else '\\n\\n'.join(kept + [paragraph])
+        current = '\n\n'.join(kept)
+        candidate = paragraph if not current else current + '\n\n' + paragraph
         if len(candidate) <= max_chars:
             kept.append(paragraph)
             continue
-        room = max_chars - len('\\n\\n'.join(kept))
-        if kept:
-            room -= 2
-        if room > 100:
-            sentence_parts = re.split(r'(?<=[.!?…])\\s+', paragraph)
-            for sentence in sentence_parts:
-                candidate_text = sentence if not kept and not kept else ''
-                current = '\\n\\n'.join(kept)
-                trial = (current + ('\\n\\n' if current else '') + sentence).strip()
-                if len(trial) <= max_chars:
-                    kept.append(sentence) if not current else kept.__setitem__(-1, kept[-1] + ' ' + sentence)
-                else:
-                    break
-        break
-    result = '\\n\\n'.join(kept).strip()
-    if len(result) > max_chars:
-        result = result[:max_chars].rsplit(' ', 1)[0].rstrip(' ,;:-') + '…'
-    elif len(result) < len(value) and not result.endswith(('…', '.', '!', '?')):
-        result = result.rstrip() + '…'
-    return result
 
+        room = max_chars - len(current) - (2 if current else 0)
+        if room > 0:
+            fragment = paragraph[:room]
+            if len(paragraph) > room and ' ' in fragment:
+                fragment = fragment.rsplit(' ', 1)[0]
+            fragment = fragment.rstrip(' ,;:-')
+            if fragment:
+                if not fragment.endswith(('…', '.', '!', '?')):
+                    fragment += '…'
+                kept.append(fragment)
+        break
+
+    result = '\n\n'.join(kept).strip()
+    if not result:
+        result = value[:max_chars].rsplit(' ', 1)[0].rstrip(' ,;:-') + '…'
+    return result
 
 def reaction_line(text):
     """Optional topic-specific reaction line; serious stories deliberately get none."""
@@ -499,8 +498,9 @@ def split_html_text(text, limit=3900):
 
 
 
+
 def post_with_image(text, image_url=None, illustration=False):
-    """Publish a text-only channel post; RSS images and article URLs are never attached."""
+    """Publish public news as text only; do not attach images or source links."""
     if not text or not text.strip():
         return None
     result = None
@@ -1288,8 +1288,9 @@ def mark_slot(s,key): s['last_slots'][key]=now().date().isoformat()
 
 
 
+
 def routine_posts(s):
-    """Publish a short end-of-day recap only when there is useful news or a real warning."""
+    """Publish an end-of-day recap only when there is useful news or a real warning."""
     n = now()
     if is_paused(s) or count_today(s) >= 10 or n.hour != 22 or not (30 <= n.minute < 35) or slot_once(s, 'night'):
         return
@@ -1328,7 +1329,7 @@ def routine_posts(s):
         summary = clean_multiline(item.get('summary', ''))
         if not summary:
             continue
-        sentences = re.split(r'(?<=[.!?])\\s+', summary.replace('\\n', ' '))
+        sentences = re.split(r'(?<=[.!?])\s+', summary.replace('\n', ' '))
         brief = ' '.join(sentences[:2]).strip()
         if len(brief) > 300:
             brief = brief[:297].rsplit(' ', 1)[0] + '…'
@@ -1344,7 +1345,7 @@ def routine_posts(s):
         parts.append('Сегодня в Нячанге: ' + ' '.join(recap))
     if tomorrow_warning:
         parts.append(tomorrow_warning)
-    text = '\\n\\n'.join(parts) + footer()
+    text = '\n\n'.join(parts) + footer()
     post_with_image(text)
     bump_today(s)
     mark_slot(s, 'night')
@@ -1404,7 +1405,7 @@ def weather_post(s, period):
         else:
             advice = 'Перед длительной поездкой проверь прогноз ещё раз.'
 
-        text = current_text + '\\n' + forecast_text + '\\n' + rain_text + '\\n\\n' + advice
+        text = current_text + '\n' + forecast_text + '\n' + rain_text + '\n\n' + advice
         if period == 'morning':
             cutoff = n - timedelta(hours=24)
             recent = []
@@ -1418,13 +1419,13 @@ def weather_post(s, period):
             snippets = []
             for entry in recent[-3:]:
                 summary = clean_multiline(entry.get('summary', ''))
-                first_sentence = re.split(r'(?<=[.!?])\\s+', summary.replace('\\n', ' '), maxsplit=1)[0]
+                first_sentence = re.split(r'(?<=[.!?])\s+', summary.replace('\n', ' '), maxsplit=1)[0]
                 if len(first_sentence) > 220:
                     first_sentence = first_sentence[:217].rsplit(' ', 1)[0] + '…'
                 if first_sentence and first_sentence not in snippets:
                     snippets.append(first_sentence)
             if snippets:
-                text += '\\n\\nЗа последние сутки: ' + ' '.join(snippets)
+                text += '\n\nЗа последние сутки: ' + ' '.join(snippets)
 
         text += footer()
         post_with_image(text)
@@ -1435,7 +1436,7 @@ def weather_post(s, period):
 
 
 def publish_news(s):
-    """Publish useful, recent local news as text only, without an added headline or source/media links."""
+    """Publish useful, recent local news as text only, without added headlines or source/media links."""
     n = now()
     hour_key = n.strftime('%Y-%m-%d-%H')
     items, links = [], set()
@@ -1473,7 +1474,7 @@ def publish_news(s):
         if n.hour in (6, 7, 8, 11, 12, 17, 18, 22, 23) and not urgent:
             continue
 
-        translated_title = translate(re.split(r'\\s[-–|]\\s', title, maxsplit=1)[0])
+        translated_title = translate(re.split(r'\s[-–|]\s', title, maxsplit=1)[0])
         if not translated_title:
             continue
         internal_title = clean(translated_title)
@@ -1483,14 +1484,14 @@ def publish_news(s):
             # Fetch a source page only when RSS has too little detail; limit work to avoid long runs.
             try:
                 page = get_url(link).decode('utf-8', 'ignore')
-                article_match = re.search(r'<article\\b[^>]*>(.*?)</article>', page, re.I | re.S)
+                article_match = re.search(r'<article\b[^>]*>(.*?)</article>', page, re.I | re.S)
                 if article_match:
                     raw_article = article_match.group(1)
                 else:
-                    paragraphs = re.findall(r'<p\\b[^>]*>(.*?)</p>', page, re.I | re.S)
-                    raw_article = '\\n'.join(paragraphs[:20])
-                raw_article = re.sub(r'<(script|style|noscript|svg)\\b[^>]*>.*?</\\1>', ' ', raw_article, flags=re.I | re.S)
-                raw_article = re.sub(r'</?(p|div|br|li|h[1-6])\\b[^>]*>', '\\n', raw_article, flags=re.I)
+                    paragraphs = re.findall(r'<p\b[^>]*>(.*?)</p>', page, re.I | re.S)
+                    raw_article = '\n'.join(paragraphs[:20])
+                raw_article = re.sub(r'<(script|style|noscript|svg)\b[^>]*>.*?</\1>', ' ', raw_article, flags=re.I | re.S)
+                raw_article = re.sub(r'</?(p|div|br|li|h[1-6])\b[^>]*>', '\n', raw_article, flags=re.I)
                 raw_article = clean_multiline(raw_article)
                 if len(raw_article) > len(desc) + 100:
                     translated_body = translate(raw_article[:12000])
@@ -1498,7 +1499,7 @@ def publish_news(s):
                 print('Full article unavailable; relying on RSS description only:', type(e).__name__)
 
         body = remove_repeated_lead(internal_title, translated_body)
-        body = clean_multiline(re.sub(r'https?://\\S+', '', body))
+        body = clean_multiline(re.sub(r'https?://\S+', '', body))
         body = limit_news_body(body, max_chars=1450)
         if len(body) < 100 or len(body.split()) < 18:
             print('Skipping thin or repetitive story:', internal_title)
@@ -1509,7 +1510,7 @@ def publish_news(s):
         news_text = (('⚠️ ' if urgent else '') + html.escape(body))
         line = reaction_line(title + ' ' + internal_title + ' ' + body)
         if line:
-            news_text += '\\n\\n' + line
+            news_text += '\n\n' + line
         news_text += footer()
         post_with_image(news_text)
 

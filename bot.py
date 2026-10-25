@@ -84,6 +84,14 @@ def get_url(url):
     req = urllib.request.Request(url, headers={'User-Agent':'Mozilla/5.0 NhaTrangLifeNewsBot/2.0'})
     with urllib.request.urlopen(req, timeout=12) as r: return r.read()
 
+
+def get_url_with_final_url(url):
+    """Fetch a URL and expose the final redirect destination for Google News RSS wrappers."""
+    req = urllib.request.Request(url, headers={'User-Agent':'Mozilla/5.0 NhaTrangLifeNewsBot/2.0'})
+    with urllib.request.urlopen(req, timeout=12) as response:
+        return response.geturl(), response.read()
+
+
 def api(method, data=None):
     """Call Telegram without putting the secret bot token in exception messages or logs."""
     url = f'https://api.telegram.org/bot{TOKEN}/{method}'
@@ -134,16 +142,17 @@ def load_state():
     defaults = {
       'seen_links': [], 'seen_titles': [], 'seen_fingerprints': [], 'last_update_id': 0, 'pending_ad': {},
       'ads': [], 'paused': False, 'pause_until': '', 'daily_counts': {}, 'last_slots': {},
-      'game_history': [], 'last_news_hour': '', 'manual_posts': [], 'pending_manual_post': {}, 'published_news': []
+      'game_history': [], 'last_news_hour': '', 'manual_posts': [], 'pending_manual_post': {}, 'published_news': [],
+      'pending_news_review': {}, 'review_editing': {}, 'rejected_news_links': [], 'rejected_news_fingerprints': []
     }
     for k, v in defaults.items():
         s.setdefault(k, v)
-    for key in ('seen_links', 'seen_titles', 'seen_fingerprints', 'ads', 'published_news', 'game_history', 'manual_posts'):
+    for key in ('seen_links', 'seen_titles', 'seen_fingerprints', 'ads', 'published_news', 'game_history', 'manual_posts', 'rejected_news_links', 'rejected_news_fingerprints'):
         if not isinstance(s.get(key), list):
             raise RuntimeError(
                 f'Поле {key} в {STATE_FILE} имеет неверный формат; файл не будет сохранён, чтобы не потерять данные.'
             )
-    for key in ('daily_counts', 'last_slots', 'pending_ad', 'pending_manual_post'):
+    for key in ('daily_counts', 'last_slots', 'pending_ad', 'pending_manual_post', 'pending_news_review', 'review_editing'):
         if not isinstance(s.get(key), dict):
             raise RuntimeError(
                 f'Поле {key} в {STATE_FILE} имеет неверный формат; файл не будет сохранён, чтобы не потерять данные.'
@@ -414,11 +423,12 @@ def is_duplicate_news(s, title, link):
     return False
 
 
+
 def normalize_image_url(candidate, base_url=''):
-    """Return a safe absolute image URL, rejecting obvious logos and tracking pixels."""
+    """Normalize an article photo URL and reject Google-served search/preview images."""
     if not isinstance(candidate, str):
         return None
-    candidate = html.unescape(candidate.strip()).replace('\\/', '/')
+    candidate = html.unescape(candidate.strip()).replace('\\\\/', '/')
     if not candidate:
         return None
     if candidate.startswith('//'):
@@ -430,15 +440,17 @@ def normalize_image_url(candidate, base_url=''):
         return None
     if parsed.scheme not in ('http', 'https') or not parsed.netloc:
         return None
+    host = (parsed.hostname or '').casefold().rstrip('.')
+    google_hosts = ('google.com', 'googleusercontent.com', 'gstatic.com', 'googlesyndication.com', 'googleapis.com')
+    if any(host == domain or host.endswith('.' + domain) for domain in google_hosts):
+        return None
     path = parsed.path.casefold()
     if path.endswith('.svg') or any(x in path for x in (
         'favicon', 'sprite', 'tracking', 'pixel.', 'placeholder', 'default-avatar',
-        'site-logo', 'logo-', '/logo.', 'avatar', 'blank.gif'
+        'site-logo', 'logo-', '/logo.', 'avatar', 'blank.gif', 'google-logo'
     )):
         return None
     return candidate
-
-
 
 def extract_rss_image(item, article_url=''):
     """Prefer image media embedded in the source RSS item over stock illustrations."""

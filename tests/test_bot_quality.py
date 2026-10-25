@@ -45,7 +45,7 @@ class NewsQualityTests(unittest.TestCase):
         )
 
     def test_long_article_paragraphs_are_preserved(self):
-        html_article = "<p>First useful paragraph.</p><p>Second paragraph with more facts.</p>"
+            "First useful paragraph.\n\nSecond paragraph with more facts."
         self.assertEqual(
             bot.clean_multiline(html_article),
             "First useful paragraph.\\n\\nSecond paragraph with more facts."

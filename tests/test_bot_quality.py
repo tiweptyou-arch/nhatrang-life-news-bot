@@ -102,6 +102,9 @@ class NewsQualityTests(unittest.TestCase):
         self.assertEqual(state["published_news"][0]["title"], "Road repair update")
         self.assertEqual(state["published_news"][0]["link"], "https://example.com/road")
         self.assertIn("The city announced repair works.", post_mock.call_args.args[0])
+        self.assertNotIn("Road repair update", post_mock.call_args.args[0])
+        self.assertNotIn("example.com/road", post_mock.call_args.args[0])
+        self.assertNotIn("<b>", post_mock.call_args.args[0])
 
     def test_manual_album_is_queued_and_not_published_until_approved(self):
         uid = 1335496436

@@ -28,6 +28,9 @@ class NewsQualityTests(unittest.TestCase):
             "Thông tin giải trí chung, không có hướng dẫn hoặc hệ quả thiết thực."
         ))
 
+    def test_short_word_fragment_does_not_trigger_false_urgent_story(self):
+        self.assertFalse(bot.is_urgent_news("Một nghệ sĩ nổi tiếng đến Nha Trang"))
+
     def test_repeated_headline_lead_is_removed(self):
         body = "Mưa lớn tại Nha Trang. Chính quyền khuyến cáo người dân tránh các tuyến đường ngập."
         self.assertEqual(

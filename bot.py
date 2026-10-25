@@ -287,21 +287,50 @@ def split_html_text(text, limit=3900):
     return chunks
 
 
+
 def post_with_image(text, image_url=None, illustration=False):
-    """Publish a short photo caption and all remaining text in full."""
-    parts = split_html_text(text)
-    if not parts:
+    """Always pair a topical image with a short caption and preserve the complete article text."""
+    if not text.strip():
         return None
-    caption = parts[0]
+
+    paragraphs = [p.strip() for p in re.split(r'\\n\\s*\\n', text.strip()) if p.strip()]
+    caption_parts = []
+    remaining = []
+    caption_limit = 850
+
+    for index, paragraph in enumerate(paragraphs):
+        candidate = paragraph if not caption_parts else '\\n\\n'.join(caption_parts + [paragraph])
+        if len(candidate) <= caption_limit:
+            caption_parts.append(paragraph)
+        else:
+            remaining = paragraphs[index:]
+            break
+
+    if not caption_parts and paragraphs:
+        # Headlines are expected to fit; safeguard unusual long first blocks without dropping text.
+        words = paragraphs[0].split()
+        caption, tail = '', []
+        for word in words:
+            candidate = word if not caption else caption + ' ' + word
+            if len(candidate) <= caption_limit:
+                caption = candidate
+            else:
+                tail.append(word)
+        caption_parts = [caption] if caption else []
+        remaining = ([' '.join(tail)] if tail else []) + paragraphs[1:]
+
+    caption = '\\n\\n'.join(caption_parts)
+    full_body = '\\n\\n'.join(remaining)
     if illustration:
         label = '📷 Изображение — иллюстрация'
         if len(caption) + len(label) + 2 <= 1024:
-            caption += '\\n\\n' + label
+            caption = (caption + '\\n\\n' + label).strip()
         else:
-            parts.insert(1, label)
+            full_body = (label + ('\\n\\n' + full_body if full_body else '')).strip()
+
     result = None
     photo_sent = False
-    if image_url and len(caption) <= 1024:
+    if image_url and caption and len(caption) <= 1024:
         try:
             result = api('sendPhoto', {
                 'chat_id': CHANNEL, 'photo': image_url,
@@ -310,22 +339,60 @@ def post_with_image(text, image_url=None, illustration=False):
             photo_sent = True
         except Exception as e:
             print('Photo send failed; falling back to full text:', e)
-    remaining = parts[1:] if photo_sent else parts
-    for part in remaining:
+
+    # If a picture cannot be used, include the title in the text fallback instead.
+    text_parts = split_html_text(full_body) if photo_sent else split_html_text(text)
+    for part in text_parts:
         result = post_text(part)
         time.sleep(0.25)
     return result
 
 
+
 def translate(text):
+    """Translate the whole text in bounded chunks instead of silently truncating at 4,000 chars."""
     text = clean(text)
-    if not text: return ''
-    q = urllib.parse.urlencode({'client':'gtx','sl':'auto','tl':'ru','dt':'t','q':text[:4000]})
-    try:
-        data = json.loads(get_url('https://translate.googleapis.com/translate_a/single?'+q).decode())
-        return ''.join(x[0] for x in data[0] if x[0]).strip()
-    except Exception as e:
-        print('Translation error:',e); return ''
+    if not text:
+        return ''
+    # Keep requests modest; prefer paragraph/sentence boundaries and carry all chunks forward.
+    chunks, current = [], ''
+    for paragraph in re.split(r'\\n+', text):
+        paragraph = paragraph.strip()
+        if not paragraph:
+            continue
+        sentences = re.split(r'(?<=[.!?。！？])\\s+', paragraph)
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            if len(sentence) > 3400:
+                if current:
+                    chunks.append(current)
+                    current = ''
+                for offset in range(0, len(sentence), 3200):
+                    chunks.append(sentence[offset:offset + 3200])
+                continue
+            candidate = sentence if not current else current + ' ' + sentence
+            if len(candidate) > 3400 and current:
+                chunks.append(current)
+                current = sentence
+            else:
+                current = candidate
+    if current:
+        chunks.append(current)
+
+    translated = []
+    for chunk in chunks:
+        q = urllib.parse.urlencode({'client': 'gtx', 'sl': 'auto', 'tl': 'ru', 'dt': 't', 'q': chunk})
+        try:
+            data = json.loads(get_url('https://translate.googleapis.com/translate_a/single?' + q).decode())
+            translated.append(''.join(x[0] for x in data[0] if x[0]).strip())
+        except Exception as e:
+            print('Translation error:', e)
+            # Do not pretend that an untranslated source passage was successfully translated.
+            return ''
+    return '\\n\\n'.join(part for part in translated if part).strip()
+
 
 def footer(): return '\n\n' + FOOTER
 
@@ -509,12 +576,12 @@ def handle_admin_message(msg,s):
 
     elif cmd=='/publish':
         ad=s.get('pending_ad') or {}
-        if not ad or ad.get('awaiting_content') or not ad.get('text','') and not ad.get('file_id'):
+        if not ad or ad.get('awaiting_content') or not (ad.get('text') or ad.get('file_id') or ad.get('media_items')):
             send_dm(uid,'Сначала создай черновик: /ad 1/24, затем пришли содержимое.'); return
         publish_ad(ad,s,uid)
     elif cmd=='/schedule':
         ad=s.get('pending_ad') or {}
-        if not ad or ad.get('awaiting_content') or not (ad.get('text') or ad.get('file_id')):
+        if not ad or ad.get('awaiting_content') or not (ad.get('text') or ad.get('file_id') or ad.get('media_items')):
             send_dm(uid,'Сначала подготовь черновик через /ad 1/24.'); return
         try: when=datetime.strptime(arg,'%Y-%m-%d %H:%M').replace(tzinfo=TZ)
         except ValueError: send_dm(uid,'Формат: /schedule 2026-10-25 14:30'); return
@@ -556,8 +623,8 @@ def handle_admin_message(msg,s):
         target=arg.strip()
         ad=next((a for a in s['ads'] if a.get('id')==target and not a.get('deleted')),None)
         if not ad: send_dm(uid,'Не нашёл активную рекламу с таким ID. Посмотри /ads.'); return
-        if ad.get('message_id'):
-            api('deleteMessage',{'chat_id':CHANNEL,'message_id':ad['message_id']})
+        if ad.get('message_id') or ad.get('message_ids'):
+            delete_ad_message(ad)
         ad['deleted']=True; ad['deleted_at']=iso(now())
         send_dm(uid,f'Реклама {target} удалена/отменена.')
     elif cmd=='/pause':

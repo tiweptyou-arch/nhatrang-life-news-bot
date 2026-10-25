@@ -624,8 +624,8 @@ def capture_manual_post(msg, s, uid):
         post_type, file_id = 'photo', msg['photo'][-1]['file_id']
     elif msg.get('video'):
         post_type, file_id = 'video', msg['video']['file_id']
-    if not content and not file_id:
-        send_dm(uid, 'Добавь текст новости, ссылку или фото/видео с подписью. Для отмены: /cancel')
+    if not content:
+        send_dm(uid, 'Добавь заголовок или короткое описание и по возможности ссылку. Фото/видео без пояснения не попадёт в очередь. Для отмены: /cancel')
         return
     message_id = str((msg.get('message_id') or int(time.time() * 1000)))
     item_id = f'{uid}-{message_id}'

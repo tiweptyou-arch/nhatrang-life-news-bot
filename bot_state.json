@@ -165,5 +165,10 @@
       "source_published_at": "2026-10-26T04:42:28+07:00",
       "urgent": false
     }
-  ]
+  ],
+  "pending_news_review": {},
+  "review_editing": {},
+  "rejected_news_links": [],
+  "rejected_news_fingerprints": [],
+  "rejected_news_titles": []
 }

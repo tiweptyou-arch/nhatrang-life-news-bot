@@ -588,7 +588,18 @@ def send_ad_content(ad):
         method = {'photo':'sendPhoto','video':'sendVideo','document':'sendDocument'}[ad['type']]
         field = {'photo':'photo','video':'video','document':'document'}[ad['type']]
         return api(method, {'chat_id':CHANNEL,field:ad['file_id'],'caption':full_caption,'parse_mode':'HTML'})
-    return post_text((caption + footer()).strip())
+    full_text = (caption + footer()).strip()
+    sent = []
+    for part in split_html_text(full_text):
+        sent.append(post_text(part))
+        time.sleep(0.2)
+    if not sent:
+        raise RuntimeError('Рекламный текст оказался пустым.')
+    return {
+        'message_id': sent[0]['message_id'],
+        'chat': sent[0]['chat'],
+        '_message_ids': [message['message_id'] for message in sent]
+    }
 
 
 def count_today(s):

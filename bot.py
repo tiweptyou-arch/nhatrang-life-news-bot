@@ -1322,12 +1322,67 @@ def handle_admin_album(messages, s):
                  f'Отложить: /schedule ГГГГ-ММ-ДД ЧЧ:ММ\nОтменить: /cancel')
 
 
-def handle_admin_message(msg,s):
-    user = msg.get('from') or {}; uid = str(user.get('id',''))
-    if uid not in ADMIN_USER_IDS: return
-    chat_id = str((msg.get('chat') or {}).get('id',''))
-    if chat_id != uid: return  # management is private-chat only
+
+def handle_admin_message(msg, s):
+    user = msg.get('from') or {}
+    uid = str(user.get('id', ''))
+    if uid not in ADMIN_USER_IDS:
+        return
+    chat_id = str((msg.get('chat') or {}).get('id', ''))
+    if chat_id != uid:
+        return  # Management remains private-chat only.
+
     text = (msg.get('text') or msg.get('caption') or '').strip()
+
+    # Review editing is isolated from the existing advertising/manual-post draft flows.
+    editing = s.get('review_editing') or {}
+    if editing and editing.get('user_id') == uid:
+        if text.casefold() in ('/cancelreview', '/cancel'):
+            s['review_editing'] = {}
+            send_dm(uid, 'Редактирование отменено. Текущий черновик остаётся в очереди без изменений.')
+            return
+        item = s.get('pending_news_review') or {}
+        if not item or str(item.get('id')) != str(editing.get('id')):
+            s['review_editing'] = {}
+            send_dm(uid, 'Этот черновик уже опубликован или отклонён. Новая очередь доступна в следующем предпросмотре.')
+            return
+
+        if msg.get('photo'):
+            # A photo with a caption replaces both the body and the image; without a caption, keep the existing body.
+            body = text or item.get('body', '')
+            item['image_file_id'] = msg['photo'][-1]['file_id']
+            item['image_url'] = ''
+            item['image_credit_html'] = ''
+        else:
+            if not text or text.startswith('/'):
+                send_dm(uid, 'Отправь новый текст публикации одним сообщением. Для отмены: /cancelreview')
+                return
+            body = text
+
+        body = clean_multiline(re.sub(r'https?://\S+', '', body))
+        if not body:
+            send_dm(uid, 'После удаления ссылок текст пуст. Отправь текст публикации ещё раз или /cancelreview.')
+            return
+
+        item['body'] = body
+        item['reaction_line'] = ''
+        item['edited_by'] = uid
+        item['edited_at'] = iso(now())
+        item['review_count'] = int(item.get('review_count', 0)) + 1
+        item['planned_at'] = iso(now() + timedelta(minutes=15))
+        delete_review_previews(item)
+        item['preview_messages'] = []
+        s['review_editing'] = {}
+        if send_review_preview(item):
+            s['pending_news_review'] = item
+            send_dm(uid, 'Изменения сохранены. Таймер проверки обновлён: публикация состоится через 15 минут, если материал не отклонить.')
+        else:
+            item['status'] = 'pending_review'
+            item['planned_at'] = iso(now() + timedelta(minutes=15))
+            s['pending_news_review'] = item
+            send_dm(uid, 'Не удалось обновить предпросмотр с фотографией. Черновик сохранён; попробую повторно показать его при следующем запуске.')
+        return
+
     manual_pending = s.get('pending_manual_post') or {}
     if manual_pending.get('awaiting_content') and not text.startswith('/'):
         capture_manual_post(msg, s, uid)
@@ -1345,25 +1400,30 @@ def handle_admin_message(msg,s):
         elif not text:
             send_dm(uid,'Пришли текст, фото, видео или документ с подписью. Для отмены: /cancel'); return
         pending.update(content); pending['awaiting_content']=False; s['pending_ad']=pending
-        send_dm(uid, f'Черновик готов. Формат <b>{pending["format"]}</b>.\n\nПубликуем сейчас: /publish\nОтложить: /schedule ГГГГ-ММ-ДД ЧЧ:ММ\nОтменить: /cancel')
+        send_dm(uid, f'Черновик готов. Формат <b>{pending["format"]}</b>.\\n\\nПубликуем сейчас: /publish\\nОтложить: /schedule ГГГГ-ММ-ДД ЧЧ:ММ\\nОтменить: /cancel')
         return
     aliases = {'📰 Новости':'/newsqueue', '📥 Предложить пост':'/suggest', '📣 Добавить рекламу':'/ad', '📋 Активная реклама':'/ads', '📊 Статус':'/status', '⏸ Пауза / ▶️ Продолжить':'/togglepause'}
-    if text in aliases: text = aliases[text]
-    parts=text.split(maxsplit=1); cmd=parts[0].split('@')[0].lower() if parts else ''
-    arg=parts[1].strip() if len(parts)>1 else ''
+    if text in aliases:
+        text = aliases[text]
+    parts = text.split(maxsplit=1)
+    cmd = parts[0].split('@')[0].lower() if parts else ''
+    arg = parts[1].strip() if len(parts)>1 else ''
     if cmd in ('/start','/menu','/help'):
-        send_dm(uid, '<b>Панель Нячанг Лайф</b>\nВыбери действие кнопками ниже.\n\nРеклама: /ad 1/24 → отправь содержимое → /preview → /publish.\nДругие команды: /ads, /status, /pause, /resume, /cancel.', main_menu())
+        send_dm(uid, '<b>Панель Нячанг Лайф</b>\\nВыбери действие кнопками ниже.\\n\\nРеклама: /ad 1/24 → отправь содержимое → /preview → /publish.\\nДругие команды: /ads, /status, /pause, /resume, /cancel.', main_menu())
     elif cmd=='/ad':
         if (s.get('pending_manual_post') or {}).get('awaiting_content'):
             send_dm(uid, 'Сначала отправь материал для очереди новостей или отмени этот черновик командой /cancel.')
             return
-        if not arg: arg='1/24'
+        if not arg:
+            arg='1/24'
         m=re.fullmatch(r'(\d{1,2})\s*/\s*(\d{1,3})',arg)
-        if not m: send_dm(uid,'Формат: <code>/ad 1/24</code> — 1 час без новостей, удаление через 24 часа.', main_menu()); return
+        if not m:
+            send_dm(uid,'Формат: <code>/ad 1/24</code> — 1 час без новостей, удаление через 24 часа.', main_menu()); return
         top_hours, life_hours=map(int,m.groups())
-        if not (1<=top_hours<=72 and top_hours<=life_hours<=720): send_dm(uid,'Допустимо: время в топе 1–72 часа, срок жизни не меньше времени в топе и не больше 720 часов.'); return
+        if not (1<=top_hours<=72 and top_hours<=life_hours<=720):
+            send_dm(uid,'Допустимо: время в топе 1–72 часа, срок жизни не меньше времени в топе и не больше 720 часов.'); return
         s['pending_ad']={'format':f'{top_hours}/{life_hours}','top_hours':top_hours,'life_hours':life_hours,'created_by':uid,'awaiting_content':True}
-        send_dm(uid,f'Пришли следующим сообщением рекламный текст, фото или видео.\nФормат: <b>{top_hours}/{life_hours}</b>.\nПервые {top_hours} ч. бот не будет публиковать обычные новости и рубрики; реклама удалится через {life_hours} ч.\n/cancel — отмена.', main_menu())
+        send_dm(uid,f'Пришли следующим сообщением рекламный текст, фото или видео.\\nФормат: <b>{top_hours}/{life_hours}</b>.\\nПервые {top_hours} ч. бот не будет публиковать обычные новости и рубрики; реклама удалится через {life_hours} ч.\\n/cancel — отмена.', main_menu())
 
     elif cmd=='/preview':
         ad = s.get('pending_ad') or {}
@@ -1395,11 +1455,7 @@ def handle_admin_message(msg,s):
             if len(preview) > 1024:
                 send_dm(uid, 'Подпись к медиа длиннее лимита Telegram 1024 символа. Сократи текст перед предпросмотром.')
                 return
-            method, field = {
-                'photo': ('sendPhoto', 'photo'),
-                'video': ('sendVideo', 'video'),
-                'document': ('sendDocument', 'document')
-            }[kind]
+            method, field = {'photo': ('sendPhoto', 'photo'), 'video': ('sendVideo', 'video'), 'document': ('sendDocument', 'document')}[kind]
             api(method, {'chat_id': uid, field: ad['file_id'], 'caption': preview, 'parse_mode': 'HTML'})
         else:
             for part in split_html_text(preview):
@@ -1424,21 +1480,24 @@ def handle_admin_message(msg,s):
         except ValueError as e:
             send_dm(uid, html.escape(str(e)))
             return
-        try: when=datetime.strptime(arg,'%Y-%m-%d %H:%M').replace(tzinfo=TZ)
-        except ValueError: send_dm(uid,'Формат: /schedule 2026-10-25 14:30'); return
-        if when<=now(): send_dm(uid,'Время должно быть в будущем.'); return
+        try:
+            when=datetime.strptime(arg,'%Y-%m-%d %H:%M').replace(tzinfo=TZ)
+        except ValueError:
+            send_dm(uid,'Формат: /schedule 2026-10-25 14:30'); return
+        if when<=now():
+            send_dm(uid,'Время должно быть в будущем.'); return
         ad['scheduled_at']=iso(when); ad['awaiting_content']=False; ad['created_by']=uid; ad['id']=str(int(time.time()))
         s['ads'].append(ad); s['pending_ad']={}
         send_dm(uid,f'Реклама запланирована на {when.strftime("%d.%m.%Y %H:%M")} по времени Нячанга. ID: <code>{ad["id"]}</code>.')
     elif cmd=='/togglepause':
         s['paused']=not s.get('paused',False); s['pause_until']=iso(now()+timedelta(days=3650)) if s['paused'] else ''
-        send_dm(uid, 'Пауза включена: обычные посты остановлены.' if s['paused'] else 'Ручная пауза снята. Рекламная пауза, если действует, сохранится.', main_menu())
+        send_dm(uid, 'Пауза включена: обычные посты остановлены.' if s['paused'] else 'Ручная пауза снята: продолжение по расписанию, если нет рекламного окна.', main_menu())
     elif cmd=='/suggest':
         if (s.get('pending_ad') or {}).get('awaiting_content'):
             send_dm(uid, 'Сначала закончи или отмени рекламный черновик командой /cancel, затем предложи новость.')
             return
         s['pending_manual_post']={'user_id':uid,'awaiting_content':True}
-        send_dm(uid,'Пришли следующим сообщением текст новости, ссылку или фото/видео с подписью.\nМатериал попадёт в очередь и не опубликуется без твоего подтверждения.\n/cancel — отмена.', main_menu())
+        send_dm(uid,'Пришли следующим сообщением текст новости, ссылку или фото/видео с подписью.\\nМатериал попадёт в очередь и не опубликуется без твоего подтверждения.\\n/cancel — отмена.', main_menu())
     elif cmd=='/newsqueue':
         pending_items = [p for p in s.get('manual_posts', []) if p.get('status', 'pending') == 'pending']
         if not pending_items:
@@ -1449,8 +1508,8 @@ def handle_admin_message(msg,s):
             preview = html.escape(clean_multiline(item.get('content', ''))[:700])
             media_note = ' · есть фото/видео' if item.get('file_id') else ''
             item_id = html.escape(str(item.get('id', '?')))
-            send_dm(uid, f'ID <code>{item_id}</code>{media_note}\n\n{preview}\n\n'
-                         f'Опубликовать: <code>/approve {item_id}</code>\n'
+            send_dm(uid, f'ID <code>{item_id}</code>{media_note}\\n\\n{preview}\\n\\n'
+                         f'Опубликовать: <code>/approve {item_id}</code>\\n'
                          f'Отклонить: <code>/reject {item_id}</code>')
     elif cmd=='/approve':
         target = arg.strip()
@@ -1480,48 +1539,44 @@ def handle_admin_message(msg,s):
         for a in s['ads'][-30:]:
             status='удалена' if a.get('deleted') else ('запланирована на '+parse_dt(a['scheduled_at']).strftime('%d.%m %H:%M') if a.get('scheduled_at') and not a.get('message_id') else 'активна')
             rows.append(f'ID <code>{a.get("id","?")}</code> · {a.get("format","?")} · {status}')
-        send_dm(uid,'<b>Реклама</b>\n'+'\n'.join(rows) if rows else 'Реклам пока нет.', main_menu())
+        send_dm(uid,'<b>Реклама</b>\\n'+'\\n'.join(rows) if rows else 'Реклам пока нет.', main_menu())
         for a in s['ads'][-10:]:
             if a.get('message_id') and not a.get('deleted'):
                 send_dm(uid, f'Реклама ID <code>{a.get("id","?")}</code> · удаление: {parse_dt(a["expires_at"]).strftime("%d.%m %H:%M") if a.get("expires_at") else "не задано"} · закрепление можно проверить кнопкой ниже.', ad_actions(a.get('id','?')))
     elif cmd=='/editad':
-        if '|' not in arg: send_dm(uid,'Формат: <code>/editad ID | новый текст</code>'); return
+        if '|' not in arg:
+            send_dm(uid,'Формат: <code>/editad ID | новый текст</code>'); return
         target,new_text=arg.split('|',1); target=target.strip(); new_text=new_text.strip()
         ad=next((a for a in s['ads'] if a.get('id')==target and not a.get('deleted') and a.get('message_id')),None)
-        if not ad: send_dm(uid,'Не нашёл активный рекламный пост с таким ID. Посмотри /ads.'); return
+        if not ad:
+            send_dm(uid,'Не нашёл активный рекламный пост с таким ID. Посмотри /ads.'); return
         new_text=html.escape(new_text)
         if ad.get('type') not in ('photo', 'video', 'document', 'album') and (
-            len(ad.get('message_ids') or [ad.get('message_id')]) > 1 or
-            len((new_text + footer()).strip()) > 3900
+            len(ad.get('message_ids') or [ad.get('message_id')]) > 1 or len((new_text + footer()).strip()) > 3900
         ):
             old_ids = list(ad.get('message_ids') or [ad.get('message_id')])
             old_ids.extend(ad.get('stale_message_ids') or [])
             old_ids = list(dict.fromkeys(mid for mid in old_ids if mid))
-            replacement = dict(ad)
-            replacement['text'] = new_text
+            replacement = dict(ad); replacement['text'] = new_text
             try:
                 result = send_ad_content(replacement)
             except Exception as e:
                 send_dm(uid, f'Не удалось заменить рекламный текст: {html.escape(str(e)[:350])}')
                 return
             try:
-                delete_ad_message({
-                    'chat_id': ad.get('chat_id', CHANNEL),
-                    'message_ids': old_ids
-                })
+                delete_ad_message({'chat_id': ad.get('chat_id', CHANNEL), 'message_ids': old_ids})
                 ad['stale_message_ids'] = []
             except Exception as e:
                 ad['stale_message_ids'] = old_ids
                 print('Old ad text cleanup will retry:', ad.get('id'), type(e).__name__)
-            ad['message_id'] = result['message_id']
-            ad['message_ids'] = result.get('_message_ids') or [result['message_id']]
-            ad['chat_id'] = result['chat']['id']
-            ad['text'] = new_text
+            ad['message_id'] = result['message_id']; ad['message_ids'] = result.get('_message_ids') or [result['message_id']]
+            ad['chat_id'] = result['chat']['id']; ad['text'] = new_text
             send_dm(uid, f'Текст рекламы {target} обновлён. Если запись была закреплена, проверь закрепление через /ads.')
             return
         if ad.get('type') in ('photo','video','document','album'):
             caption=(new_text+footer()).strip()
-            if len(caption)>1024: send_dm(uid,'Подпись слишком длинная: максимум 1024 символа вместе с футером.'); return
+            if len(caption)>1024:
+                send_dm(uid,'Подпись слишком длинная: максимум 1024 символа вместе с футером.'); return
             api('editMessageCaption',{'chat_id':ad.get('chat_id',CHANNEL),'message_id':ad['message_id'],'caption':caption,'parse_mode':'HTML'})
         else:
             api('editMessageText',{'chat_id':ad.get('chat_id',CHANNEL),'message_id':ad['message_id'],'text':(new_text+footer()).strip(),'parse_mode':'HTML','disable_web_page_preview':'true'})
@@ -1529,7 +1584,8 @@ def handle_admin_message(msg,s):
     elif cmd in ('/cancelad','/delete'):
         target=arg.strip()
         ad=next((a for a in s['ads'] if a.get('id')==target and not a.get('deleted')),None)
-        if not ad: send_dm(uid,'Не нашёл активную рекламу с таким ID. Посмотри /ads.'); return
+        if not ad:
+            send_dm(uid,'Не нашёл активную рекламу с таким ID. Посмотри /ads.'); return
         if ad.get('message_id') or ad.get('message_ids'):
             delete_ad_message(ad)
         ad['deleted']=True; ad['deleted_at']=iso(now())
@@ -1544,10 +1600,12 @@ def handle_admin_message(msg,s):
         send_dm(uid,'Текущий черновик отменён.')
     elif cmd=='/status':
         until=top_pause_until(s)
-        send_dm(uid, f'<b>Статус</b>\nВремя Нячанга: {now().strftime("%d.%m.%Y %H:%M:%S")}\nПостов сегодня: {count_today(s)}/10\nНовости: {"на паузе" if is_paused(s) else "разрешены"}\nОкно без новостей до: {until.strftime("%d.%m %H:%M") if until>now() else "нет"}\nАктивных реклам: {sum(1 for a in s["ads"] if not a.get("deleted") and a.get("message_id"))}')
+        pending = s.get('pending_news_review') or {}
+        review_status = f'\nЧерновик новости: {pending.get("planned_at", "на проверке")}' if pending else '\nЧерновик новости: нет'
+        send_dm(uid, f'<b>Статус</b>\nВремя Нячанга: {now().strftime("%d.%m.%Y %H:%M:%S")}\nПостов сегодня: {count_today(s)}/10\nНовости: {"на паузе" if is_paused(s) else "разрешены"}\nОкно без новостей до: {until.strftime("%d.%m %H:%M") if until>now() else "нет"}\nАктивных реклам: {sum(1 for a in s["ads"] if not a.get("deleted") and a.get("message_id"))}{review_status}')
     else:
-        # Other admin messages are only treated as ad content when draft is awaiting it.
-        if text.startswith('/'): send_dm(uid,'Неизвестная команда. Напиши /menu.')
+        if text.startswith('/'):
+            send_dm(uid,'Неизвестная команда. Напиши /menu.')
 
 def publish_ad(ad,s,uid=None):
     top=int(ad['top_hours']); life=int(ad['life_hours']); t=now()
@@ -1641,15 +1699,54 @@ def process_ad_timers(s):
                             print('Could not notify ad owner about expiry:', type(notify_error).__name__)
                         ad['_expiry_error_notified'] = True
 
-def handle_callback(q,s):
-    user=q.get('from') or {}; uid=str(user.get('id',''))
-    if uid not in ADMIN_USER_IDS: return
-    data=q.get('data',''); msg=q.get('message') or {}
-    if str((msg.get('chat') or {}).get('id','')) != uid: return
+
+def handle_callback(q, s):
+    user = q.get('from') or {}
+    uid = str(user.get('id', ''))
+    if uid not in ADMIN_USER_IDS:
+        return
+    data = q.get('data', '')
+    msg = q.get('message') or {}
+    if str((msg.get('chat') or {}).get('id', '')) != uid:
+        return
     try:
-        if data.startswith('ad_delete:'):
-            target=data.split(':',1)[1]; ad=next((a for a in s['ads'] if str(a.get('id'))==target and not a.get('deleted')),None)
-            if not ad: send_dm(uid,'Реклама не найдена или уже удалена.',main_menu()); return
+        if data.startswith('review:'):
+            parts = data.split(':', 2)
+            action = parts[1] if len(parts) > 1 else ''
+            target = parts[2] if len(parts) > 2 else ''
+            item = s.get('pending_news_review') or {}
+            if not item or str(item.get('id')) != target:
+                send_dm(uid, 'Этот черновик уже опубликован, отклонён или заменён.')
+            elif action == 'edit':
+                s['review_editing'] = {'id': target, 'user_id': uid, 'started_at': iso(now())}
+                send_dm(uid, 'Отправь следующим сообщением новый текст публикации. Если нужно заменить изображение — отправь фото с новой подписью.\\n\\nТаймер публикации перезапустится на 15 минут после изменения. Для отмены: /cancelreview')
+            elif action == 'reject':
+                item['status'] = 'rejected'
+                item['rejected_at'] = iso(now())
+                item['rejected_by'] = uid
+                link = item.get('link') or ''
+                original_title = item.get('source_title') or item.get('title') or ''
+                if link:
+                    s['rejected_news_links'] = (s.get('rejected_news_links', []) + [link])[-1000:]
+                if original_title:
+                    fingerprint = title_fingerprint(original_title)
+                    s['rejected_news_fingerprints'] = (s.get('rejected_news_fingerprints', []) + [fingerprint])[-1000:]
+                    s['rejected_news_titles'] = (s.get('rejected_news_titles', []) + [original_title])[-500:]
+                delete_review_previews(item)
+                s['pending_news_review'] = {}
+                s['review_editing'] = {}
+                send_dm(uid, '🗑 Черновик отклонён. Он не будет опубликован; бот продолжит поиск следующей новости.')
+            elif action == 'publish':
+                try:
+                    publish_review_item(s, item)
+                except Exception as e:
+                    print('Immediate review publication failed:', type(e).__name__)
+                    send_dm(uid, f'Не удалось опубликовать черновик. Он сохранён в очереди: {html.escape(str(e)[:250])}')
+        elif data.startswith('ad_delete:'):
+            target=data.split(':',1)[1]
+            ad=next((a for a in s['ads'] if str(a.get('id'))==target and not a.get('deleted')),None)
+            if not ad:
+                send_dm(uid,'Реклама не найдена или уже удалена.',main_menu()); return
             delete_ad_message(ad); ad['deleted']=True; ad['deleted_at']=iso(now()); send_dm(uid,f'Реклама {target} удалена и откреплена, если была закреплена.',main_menu())
         elif data.startswith('ad_pin:'):
             target = data.split(':', 1)[1]
@@ -1657,30 +1754,32 @@ def handle_callback(q,s):
             if not ad:
                 send_dm(uid, 'Реклама не найдена или ещё не опубликована.', main_menu())
                 return
-            # For an album, pin the first message; Telegram groups the album visually.
             mid = (ad.get('message_ids') or [ad.get('message_id')])[0]
             try:
-                api('pinChatMessage', {
-                    'chat_id': ad.get('chat_id', CHANNEL),
-                    'message_id': mid,
-                    'disable_notification': 'true'
-                })
+                api('pinChatMessage', {'chat_id': ad.get('chat_id', CHANNEL), 'message_id': mid, 'disable_notification': 'true'})
                 send_dm(uid, f'Реклама {target} закреплена. Проверь, что у бота есть право закреплять сообщения.', main_menu())
             except Exception as e:
                 print('Pin action failed:', type(e).__name__)
                 send_dm(uid, 'Не удалось закрепить рекламу. Проверь права администратора бота в канале.', main_menu())
         elif data.startswith('ad_unpin:'):
-            target=data.split(':',1)[1]; ad=next((a for a in s['ads'] if str(a.get('id'))==target and not a.get('deleted')),None)
-            if not ad: send_dm(uid,'Реклама не найдена или уже удалена.',main_menu()); return
+            target=data.split(':',1)[1]
+            ad=next((a for a in s['ads'] if str(a.get('id'))==target and not a.get('deleted')),None)
+            if not ad:
+                send_dm(uid,'Реклама не найдена или уже удалена.',main_menu()); return
             for mid in (ad.get('message_ids') or [ad.get('message_id')]):
                 if mid:
-                    try: api('unpinChatMessage',{'chat_id':ad.get('chat_id',CHANNEL),'message_id':mid})
-                    except Exception as e: print('Unpin action:',e)
+                    try:
+                        api('unpinChatMessage',{'chat_id':ad.get('chat_id',CHANNEL),'message_id':mid})
+                    except Exception as e:
+                        print('Unpin action:', type(e).__name__)
             send_dm(uid,f'Команда открепления выполнена для рекламы {target}.',main_menu())
-    except Exception as e: send_dm(uid,'Не удалось выполнить действие. Проверь права бота и журнал GitHub Actions.'); print('Callback error:',e)
-    try: api('answerCallbackQuery',{'callback_query_id':q['id']})
-    except Exception: pass
-
+    except Exception as e:
+        send_dm(uid,'Не удалось выполнить действие. Проверь права бота и журнал GitHub Actions.')
+        print('Callback error:', type(e).__name__)
+    try:
+        api('answerCallbackQuery',{'callback_query_id':q['id']})
+    except Exception:
+        pass
 
 def ensure_polling_no_webhook():
     """Return whether polling is safe. Never disable a webhook or stop scheduled posts."""

@@ -1849,88 +1849,146 @@ def mark_slot(s,key): s['last_slots'][key]=now().date().isoformat()
 
 
 
+
+def next_routine_target(current_time=None):
+    """Return the next fixed daily rubric time in Nha Trang timezone."""
+    current_time = current_time or now()
+    targets = [(6, 0), (8, 0), (18, 0), (22, 30)]
+    candidates = []
+    for day_offset in (0, 1):
+        day = current_time.date() + timedelta(days=day_offset)
+        for hour, minute in targets:
+            target = datetime(day.year, day.month, day.day, hour, minute, tzinfo=TZ)
+            if target >= current_time:
+                candidates.append(target)
+    return min(candidates) if candidates else None
+
+
+def routine_target_within(minutes=25, current_time=None):
+    """Keep new general-news previews away from fixed daily routine slots."""
+    current_time = current_time or now()
+    target = next_routine_target(current_time)
+    return bool(target and timedelta(0) <= target - current_time <= timedelta(minutes=minutes))
+
+
+
 def routine_posts(s):
-    """Morning greeting at 06:00 and an interactive, factual end-of-day recap at 22:30."""
+    """Queue the 06:00 greeting and the 22:30 recap for private review on the same day."""
+    if is_paused(s) or count_today(s) >= 10 or s.get('pending_news_review'):
+        return
     n = now()
-    if is_paused(s) or count_today(s) >= 10:
-        return
-
-    if n.hour == 6 and 0 <= n.minute < 5 and not slot_once(s, 'morning'):
-        greetings = [
-            '☀️ Доброе утро, Нячанг! Пусть день начнётся спокойно. Вы уже проснулись?\n\n👍 — уже на ногах\n❤️ — проснулся, но ещё не включился\n🙏 — пусть день будет хорошим.',
-            '☀️ Доброе утро! Какой план на сегодня?\n\n👍 — дела и работа\n❤️ — море и прогулка\n🙏 — пока хочу ещё поспать.',
-            '☀️ Доброе утро, Нячанг! Желаю лёгкого дня и хороших новостей. Как настроение?\n\n❤️ — всё отлично\n👍 — постепенно просыпаюсь\n🙏 — нужен спокойный день.'
-        ]
-        text = greetings[int(n.strftime('%j')) % len(greetings)] + footer()
-        post_with_image(text, image_query='Nha Trang Vietnam sunrise coastal city beach')
-        bump_today(s)
-        mark_slot(s, 'morning')
-        return
-
-    if n.hour != 22 or not (30 <= n.minute < 35) or slot_once(s, 'night'):
-        return
-
-    today = [
-        item for item in s.get('published_news', [])
-        if str(item.get('published_at', '')).startswith(n.date().isoformat())
-        and item.get('summary')
-    ]
-    recap = []
-    for item in today[-4:]:
-        summary = clean_multiline(item.get('summary', ''))
-        if not summary:
-            continue
-        first_sentence = re.split(r'(?<=[.!?])\s+', summary.replace('\n', ' '), maxsplit=1)[0]
-        if len(first_sentence) > 260:
-            first_sentence = first_sentence[:257].rsplit(' ', 1)[0] + '…'
-        if first_sentence and first_sentence not in recap:
-            recap.append(first_sentence)
-
-    tomorrow_warning = ''
-    try:
-        url = ('https://api.open-meteo.com/v1/forecast?latitude=12.2388&longitude=109.1967'
-               '&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code'
-               '&timezone=Asia%2FHo_Chi_Minh&forecast_days=2')
-        forecast = json.loads(get_url(url).decode('utf-8'))
-        daily = forecast['daily']
-        code = int(daily['weather_code'][1])
-        rain_values = daily.get('precipitation_probability_max', [None, None])
-        rain = rain_values[1] if len(rain_values) > 1 else None
-        names = {
-            0:'ясно',1:'преимущественно ясно',2:'переменная облачность',3:'облачно',
-            45:'туман',48:'туман',51:'морось',53:'морось',55:'сильная морось',
-            61:'небольшой дождь',63:'дождь',65:'сильный дождь',80:'кратковременный дождь',
-            81:'ливни',82:'сильные ливни',95:'гроза',96:'гроза с градом',99:'сильная гроза с градом'
+    slots = [
+        {
+            'key': 'review_morning',
+            'hour': 6,
+            'minute': 0,
+            'kind': 'morning',
+            'kind_label': 'Доброе утро',
+            'image_query': 'Nha Trang Vietnam sunrise beach promenade morning light'
+        },
+        {
+            'key': 'review_night',
+            'hour': 22,
+            'minute': 30,
+            'kind': 'night',
+            'kind_label': 'Доброй ночи',
+            'image_query': 'Nha Trang Vietnam night city lights beach coastline'
         }
-        if (rain is not None and rain >= 60) or code in (65, 81, 82, 95, 96, 99):
-            rain_note = f'вероятность осадков — {rain}%' if rain is not None else 'вероятность осадков не указана'
-            tomorrow_warning = (
-                f'На завтра прогнозируют {names.get(code, "переменную погоду")}; {rain_note}. '
-                'Учитывай это при планировании поездок и дел на улице.'
-            )
-    except Exception as e:
-        print('Night forecast unavailable; no warning inferred:', type(e).__name__)
+    ]
+    for slot in slots:
+        key = slot['key']
+        if slot_once(s, key):
+            continue
+        target = n.replace(hour=slot['hour'], minute=slot['minute'], second=0, microsecond=0)
+        start = target - timedelta(minutes=15)
+        end = target + timedelta(minutes=10)
+        if not (start <= n <= end):
+            continue
 
-    parts = ['🌙 Доброй ночи, Нячанг!']
-    if recap:
-        parts.append('Коротко о сегодняшних новостях: ' + ' '.join(recap[:3]))
-    if tomorrow_warning:
-        parts.append(tomorrow_warning)
-    parts.append('Перед сном выбери реакцию: ❤️ — день удался; 🙏 — завтра хочется спокойствия; 🤣 — сегодня было над чем посмеяться.')
-    text = '\n\n'.join(parts) + footer()
-    post_with_image(text, image_query='Nha Trang Vietnam night city beach coastline')
-    bump_today(s)
-    mark_slot(s, 'night')
+        if slot['kind'] == 'morning':
+            messages = [
+                '☀️ Доброе утро, Нячанг! Уже проснулись?\\n\\n👍 — уже на ногах\\n❤️ — проснулся, но ещё не включился\\n🙏 — пусть день будет хорошим.',
+                '☀️ Доброе утро! Какой план на сегодня?\\n\\n👍 — работа и дела\\n❤️ — море и прогулка\\n🙏 — пока хочу ещё немного поспать.',
+                '☀️ Доброе утро, Нячанг! Как настроение?\\n\\n❤️ — всё отлично\\n👍 — постепенно просыпаюсь\\n🙏 — нужен спокойный день.'
+            ]
+            body = messages[int(n.strftime('%j')) % len(messages)]
+        else:
+            stories = []
+            today_items = [
+                item for item in s.get('published_news', [])
+                if str(item.get('published_at', '')).startswith(n.date().isoformat())
+                and item.get('summary')
+            ]
+            for entry in today_items[-3:]:
+                summary = clean_multiline(entry.get('summary', ''))
+                if not summary:
+                    continue
+                sentence = re.split(r'(?<=[.!?])\\s+', summary.replace('\\n', ' '), maxsplit=1)[0]
+                if len(sentence) > 240:
+                    sentence = sentence[:237].rsplit(' ', 1)[0] + '…'
+                if sentence and sentence not in stories:
+                    stories.append(sentence)
+            parts = ['🌙 Доброй ночи, Нячанг!']
+            if stories:
+                parts.append('Что важного произошло сегодня: ' + ' '.join(stories))
+            tomorrow_warning = ''
+            try:
+                url = ('https://api.open-meteo.com/v1/forecast?latitude=12.2388&longitude=109.1967'
+                       '&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code'
+                       '&timezone=Asia%2FHo_Chi_Minh&forecast_days=2')
+                forecast = json.loads(get_url(url).decode('utf-8'))
+                daily = forecast['daily']
+                code = int(daily['weather_code'][1])
+                rain_values = daily.get('precipitation_probability_max', [None, None])
+                rain = rain_values[1] if len(rain_values) > 1 else None
+                names = {
+                    0:'ясно',1:'преимущественно ясно',2:'переменная облачность',3:'облачно',
+                    45:'туман',48:'туман',51:'морось',53:'морось',55:'сильная морось',
+                    61:'небольшой дождь',63:'дождь',65:'сильный дождь',80:'кратковременный дождь',
+                    81:'ливни',82:'сильные ливни',95:'гроза',96:'гроза с градом',99:'сильная гроза с градом'
+                }
+                if (rain is not None and rain >= 60) or code in (65, 81, 82, 95, 96, 99):
+                    rain_text = f'вероятность осадков — {rain}%' if rain is not None else 'вероятность осадков не указана'
+                    tomorrow_warning = (
+                        f'На завтра прогнозируют {names.get(code, "переменную погоду")}; {rain_text}. '
+                        'Учитывай это при планировании поездок.'
+                    )
+            except Exception as e:
+                print('Night forecast unavailable; no warning inferred:', type(e).__name__)
+            if tomorrow_warning:
+                parts.append(tomorrow_warning)
+            parts.append('Перед сном выбери реакцию: ❤️ — день удался; 🙏 — завтра хочется спокойствия; 🤣 — сегодня было над чем посмеяться.')
+            body = '\\n\\n'.join(parts)
+
+        queued = queue_review_item(s, {
+            'kind': slot['kind'],
+            'kind_label': slot['kind_label'],
+            'title': slot['kind_label'],
+            'body': body,
+            'reaction_line': '',
+            'image_query': slot['image_query'],
+            'urgent': False
+        }, planned_at=target, slot_key=key)
+        if queued:
+            mark_slot(s, key)
+        return
 
 
 def weather_post(s, period):
+    """Prepare the current or next-day forecast 15 minutes before its scheduled slot."""
     key = 'weather_' + period
-    if slot_once(s, key) or count_today(s) >= 10 or is_paused(s):
+    if slot_once(s, key) or count_today(s) >= 10 or is_paused(s) or s.get('pending_news_review'):
         return
     n = now()
-    if period == 'morning' and not (n.hour == 8 and 0 <= n.minute < 10):
+    if period == 'morning':
+        target = n.replace(hour=8, minute=0, second=0, microsecond=0)
+        image_query = 'Nha Trang Vietnam morning weather coastal city daylight'
+    elif period == 'evening':
+        target = n.replace(hour=18, minute=0, second=0, microsecond=0)
+        image_query = 'Nha Trang Vietnam coastal city evening weather seaside'
+    else:
         return
-    if period == 'evening' and not (n.hour == 18 and 0 <= n.minute < 10):
+    if not (target - timedelta(minutes=15) <= n <= target + timedelta(minutes=10)):
         return
 
     url = ('https://api.open-meteo.com/v1/forecast?latitude=12.2388&longitude=109.1967'
@@ -1950,6 +2008,7 @@ def weather_post(s, period):
         code, current_code = int(daily['weather_code'][index]), int(cur['weather_code'])
         rain_values = daily.get('precipitation_probability_max', [None, None])
         rain = rain_values[index] if len(rain_values) > index else None
+
         current_text = (
             f'Сейчас в Нячанге {round(cur["temperature_2m"])}°C, '
             f'{names.get(current_code, "переменная погода")} {icons.get(current_code, "🌤️")}; '
@@ -1970,12 +2029,14 @@ def weather_post(s, period):
             advice = 'Вероятность дождя высокая — учитывай это при поездках и планах на улице.'
         elif rain is not None and rain >= 35:
             advice = 'Возможен дождь, поэтому проверь прогноз перед выходом.'
+            image_query = 'Vietnam Nha Trang rainy weather wet street tropical rain'
         elif code in (82, 95, 96, 99):
             advice = 'В прогнозе есть гроза. Следи за обновлениями погоды перед выходом.'
+            image_query = 'Vietnam Nha Trang dark storm clouds coastal city rain'
         else:
             advice = 'Перед длительной поездкой проверь прогноз ещё раз.'
 
-        text = current_text + '\n' + forecast_text + '\n' + rain_text + '\n\n' + advice
+        parts = [current_text, forecast_text, rain_text, advice]
         if period == 'morning':
             cutoff = n - timedelta(hours=24)
             recent = []
@@ -1989,25 +2050,29 @@ def weather_post(s, period):
             snippets = []
             for entry in recent[-3:]:
                 summary = clean_multiline(entry.get('summary', ''))
-                first_sentence = re.split(r'(?<=[.!?])\s+', summary.replace('\n', ' '), maxsplit=1)[0]
+                first_sentence = re.split(r'(?<=[.!?])\\s+', summary.replace('\\n', ' '), maxsplit=1)[0]
                 if len(first_sentence) > 220:
                     first_sentence = first_sentence[:217].rsplit(' ', 1)[0] + '…'
                 if first_sentence and first_sentence not in snippets:
                     snippets.append(first_sentence)
             if snippets:
-                text += '\n\nЗа последние сутки: ' + ' '.join(snippets)
-            image_query = 'Nha Trang Vietnam morning weather city coastal view'
-        elif rain is not None and rain >= 35:
-            image_query = 'Nha Trang Vietnam rainy weather wet street tropical rain'
-        else:
-            image_query = 'Nha Trang Vietnam coastal city weather seaside'
-        text += '\n\n👍 — прогноз полезен; ❤️ — следим за погодой вместе.' + footer()
-        post_with_image(text, image_query=image_query)
-        bump_today(s)
-        mark_slot(s, key)
-    except Exception as e:
-        print('Weather error; no unverified weather message was posted:', type(e).__name__)
+                parts.append('За последние сутки: ' + ' '.join(snippets))
+        parts.append('👍 — прогноз полезен; ❤️ — следим за погодой вместе.')
+        body = '\\n\\n'.join(parts)
 
+        queued = queue_review_item(s, {
+            'kind': 'weather_' + period,
+            'kind_label': 'Погода на сегодня' if period == 'morning' else 'Погода на завтра',
+            'title': 'Погода в Нячанге',
+            'body': body,
+            'reaction_line': '',
+            'image_query': image_query,
+            'urgent': False
+        }, planned_at=target, slot_key=key)
+        if queued:
+            mark_slot(s, key)
+    except Exception as e:
+        print('Weather error; no unverified weather message was queued:', type(e).__name__)
 
 def publish_news(s):
     """Publish useful local stories with an article photo first and no visible source link or headline."""

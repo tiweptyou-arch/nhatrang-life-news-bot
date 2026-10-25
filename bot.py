@@ -702,27 +702,34 @@ def split_manual_content(content):
     return 'Предложенная новость', only
 
 
+
 def publish_manual_post(item, s, uid=None):
-    """Publish an explicitly approved manual item, preserving full text and optional media."""
+    """Publish an explicitly approved tip without adding a headline or exposing source URLs."""
     if is_paused(s):
         raise ValueError('Публикации на паузе из-за ручной или рекламной паузы.')
     if count_today(s) >= 10:
         raise ValueError('Достигнут дневной лимит в 10 публикаций.')
-    raw = (item.get('content') or '').strip()
-    title, body = split_manual_content(raw)
-    title_html = html.escape(title)
-    body_html = html.escape(body)
-    lead = '📰 <b>' + title_html + '</b>'
-    result = None
 
+    raw = clean_multiline((item.get('content') or '').strip())
+    title, body = split_manual_content(raw)
+    source_match = re.search(r'https?://[^\s<>]+', raw)
+    source_link = source_match.group(0).rstrip('.,);]') if source_match else ''
+    body = re.sub(r'(?i)(?:источник|source|ссылка на источник)\s*:\s*https?://\S+', '', body)
+    body = re.sub(r'https?://\S+', '', body)
+    body = clean_multiline(body)
+    if not body:
+        raise ValueError('В материале не осталось текста новости после удаления заголовка и ссылок. Добавь описание и повтори публикацию.')
+    body_html = html.escape(body)
+    result = None
     post_type = item.get('type') or 'text'
     file_id = item.get('file_id')
+
     if post_type == 'album' and item.get('media_items'):
         media_items = item.get('media_items') or []
         if len(media_items) < 2:
             raise ValueError('В альбоме должно быть минимум два фото или видео.')
         body_excerpt = body[:420].strip()
-        caption = lead + ('\n\n' + html.escape(body_excerpt) if body_excerpt else '') + footer()
+        caption = ((html.escape(body_excerpt) + footer()) if body_excerpt else footer()).strip()
         if len(caption) > 1024:
             raise ValueError('Подпись альбома превышает лимит Telegram 1024 символа.')
         media = []
@@ -744,21 +751,15 @@ def publish_manual_post(item, s, uid=None):
                 post_text(part)
                 time.sleep(0.2)
     elif post_type in ('photo', 'video') and file_id:
-        # Use a compact caption while sending the full remainder as follow-up text.
-        body_excerpt = ''
-        remainder = body
+        body_excerpt, remainder = body, ''
         if len(body) > 420:
             cut = body.rfind(' ', 0, 420)
             if cut < 250:
                 cut = 420
             body_excerpt = body[:cut].strip()
             remainder = body[cut:].strip()
-        else:
-            body_excerpt, remainder = body, ''
-        caption = lead
-        if body_excerpt:
-            caption += '\n\n' + html.escape(body_excerpt)
-        caption += footer()
+        caption_text = html.escape(body_excerpt).strip()
+        caption = (caption_text + footer()).strip()
         if len(caption) > 1024:
             raise ValueError('Подпись к медиа превышает лимит Telegram 1024 символа.')
         method, field = ('sendPhoto', 'photo') if post_type == 'photo' else ('sendVideo', 'video')
@@ -771,7 +772,7 @@ def publish_manual_post(item, s, uid=None):
                 post_text(part)
                 time.sleep(0.2)
     else:
-        full_text = lead + ('\n\n' + body_html if body_html else '') + footer()
+        full_text = (body_html + footer()).strip()
         for part in split_html_text(full_text):
             result = post_text(part)
             time.sleep(0.2)
@@ -780,11 +781,9 @@ def publish_manual_post(item, s, uid=None):
     item['published_at'] = iso(now())
     item['published_message_id'] = (result or {}).get('message_id')
     item['title'] = title
-    link_match = re.search(r'https?://[^\s<>]+', raw)
-    source_link = link_match.group(0).rstrip('.,);]') if link_match else ''
     s['published_news'] = (s.get('published_news', []) + [{
         'title': title,
-        'summary': body or raw,
+        'summary': body,
         'link': source_link,
         'published_at': iso(now()),
         'source_published_at': iso(now()),
@@ -799,7 +798,6 @@ def publish_manual_post(item, s, uid=None):
     if uid:
         send_dm(uid, f'Материал <code>{html.escape(item["id"])}</code> опубликован в канале.')
     return result
-
 
 def handle_admin_album(messages, s):
     """Capture a Telegram media group as one manual tip or one ad draft."""

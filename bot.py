@@ -989,7 +989,9 @@ def publish_ad(ad,s,uid=None):
 
 def delete_ad_message(ad):
     chat_id = ad.get('chat_id', CHANNEL)
-    message_ids = ad.get('message_ids') or ([ad['message_id']] if ad.get('message_id') else [])
+    message_ids = list(ad.get('message_ids') or ([ad['message_id']] if ad.get('message_id') else []))
+    message_ids.extend(ad.get('stale_message_ids') or [])
+    message_ids = list(dict.fromkeys(message_ids))
     errors = []
     for mid in message_ids:
         try: api('unpinChatMessage', {'chat_id': chat_id, 'message_id': mid})
@@ -1010,6 +1012,15 @@ def process_ad_timers(s):
     for ad in s['ads']:
         if ad.get('deleted'):
             continue
+        if ad.get('stale_message_ids'):
+            try:
+                delete_ad_message({
+                    'chat_id': ad.get('chat_id', CHANNEL),
+                    'message_ids': ad.get('stale_message_ids')
+                })
+                ad['stale_message_ids'] = []
+            except Exception as e:
+                print('Stale ad-message cleanup will retry:', ad.get('id'), type(e).__name__)
         if ad.get('scheduled_at') and not ad.get('message_id'):
             scheduled_at = parse_dt_strict(ad.get('scheduled_at'))
             if scheduled_at is None:

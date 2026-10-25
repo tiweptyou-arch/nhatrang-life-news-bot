@@ -179,6 +179,12 @@ class NewsQualityTests(unittest.TestCase):
             "Chính quyền thông báo nguy cơ ngập ở một số tuyến đường."
         ))
 
+    def test_russian_local_story_is_kept(self):
+        self.assertTrue(bot.is_relevant_news(
+            "В Нячанге объявили перекрытие дороги на ремонт",
+            "Власти сообщили об изменении движения в городе."
+        ))
+
     def test_image_search_matches_russian_translated_topics(self):
         self.assertIn("storm", bot.news_image_query("Сильный дождь и шторм в Нячанге"))
         self.assertIn("school", bot.news_image_query("Новые правила для школьников в Нячанге"))
@@ -189,6 +195,11 @@ class NewsQualityTests(unittest.TestCase):
     def test_urgent_terms_match_whole_words(self):
         self.assertTrue(bot.is_urgent_news("Cảnh báo bão lớn tại Nha Trang"))
         self.assertFalse(bot.is_urgent_news("Một nghệ sĩ nổi tiếng đến Nha Trang"))
+
+    def test_russian_safety_events_are_urgent_and_get_no_reaction_prompt(self):
+        self.assertTrue(bot.is_urgent_news("Сильный шторм и наводнение в Нячанге"))
+        self.assertTrue(bot.is_urgent_news("Пожар в Нячанге, есть пострадавшие"))
+        self.assertEqual(bot.reaction_line("Пожар в Нячанге, есть пострадавшие"), "")
 
     def test_commons_image_includes_license_and_author_credit(self):
         response = {

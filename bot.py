@@ -570,7 +570,7 @@ def send_ad_content(ad):
                 element['caption'] = full_caption
                 element['parse_mode'] = 'HTML'
             elif item_caption:
-                element['caption'] = item_caption
+                element['caption'] = html.escape(item_caption)
                 element['parse_mode'] = 'HTML'
             media.append(element)
         if not 2 <= len(media) <= 10:
@@ -755,7 +755,7 @@ def handle_admin_album(messages, s):
     for msg in messages:
         if msg.get('photo'):
             media_items.append({'type': 'photo', 'file_id': msg['photo'][-1]['file_id'],
-                                'caption': html.escape((msg.get('caption') or '').strip())})
+                                'caption': (msg.get('caption') or '').strip()})
         elif msg.get('video'):
             media_items.append({'type': 'video', 'file_id': msg['video']['file_id'],
                                 'caption': html.escape((msg.get('caption') or '').strip())})

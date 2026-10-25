@@ -322,6 +322,15 @@ class NewsQualityTests(unittest.TestCase):
             self.assertIn("published_news", saved)
             self.assertFalse(os.path.exists(path + ".tmp"))
 
+    def test_validate_ad_draft_rejects_photo_caption_over_limit_before_scheduling(self):
+        ad = {"type": "photo", "file_id": "file-photo", "text": "x" * 1200}
+        with self.assertRaises(ValueError):
+            bot.validate_ad_draft(ad)
+
+    def test_validate_ad_draft_accepts_long_text_only_ads(self):
+        ad = {"text": " ".join(["advertising"] * 1200)}
+        bot.validate_ad_draft(ad)
+
     def test_long_text_ad_tracks_every_message_for_expiry(self):
         sent = []
         def fake_post(text):

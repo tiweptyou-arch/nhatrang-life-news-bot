@@ -169,6 +169,19 @@ class NewsQualityTests(unittest.TestCase):
             with open(path, encoding="utf-8") as stream:
                 self.assertEqual(stream.read(), original)
 
+    def test_invalid_existing_ads_field_is_not_replaced_with_empty_list(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "bot_state.json")
+            original = {"ads": {"legacy_payload": "keep-this"}, "seen_links": []}
+            with open(path, "w", encoding="utf-8") as stream:
+                json.dump(original, stream)
+            with patch.object(bot, "STATE_FILE", path):
+                with self.assertRaises(RuntimeError):
+                    bot.load_state()
+            with open(path, encoding="utf-8") as stream:
+                saved = json.load(stream)
+            self.assertEqual(saved["ads"], original["ads"])
+
     def test_atomic_state_save_preserves_existing_fields(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "bot_state.json")

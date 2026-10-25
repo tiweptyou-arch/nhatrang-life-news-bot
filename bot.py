@@ -680,7 +680,7 @@ def normalize_image_url(candidate, base_url=''):
     """Normalize an article photo URL and reject Google-served search/preview images."""
     if not isinstance(candidate, str):
         return None
-    candidate = html.unescape(candidate.strip()).replace('\\\\/', '/')
+    candidate = html.unescape(candidate.strip()).replace('\\/', '/')
     if not candidate:
         return None
     if candidate.startswith('//'):
@@ -2243,5 +2243,3 @@ def main():
 
 if __name__=='__main__':
     main()
-
-if __name__=='__main__': main()

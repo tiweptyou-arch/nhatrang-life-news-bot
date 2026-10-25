@@ -2074,10 +2074,17 @@ def weather_post(s, period):
     except Exception as e:
         print('Weather error; no unverified weather message was queued:', type(e).__name__)
 
+
 def publish_news(s):
-    """Publish useful local stories with an article photo first and no visible source link or headline."""
+    """Find the next useful local story and queue it for a 15-minute private review."""
+    if s.get('pending_news_review'):
+        return
     n = now()
     hour_key = n.strftime('%Y-%m-%d-%H')
+    if routine_target_within(25, n):
+        # Leave space for the fixed morning greeting, weather and night routines.
+        return
+
     items, links = [], set()
     for feed in FEEDS:
         try:
@@ -2096,21 +2103,26 @@ def publish_news(s):
                 if not is_recent_source_date(source_published_at, n, urgent=urgent_candidate):
                     print('Skipping missing, future-dated, or stale RSS story:', title)
                     continue
-                items.append((title, desc, link, is_urgent_news(title + ' ' + desc), source_published_at, extract_rss_image(item, link)))
+                items.append((
+                    title, desc, link, urgent_candidate, source_published_at,
+                    extract_rss_image(item, link)
+                ))
         except Exception as e:
             print('Feed error:', type(e).__name__)
 
     items.sort(key=lambda item: not item[3])
-    for title, desc, link, urgent, source_published_at, rss_image in items:
+    for title, desc, link, urgent_candidate, source_published_at, rss_image in items:
         if is_duplicate_news(s, title, link):
             continue
-        if is_paused(s) and not urgent:
+        if is_paused(s) and not urgent_candidate:
             continue
-        if count_today(s) >= 10 and not urgent:
+        if count_today(s) >= 10 and not urgent_candidate:
             return
-        if s.get('last_news_hour') == hour_key and not urgent:
+        if s.get('last_news_hour') == hour_key and not urgent_candidate:
             return
-        if n.hour in (6, 7, 8, 11, 12, 17, 18, 22, 23) and not urgent:
+        if n.hour in (6, 7, 8, 11, 12, 17, 18, 22, 23) and not urgent_candidate:
+            continue
+        if routine_target_within(25, n) and not urgent_candidate:
             continue
 
         translated_title = translate(re.split(r'\s[-–|]\s', title, maxsplit=1)[0])
@@ -2118,24 +2130,28 @@ def publish_news(s):
             continue
         internal_title = clean(translated_title)
         translated_body = translate(desc) if desc else ''
+
         article_page = ''
+        article_page_url = link
         article_image = None
-        # Fetch a selected story once: extract the publisher's article image and reuse page text if needed.
         try:
-            article_page = get_url(link).decode('utf-8', 'ignore')
-            article_image = extract_article_image(article_page, link)
+            # Google News links often wrap a publisher URL. Follow redirects and inspect the final article page.
+            article_page_url, page_bytes = get_url_with_final_url(link)
+            article_page = page_bytes.decode('utf-8', 'ignore')
+            article_image = extract_article_image(article_page, article_page_url)
         except Exception as e:
-            print('Source page unavailable; try the RSS image:', type(e).__name__)
-        image_url = article_image or rss_image
+            print('Source page unavailable; try RSS image/fallback:', type(e).__name__)
+
+        # Never use Google-hosted search/result thumbnails as the public news photo.
+        image_url = normalize_image_url(article_image or rss_image or '', article_page_url) or ''
 
         if len(translated_body) < 180 or len(translated_body.split()) < 24:
             try:
-                page = article_page
-                article_match = re.search(r'<article\b[^>]*>(.*?)</article>', page, re.I | re.S) if page else None
+                article_match = re.search(r'<article\b[^>]*>(.*?)</article>', article_page, re.I | re.S) if article_page else None
                 if article_match:
                     raw_article = article_match.group(1)
                 else:
-                    paragraphs = re.findall(r'<p\b[^>]*>(.*?)</p>', page, re.I | re.S) if page else []
+                    paragraphs = re.findall(r'<p\b[^>]*>(.*?)</p>', article_page, re.I | re.S) if article_page else []
                     raw_article = '\n'.join(paragraphs[:20])
                 raw_article = re.sub(r'<(script|style|noscript|svg)\b[^>]*>.*?</\1>', ' ', raw_article, flags=re.I | re.S)
                 raw_article = re.sub(r'</?(p|div|br|li|h[1-6])\b[^>]*>', '\n', raw_article, flags=re.I)
@@ -2151,47 +2167,81 @@ def publish_news(s):
         if len(body) < 100 or len(body.split()) < 18:
             print('Skipping thin or repetitive story:', internal_title)
             continue
+
         urgent = is_urgent_news(title + ' ' + desc + ' ' + internal_title + ' ' + body)
+        selected_query = news_image_query(internal_title, body)
+        item = {
+            'kind': 'news',
+            'kind_label': 'Важная новость' if urgent else 'Новость Нячанга',
+            'title': internal_title,
+            'source_title': title,
+            'body': body,
+            'reaction_line': reaction_line(title + ' ' + internal_title + ' ' + body),
+            'link': link,
+            'source_published_at': iso(source_published_at),
+            'urgent': bool(urgent),
+            'image_url': image_url,
+            'image_query': selected_query
+        }
 
-        news_text = (('⚠️ ' if urgent else '') + html.escape(body))
-        line = reaction_line(title + ' ' + internal_title + ' ' + body)
-        if line:
-            news_text += '\n\n' + line
-        news_text += footer()
-        post_with_image(
-            news_text,
-            image_url=image_url,
-            image_query=news_image_query(internal_title, body)
-        )
+        if urgent:
+            # Do not delay immediate safety warnings behind an editorial timer.
+            try:
+                result = post_with_image(
+                    review_post_text(item),
+                    image_url=item.get('image_url') or None,
+                    image_query=selected_query
+                )
+                if not result:
+                    raise RuntimeError('Telegram did not confirm the safety alert post')
+                s['seen_links'] = (s.get('seen_links', []) + [link])[-1000:]
+                s['seen_titles'] = (s.get('seen_titles', []) + [title])[-500:]
+                s['seen_fingerprints'] = (s.get('seen_fingerprints', []) + [title_fingerprint(title)])[-1000:]
+                s['published_news'] = (s.get('published_news', []) + [{
+                    'title': internal_title, 'summary': body, 'link': link,
+                    'published_at': iso(now()), 'source_published_at': iso(source_published_at),
+                    'urgent': True
+                }])[-100:]
+                bump_today(s)
+                s['last_news_hour'] = hour_key
+                print('Published urgent safety news immediately with image.')
+                return
+            except Exception as e:
+                print('Urgent safety news failed; keep candidate available for retry:', type(e).__name__)
+                continue
 
-        s['seen_links'] = (s.get('seen_links', []) + [link])[-1000:]
-        s['seen_titles'] = (s.get('seen_titles', []) + [title])[-500:]
-        s['seen_fingerprints'] = (s.get('seen_fingerprints', []) + [title_fingerprint(title)])[-1000:]
-        s['published_news'] = (s.get('published_news', []) + [{
-            'title': internal_title, 'summary': body, 'link': link,
-            'published_at': iso(now()), 'source_published_at': iso(source_published_at),
-            'urgent': bool(urgent)
-        }])[-100:]
-        bump_today(s)
-        s['last_news_hour'] = hour_key
-        print('Published news with image:', 'article' if article_image else ('RSS' if rss_image else 'topical fallback'), 'urgent=', urgent)
-        return
+        queued = queue_review_item(s, item)
+        if queued:
+            return
+        # No preview/photo means this item is not treated as reviewed or published. Try the next source story.
+
 
 def main():
     s = load_state()
     if ensure_polling_no_webhook():
         get_updates(s)
     else:
-        print('Admin polling skipped; scheduled content and ad timers will still run.')
+        print('Admin polling skipped; scheduled content and review timers will still run.')
     process_ad_timers(s)
+    process_news_review(s)
     if not is_paused(s):
         routine_posts(s)
         weather_post(s, 'morning')
         weather_post(s, 'evening')
-    # Screen news even during a quiet window; publish_news itself allows only urgent alerts through.
+    # Screen stories even during quiet windows so real safety alerts can still bypass review/pause.
     publish_news(s)
     save_state(s)
-    print('Finished:', now().isoformat(), 'posts_today=', count_today(s), 'paused=', is_paused(s))
+    pending = s.get('pending_news_review') or {}
+    print(
+        'Finished:', now().isoformat(),
+        'posts_today=', count_today(s),
+        'paused=', is_paused(s),
+        'review_pending=', bool(pending),
+        'review_due=', pending.get('planned_at', '')
+    )
 
+
+if __name__=='__main__':
+    main()
 
 if __name__=='__main__': main()

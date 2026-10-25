@@ -334,11 +334,11 @@ class NewsQualityTests(unittest.TestCase):
             "credit_html": '📷 Иллюстрация: <a href="https://commons.wikimedia.org/wiki/File:Example.jpg">Wikimedia Commons</a> · автор: Example · лицензия: CC BY-SA 4.0'
         }
         post = (
-            "<b>Заголовок новости</b>\\n\\nПолезный текст для жителей Нячанга."
-            '\\n\\n<a href="https://example.com/story">Источник</a>'
+            "<b>Заголовок новости</b>\n\nПолезный текст для жителей Нячанга."
+            '\n\n<a href="https://example.com/story">Источник</a>'
         )
-        with patch.object(bot, "api", return_value={"message_id": 10, "chat": {"id": -1001}}) as api_mock, \\
-             patch.object(bot, "post_text", return_value={"message_id": 11}) as text_mock, \\
+        with patch.object(bot, "api", return_value={"message_id": 10, "chat": {"id": -1001}}) as api_mock, \
+             patch.object(bot, "post_text", return_value={"message_id": 11}) as text_mock, \
              patch.object(bot.time, "sleep"):
             bot.post_with_image(post, image)
         self.assertEqual(api_mock.call_args.args[0], "sendPhoto")
@@ -346,7 +346,7 @@ class NewsQualityTests(unittest.TestCase):
         text_mock.assert_not_called()
 
     def test_translation_preserves_paragraph_boundaries(self):
-        original = "Первый абзац сообщает факт.\\n\\nВторой абзац объясняет последствия."
+        original = "Первый абзац сообщает факт.\n\nВторой абзац объясняет последствия."
         requested = []
 
         def fake_get_url(url):
@@ -407,9 +407,9 @@ class NewsQualityTests(unittest.TestCase):
                 "temperature_2m_max": [31, 32]
             }
         }
-        with patch.object(bot, "now", return_value=current), \\
-             patch.object(bot, "get_url", return_value=json.dumps(forecast).encode("utf-8")), \\
-             patch.object(bot, "commons_image", return_value=None), \\
+        with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "get_url", return_value=json.dumps(forecast).encode("utf-8")), \
+             patch.object(bot, "commons_image", return_value=None), \
              patch.object(bot, "post_with_image") as post_mock:
             bot.weather_post(state, "morning")
         post_mock.assert_called_once()
@@ -509,7 +509,7 @@ class NewsQualityTests(unittest.TestCase):
                 raise RuntimeError("temporary Telegram failure")
             return {"message_id": 501, "chat": {"id": -1001}}
 
-        with patch.object(bot, "post_text", side_effect=fail_on_second_chunk), \\
+        with patch.object(bot, "post_text", side_effect=fail_on_second_chunk), \
              patch.object(bot.time, "sleep"):
             with self.assertRaises(RuntimeError):
                 bot.send_ad_content(ad)
@@ -522,8 +522,8 @@ class NewsQualityTests(unittest.TestCase):
             successful_retry.counter += 1
             return successful_retry(text)
 
-        with patch.object(bot, "api", return_value={}) as api_mock, \\
-             patch.object(bot, "post_text", side_effect=counted_success), \\
+        with patch.object(bot, "api", return_value={}) as api_mock, \
+             patch.object(bot, "post_text", side_effect=counted_success), \
              patch.object(bot.time, "sleep"):
             result = bot.send_ad_content(ad)
 

@@ -113,18 +113,18 @@ def save_state(s):
 
 def clean(value):
     value = re.sub(r'<[^>]+>', ' ', value or '')
-    return re.sub(r'\\s+', ' ', html.unescape(value)).strip()
+    return re.sub(r'\s+', ' ', html.unescape(value)).strip()
 
 
 def clean_multiline(value):
     """Remove markup while preserving paragraph boundaries in long articles."""
-    value = re.sub(r'<(script|style|noscript|svg)\\b[^>]*>.*?</\\1>', ' ', value or '', flags=re.I | re.S)
-    value = re.sub(r'<br\\s*/?>|</(p|div|li|h[1-6])\\s*>', '\\n\\n', value, flags=re.I)
+    value = re.sub(r'<(script|style|noscript|svg)\b[^>]*>.*?</\1>', ' ', value or '', flags=re.I | re.S)
+    value = re.sub(r'<br\s*/?>|</(p|div|li|h[1-6])\s*>', '\n\n', value, flags=re.I)
     value = re.sub(r'<[^>]+>', ' ', value)
     value = html.unescape(value)
-    value = re.sub(r'[ \\t\\r\\f\\v]+', ' ', value)
-    value = re.sub(r' *\\n *', '\\n', value)
-    value = re.sub(r'\\n{3,}', '\\n\\n', value)
+    value = re.sub(r'[ \t\r\f\v]+', ' ', value)
+    value = re.sub(r' *\n *', '\n', value)
+    value = re.sub(r'\n{3,}', '\n\n', value)
     return value.strip()
 
 
@@ -216,9 +216,9 @@ def remove_repeated_lead(headline, body):
     body = clean_multiline(body)
     if not body:
         return ''
-    paragraphs = body.split('\\n\\n')
+    paragraphs = body.split('\n\n')
     first_paragraph = paragraphs[0].strip()
-    sentences = re.split(r'(?<=[.!?…])\\s+', first_paragraph, maxsplit=1)
+    sentences = re.split(r'(?<=[.!?…])\s+', first_paragraph, maxsplit=1)
     first = sentences[0].strip()
     h_words = set(normalized_title(headline).split())
     f_words = set(normalized_title(first).split())
@@ -232,7 +232,7 @@ def remove_repeated_lead(headline, body):
                 paragraphs[0] = remainder
             else:
                 paragraphs = paragraphs[1:]
-            return '\\n\\n'.join(p.strip() for p in paragraphs if p.strip())
+            return '\n\n'.join(p.strip() for p in paragraphs if p.strip())
     return body
 
 

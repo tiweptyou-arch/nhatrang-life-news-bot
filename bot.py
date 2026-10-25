@@ -415,7 +415,7 @@ def commons_image(query):
             license_normalized = license_name.casefold().replace('_', '-')
             license_reference = (license_url or '').casefold()
             # The channel may be monetized: reject non-commercial licences.
-            if re.search(r'\\bnon[ -]?commercial\\b|\\bnc\\b|by-nc', license_normalized + ' ' + license_reference):
+            if re.search(r'\bnon[ -]?commercial\b|\bnc\b|by-nc', license_normalized + ' ' + license_reference):
                 continue
             if ('cc by' in license_normalized or 'cc-by' in license_normalized) and not artist:
                 continue
@@ -746,7 +746,7 @@ def publish_manual_post(item, s, uid=None):
         if len(media_items) < 2:
             raise ValueError('В альбоме должно быть минимум два фото или видео.')
         body_excerpt = body[:420].strip()
-        caption = lead + ('\\n\\n' + html.escape(body_excerpt) if body_excerpt else '') + footer()
+        caption = lead + ('\n\n' + html.escape(body_excerpt) if body_excerpt else '') + footer()
         if len(caption) > 1024:
             raise ValueError('Подпись альбома превышает лимит Telegram 1024 символа.')
         media = []
@@ -781,7 +781,7 @@ def publish_manual_post(item, s, uid=None):
             body_excerpt, remainder = body, ''
         caption = lead
         if body_excerpt:
-            caption += '\\n\\n' + html.escape(body_excerpt)
+            caption += '\n\n' + html.escape(body_excerpt)
         caption += footer()
         if len(caption) > 1024:
             raise ValueError('Подпись к медиа превышает лимит Telegram 1024 символа.')
@@ -856,8 +856,8 @@ def handle_admin_album(messages, s):
             'submitted_by': uid, 'created_at': iso(now())
         })
         s['pending_manual_post'] = {}
-        send_dm(uid, f'Альбом добавлен в очередь проверки. ID: <code>{html.escape(item_id)}</code>.\\n'
-                     'Посмотреть очередь: /newsqueue\\nОпубликовать: /approve ID\\nОтклонить: /reject ID')
+        send_dm(uid, f'Альбом добавлен в очередь проверки. ID: <code>{html.escape(item_id)}</code>.\n'
+                     'Посмотреть очередь: /newsqueue\nОпубликовать: /approve ID\nОтклонить: /reject ID')
         return
 
     pending = s.get('pending_ad') or {}
@@ -882,9 +882,9 @@ def handle_admin_album(messages, s):
         'awaiting_content': False
     })
     s['pending_ad'] = pending
-    send_dm(uid, f'Черновик альбома готов: {len(media_items)} медиафайла.\\n'
-                 f'Проверь содержимое через /preview.\\nПубликуем: /publish\\n'
-                 f'Отложить: /schedule ГГГГ-ММ-ДД ЧЧ:ММ\\nОтменить: /cancel')
+    send_dm(uid, f'Черновик альбома готов: {len(media_items)} медиафайла.\n'
+                 f'Проверь содержимое через /preview.\nПубликуем: /publish\n'
+                 f'Отложить: /schedule ГГГГ-ММ-ДД ЧЧ:ММ\nОтменить: /cancel')
 
 
 def handle_admin_message(msg,s):

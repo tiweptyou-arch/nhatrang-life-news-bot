@@ -556,7 +556,24 @@ def post_text(text, disable_preview=True):
     return api('sendMessage', {'chat_id':CHANNEL,'text':text,'parse_mode':'HTML','disable_web_page_preview':str(disable_preview).lower()})
 
 
+def validate_ad_draft(ad):
+    """Validate Telegram caption and media-group constraints before scheduled or immediate publishing."""
+    caption = ((ad.get('text') or '') + footer()).strip()
+    kind = ad.get('type')
+    if kind == 'album':
+        count = len(ad.get('media_items', []))
+        if not 2 <= count <= 10:
+            raise ValueError('Альбом должен содержать от 2 до 10 фото или видео.')
+        if len(caption) > 1024:
+            raise ValueError('Подпись к альбому длиннее лимита Telegram 1024 символа. Сократи текст.')
+    elif kind in ('photo', 'video', 'document') and len(caption) > 1024:
+        raise ValueError('Подпись к медиа длиннее лимита Telegram 1024 символа. Сократи текст.')
+    elif not (ad.get('text') or ad.get('file_id') or ad.get('media_items')):
+        raise ValueError('Рекламный черновик пуст.')
+
+
 def send_ad_content(ad):
+    validate_ad_draft(ad)
     caption = (ad.get('text') or '').strip()
     if ad.get('type') == 'album':
         full_caption = (caption + footer()).strip()
@@ -884,6 +901,11 @@ def handle_admin_message(msg,s):
         ad=s.get('pending_ad') or {}
         if not ad or ad.get('awaiting_content') or not (ad.get('text') or ad.get('file_id') or ad.get('media_items')):
             send_dm(uid,'Сначала подготовь черновик через /ad 1/24.'); return
+        try:
+            validate_ad_draft(ad)
+        except ValueError as e:
+            send_dm(uid, html.escape(str(e)))
+            return
         try: when=datetime.strptime(arg,'%Y-%m-%d %H:%M').replace(tzinfo=TZ)
         except ValueError: send_dm(uid,'Формат: /schedule 2026-10-25 14:30'); return
         if when<=now(): send_dm(uid,'Время должно быть в будущем.'); return

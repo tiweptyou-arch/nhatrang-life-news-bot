@@ -1,6 +1,7 @@
 import os, re, json, html, time, hashlib, urllib.request, urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
+from email.utils import parsedate_to_datetime
 from zoneinfo import ZoneInfo
 
 TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
@@ -46,6 +47,37 @@ def parse_dt_strict(value):
         return parsed.astimezone(TZ)
     except (TypeError, ValueError, OverflowError):
         return None
+
+def parse_source_date(value):
+    """Parse an RSS publication date and return local time, or None if unknown."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        try:
+            parsed = datetime.fromisoformat(value.strip().replace('Z', '+00:00'))
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=TZ)
+    try:
+        return parsed.astimezone(TZ)
+    except (ValueError, OverflowError):
+        return None
+
+
+def is_recent_source_date(published_at, current_time=None, urgent=False):
+    """Reject unknown, future-dated, and stale stories before publication."""
+    if published_at is None:
+        return False
+    current_time = current_time or now()
+    age = current_time - published_at
+    if age < -timedelta(minutes=15):
+        return False
+    maximum_age = timedelta(hours=24 if urgent else 72)
+    return age <= maximum_age
+
 
 def get_url(url):
     req = urllib.request.Request(url, headers={'User-Agent':'Mozilla/5.0 NhaTrangLifeNewsBot/2.0'})
@@ -1073,10 +1105,15 @@ def publish_news(s):
                 title = clean(item.findtext('title'))
                 desc = clean(item.findtext('description'))
                 link = (item.findtext('link') or '').strip()
+                source_published_at = parse_source_date(item.findtext('pubDate'))
                 if not title or not link or not re.match(r'^https?://', link, re.I) or link in links:
                     continue
                 links.add(link)
                 if not is_relevant_news(title, desc):
+                    continue
+                urgent_candidate = is_urgent_news(title + ' ' + desc)
+                if not is_recent_source_date(source_published_at, n, urgent=urgent_candidate):
+                    print('Skipping missing, future-dated, or stale RSS story:', title)
                     continue
                 image_url = None
                 for node in list(item):
@@ -1088,12 +1125,12 @@ def publish_news(s):
                                           re.search(r'\.(jpg|jpeg|png|webp)(\?|$)', candidate, re.I)):
                             image_url = candidate
                             break
-                items.append((title, desc, link, image_url, is_urgent_news(title + ' ' + desc)))
+                items.append((title, desc, link, image_url, is_urgent_news(title + ' ' + desc), source_published_at))
         except Exception as e:
             print('Feed error:', e)
 
     items.sort(key=lambda item: not item[4])
-    for title, desc, link, image_url, urgent in items:
+    for title, desc, link, image_url, urgent, source_published_at in items:
         if is_duplicate_news(s, title, link):
             continue
         if is_paused(s) and not urgent:
@@ -1155,7 +1192,7 @@ def publish_news(s):
         s['seen_titles'] = (s.get('seen_titles', []) + [title])[-500:]
         s['seen_fingerprints'] = (s.get('seen_fingerprints', []) + [title_fingerprint(title)])[-1000:]
         s['published_news'] = (s.get('published_news', []) + [{
-            'title': headline, 'summary': body, 'link': link, 'published_at': iso(now()), 'urgent': bool(urgent)
+            'title': headline, 'summary': body, 'link': link, 'published_at': iso(now()), 'source_published_at': iso(source_published_at), 'urgent': bool(urgent)
         }])[-100:]
         bump_today(s)
         s['last_news_hour'] = hour_key

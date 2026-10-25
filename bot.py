@@ -333,8 +333,9 @@ def limit_news_body(value, max_chars=1450):
         result = value[:max_chars].rsplit(' ', 1)[0].rstrip(' ,;:-') + '…'
     return result
 
+
 def reaction_line(text):
-    """Optional topic-specific reaction line; serious stories deliberately get none."""
+    """Use topic-relevant reactions; serious incidents deliberately get no playful prompt."""
     value = clean(text).casefold()
     if is_urgent_news(value) or any(contains_term(value, x) for x in ('thiệt mạng', 'tử vong', 'người chết', 'bị thương nặng')):
         return ''
@@ -345,9 +346,8 @@ def reaction_line(text):
     if any(contains_term(value, x) for x in ('hài hước', 'buồn cười', 'dở khóc dở cười', 'tình huống hài')):
         return '🤣 — редкий повод улыбнуться.'
     if any(contains_term(value, x) for x in ('giao thông', 'xe buýt', 'bệnh viện', 'trường học', 'quy định', 'giá điện', 'giá nước', 'dịch vụ', 'công trình', 'khai trương', 'mở cửa', 'транспорт', 'больница', 'школа', 'правила', 'цены', 'услуги', 'открытие', 'ремонт дороги')):
-        return '👍 — полезная информация для жизни в Нячанге.'
-    return ''
-
+        return '👍 — полезно; ❤️ — хочу больше такой информации.'
+    return '👍 — полезно; ❤️ — хочу больше таких новостей.'
 
 def news_image_query(title, body=''):
     """Choose a topical illustration query using the translated Russian story as well as source terms."""
@@ -412,6 +412,138 @@ def is_duplicate_news(s, title, link):
             if overlap >= 0.82:
                 return True
     return False
+
+
+def normalize_image_url(candidate, base_url=''):
+    """Return a safe absolute image URL, rejecting obvious logos and tracking pixels."""
+    if not isinstance(candidate, str):
+        return None
+    candidate = html.unescape(candidate.strip()).replace('\\/', '/')
+    if not candidate:
+        return None
+    if candidate.startswith('//'):
+        candidate = 'https:' + candidate
+    candidate = urllib.parse.urljoin(base_url, candidate)
+    try:
+        parsed = urllib.parse.urlparse(candidate)
+    except ValueError:
+        return None
+    if parsed.scheme not in ('http', 'https') or not parsed.netloc:
+        return None
+    path = parsed.path.casefold()
+    if path.endswith('.svg') or any(x in path for x in (
+        'favicon', 'sprite', 'tracking', 'pixel.', 'placeholder', 'default-avatar',
+        'site-logo', 'logo-', '/logo.', 'avatar', 'blank.gif'
+    )):
+        return None
+    return candidate
+
+
+
+def extract_rss_image(item, article_url=''):
+    """Prefer image media embedded in the source RSS item over stock illustrations."""
+    candidates = []
+    for node in list(item):
+        tag = node.tag.rsplit('}', 1)[-1].casefold()
+        raw = node.attrib.get('url') or node.attrib.get('href') or node.attrib.get('src')
+        media_type = (node.attrib.get('type') or '').casefold()
+        if not raw:
+            continue
+        is_image_type = media_type.startswith('image/')
+        image_extension = bool(re.search(r'\.(?:jpe?g|png|webp|gif)(?:[?#]|$)', raw, re.I))
+        if tag in ('content', 'thumbnail', 'image') and (is_image_type or image_extension):
+            candidates.append(raw)
+        elif tag == 'enclosure' and (is_image_type or image_extension):
+            candidates.append(raw)
+
+    raw_description = item.findtext('description') or ''
+    decoded_description = html.unescape(raw_description)
+    for match in re.finditer(r'<img\b[^>]*(?:src|data-src)\s*=\s*(["\'])(.*?)\1', decoded_description, re.I | re.S):
+        candidates.append(match.group(2))
+    for candidate in candidates:
+        normalized = normalize_image_url(candidate, article_url)
+        if normalized:
+            return normalized
+    return None
+
+
+def extract_article_image(page_html, article_url=''):
+    """Prefer Open Graph image, then Twitter metadata, then a substantial article image."""
+    if not page_html:
+        return None
+    meta_candidates = {'og': [], 'twitter': [], 'other': []}
+    for tag in re.findall(r'<meta\b[^>]*>', page_html, re.I | re.S):
+        attrs = {
+            key.casefold(): html.unescape(value)
+            for key, _, value in re.findall(r'([\w:-]+)\s*=\s*(["\'])(.*?)\2', tag, re.I | re.S)
+        }
+        key = (attrs.get('property') or attrs.get('name') or attrs.get('itemprop') or '').casefold()
+        value = attrs.get('content') or attrs.get('value')
+        if not value:
+            continue
+        if key in ('og:image', 'og:image:url'):
+            meta_candidates['og'].append(value)
+        elif key in ('twitter:image', 'twitter:image:src'):
+            meta_candidates['twitter'].append(value)
+        elif key == 'image':
+            meta_candidates['other'].append(value)
+
+    for priority in ('og', 'twitter', 'other'):
+        for candidate in meta_candidates[priority]:
+            normalized = normalize_image_url(candidate, article_url)
+            if normalized:
+                return normalized
+
+    article_match = re.search(r'<article\b[^>]*>(.*?)</article>', page_html, re.I | re.S)
+    area = article_match.group(1) if article_match else page_html
+    for tag in re.findall(r'<img\b[^>]*>', area, re.I | re.S)[:20]:
+        attrs = {
+            key.casefold(): html.unescape(value)
+            for key, _, value in re.findall(r'([\w:-]+)\s*=\s*(["\'])(.*?)\2', tag, re.I | re.S)
+        }
+        width = re.sub(r'\D', '', attrs.get('width', ''))
+        height = re.sub(r'\D', '', attrs.get('height', ''))
+        if width and int(width) < 250:
+            continue
+        if height and int(height) < 150:
+            continue
+        candidate = attrs.get('src') or attrs.get('data-src') or attrs.get('data-lazy-src')
+        normalized = normalize_image_url(candidate, article_url)
+        if normalized:
+            return normalized
+    return None
+
+def split_photo_caption(text, limit=900):
+    """Split text into a Telegram photo caption and a continuation without cutting markup."""
+    paragraphs = [part.strip() for part in re.split(r'\n\s*\n', (text or '').strip()) if part.strip()]
+    caption_parts, remaining = [], []
+    for index, paragraph in enumerate(paragraphs):
+        candidate = paragraph if not caption_parts else '\n\n'.join(caption_parts + [paragraph])
+        if len(candidate) <= limit:
+            caption_parts.append(paragraph)
+            continue
+        if not caption_parts:
+            words = paragraph.split()
+            head, tail = '', []
+            for word in words:
+                trial = word if not head else head + ' ' + word
+                if len(trial) <= limit:
+                    head = trial
+                else:
+                    tail.append(word)
+            if not head and words:
+                head, tail = words[0][:limit], words[1:]
+            if head:
+                caption_parts.append(head)
+            if tail:
+                remaining.append(' '.join(tail))
+            remaining.extend(paragraphs[index + 1:])
+        else:
+            remaining = paragraphs[index:]
+        break
+    caption = '\n\n'.join(caption_parts).strip()
+    continuation = '\n\n'.join(remaining).strip()
+    return caption, continuation
 
 
 def commons_image(query):
@@ -499,16 +631,65 @@ def split_html_text(text, limit=3900):
 
 
 
-def post_with_image(text, image_url=None, illustration=False):
-    """Publish public news as text only; do not attach images or source links."""
+
+
+def post_with_image(text, image_url=None, illustration=False, image_query=None):
+    """Publish a photo-led post: article image first, topical illustration as fallback."""
     if not text or not text.strip():
         return None
+    query = image_query or news_image_query('', clean(text))
+    candidates = [image_url] if image_url else []
+    fallback_loaded = False
+
+    while True:
+        if not candidates and not fallback_loaded:
+            fallback_loaded = True
+            fallback = commons_image(query)
+            if fallback:
+                candidates.append(fallback)
+        if not candidates:
+            break
+
+        candidate = candidates.pop(0)
+        photo_url = candidate.get('url') if isinstance(candidate, dict) else candidate
+        photo_url = normalize_image_url(photo_url)
+        if not photo_url:
+            continue
+
+        content = text
+        credit = candidate.get('credit_html') if isinstance(candidate, dict) else None
+        if credit:
+            if FOOTER in content:
+                content = content.replace(FOOTER, '\n\n' + credit + FOOTER, 1)
+            else:
+                content = content.rstrip() + '\n\n' + credit
+        caption, continuation = split_photo_caption(content, limit=800 if credit else 950)
+        if not caption:
+            caption = '🇻🇳 Новости Нячанга'
+        try:
+            result = api('sendPhoto', {
+                'chat_id': CHANNEL, 'photo': photo_url,
+                'caption': caption, 'parse_mode': 'HTML'
+            })
+            if continuation:
+                for part in split_html_text(continuation, limit=3900):
+                    post_text(part)
+                    time.sleep(0.2)
+            return result
+        except Exception as e:
+            print('Photo send failed; trying a topical fallback:', type(e).__name__)
+            if not fallback_loaded:
+                fallback_loaded = True
+                fallback = commons_image(query)
+                if fallback:
+                    candidates.append(fallback)
+
+    # Last-resort delivery protects urgent information if every image host is unavailable.
+    print('No usable image could be sent; publishing text fallback.')
     result = None
-    parts = split_html_text(text, limit=3900)
-    for index, part in enumerate(parts):
+    for part in split_html_text(text, limit=3900):
         result = post_text(part)
-        if index < len(parts) - 1:
-            time.sleep(0.2)
+        time.sleep(0.2)
     return result
 
 def translate(text):
@@ -703,8 +884,9 @@ def split_manual_content(content):
 
 
 
+
 def publish_manual_post(item, s, uid=None):
-    """Publish an explicitly approved tip without adding a headline or exposing source URLs."""
+    """Publish an explicitly approved tip without generated headline or source URL."""
     if is_paused(s):
         raise ValueError('Публикации на паузе из-за ручной или рекламной паузы.')
     if count_today(s) >= 10:
@@ -758,37 +940,29 @@ def publish_manual_post(item, s, uid=None):
                 cut = 420
             body_excerpt = body[:cut].strip()
             remainder = body[cut:].strip()
-        caption_text = html.escape(body_excerpt).strip()
-        caption = (caption_text + footer()).strip()
+        caption = (html.escape(body_excerpt).strip() + footer()).strip()
         if len(caption) > 1024:
             raise ValueError('Подпись к медиа превышает лимит Telegram 1024 символа.')
         method, field = ('sendPhoto', 'photo') if post_type == 'photo' else ('sendVideo', 'video')
-        result = api(method, {
-            'chat_id': CHANNEL, field: file_id,
-            'caption': caption, 'parse_mode': 'HTML'
-        })
+        result = api(method, {'chat_id': CHANNEL, field: file_id, 'caption': caption, 'parse_mode': 'HTML'})
         if remainder:
             for part in split_html_text(html.escape(remainder)):
                 post_text(part)
                 time.sleep(0.2)
     else:
-        full_text = (body_html + footer()).strip()
-        for part in split_html_text(full_text):
-            result = post_text(part)
-            time.sleep(0.2)
+        result = post_with_image(
+            (body_html + footer()).strip(),
+            image_query=news_image_query(title, body)
+        )
 
     item['status'] = 'published'
     item['published_at'] = iso(now())
     item['published_message_id'] = (result or {}).get('message_id')
     item['title'] = title
     s['published_news'] = (s.get('published_news', []) + [{
-        'title': title,
-        'summary': body,
-        'link': source_link,
-        'published_at': iso(now()),
-        'source_published_at': iso(now()),
-        'urgent': False,
-        'manual': True
+        'title': title, 'summary': body, 'link': source_link,
+        'published_at': iso(now()), 'source_published_at': iso(now()),
+        'urgent': False, 'manual': True
     }])[-100:]
     if source_link:
         s['seen_links'] = (s.get('seen_links', []) + [source_link])[-1000:]
@@ -1288,16 +1462,44 @@ def mark_slot(s,key): s['last_slots'][key]=now().date().isoformat()
 
 
 
+
 def routine_posts(s):
-    """Publish an end-of-day recap only when there is useful news or a real warning."""
+    """Morning greeting at 06:00 and an interactive, factual end-of-day recap at 22:30."""
     n = now()
-    if is_paused(s) or count_today(s) >= 10 or n.hour != 22 or not (30 <= n.minute < 35) or slot_once(s, 'night'):
+    if is_paused(s) or count_today(s) >= 10:
         return
 
-    todays = [
+    if n.hour == 6 and 0 <= n.minute < 5 and not slot_once(s, 'morning'):
+        greetings = [
+            '☀️ Доброе утро, Нячанг! Пусть день начнётся спокойно. Вы уже проснулись?\n\n👍 — уже на ногах\n❤️ — проснулся, но ещё не включился\n🙏 — пусть день будет хорошим.',
+            '☀️ Доброе утро! Какой план на сегодня?\n\n👍 — дела и работа\n❤️ — море и прогулка\n🙏 — пока хочу ещё поспать.',
+            '☀️ Доброе утро, Нячанг! Желаю лёгкого дня и хороших новостей. Как настроение?\n\n❤️ — всё отлично\n👍 — постепенно просыпаюсь\n🙏 — нужен спокойный день.'
+        ]
+        text = greetings[int(n.strftime('%j')) % len(greetings)] + footer()
+        post_with_image(text, image_query='Nha Trang Vietnam sunrise coastal city beach')
+        bump_today(s)
+        mark_slot(s, 'morning')
+        return
+
+    if n.hour != 22 or not (30 <= n.minute < 35) or slot_once(s, 'night'):
+        return
+
+    today = [
         item for item in s.get('published_news', [])
         if str(item.get('published_at', '')).startswith(n.date().isoformat())
+        and item.get('summary')
     ]
+    recap = []
+    for item in today[-4:]:
+        summary = clean_multiline(item.get('summary', ''))
+        if not summary:
+            continue
+        first_sentence = re.split(r'(?<=[.!?])\s+', summary.replace('\n', ' '), maxsplit=1)[0]
+        if len(first_sentence) > 260:
+            first_sentence = first_sentence[:257].rsplit(' ', 1)[0] + '…'
+        if first_sentence and first_sentence not in recap:
+            recap.append(first_sentence)
+
     tomorrow_warning = ''
     try:
         url = ('https://api.open-meteo.com/v1/forecast?latitude=12.2388&longitude=109.1967'
@@ -1315,48 +1517,32 @@ def routine_posts(s):
             81:'ливни',82:'сильные ливни',95:'гроза',96:'гроза с градом',99:'сильная гроза с градом'
         }
         if (rain is not None and rain >= 60) or code in (65, 81, 82, 95, 96, 99):
-            rain_text = f'Вероятность осадков — {rain}%' if rain is not None else 'Вероятность осадков не указана'
+            rain_note = f'вероятность осадков — {rain}%' if rain is not None else 'вероятность осадков не указана'
             tomorrow_warning = (
-                f'На завтра прогнозируют {names.get(code, "переменную погоду")}. {rain_text}. '
-                'Учитывай прогноз при планировании поездок и дел на улице.'
+                f'На завтра прогнозируют {names.get(code, "переменную погоду")}; {rain_note}. '
+                'Учитывай это при планировании поездок и дел на улице.'
             )
     except Exception as e:
-        print('Night forecast unavailable; no weather warning inferred:', type(e).__name__)
+        print('Night forecast unavailable; no warning inferred:', type(e).__name__)
 
-    recap = []
-    for item in todays[-4:]:
-        summary = clean_multiline(item.get('summary', ''))
-        if not summary:
-            continue
-        sentences = re.split(r'(?<=[.!?])\s+', summary.replace('\n', ' '))
-        brief = ' '.join(sentences[:2]).strip()
-        if len(brief) > 300:
-            brief = brief[:297].rsplit(' ', 1)[0] + '…'
-        if brief and brief not in recap:
-            recap.append(brief)
-
-    if not recap and not tomorrow_warning:
-        mark_slot(s, 'night')
-        return
-
-    parts = []
+    parts = ['🌙 Доброй ночи, Нячанг!']
     if recap:
-        parts.append('🌙 Сегодня в Нячанге: ' + ' '.join(recap))
-    elif tomorrow_warning:
-        parts.append('🌙 ' + tomorrow_warning)
-    if recap and tomorrow_warning:
+        parts.append('Коротко о сегодняшних новостях: ' + ' '.join(recap[:3]))
+    if tomorrow_warning:
         parts.append(tomorrow_warning)
+    parts.append('Перед сном выбери реакцию: ❤️ — день удался; 🙏 — завтра хочется спокойствия; 🤣 — сегодня было над чем посмеяться.')
     text = '\n\n'.join(parts) + footer()
-    post_with_image(text)
+    post_with_image(text, image_query='Nha Trang Vietnam night city beach coastline')
     bump_today(s)
     mark_slot(s, 'night')
+
 
 def weather_post(s, period):
     key = 'weather_' + period
     if slot_once(s, key) or count_today(s) >= 10 or is_paused(s):
         return
     n = now()
-    if period == 'morning' and not (n.hour == 6 and 30 <= n.minute < 40):
+    if period == 'morning' and not (n.hour == 8 and 0 <= n.minute < 10):
         return
     if period == 'evening' and not (n.hour == 18 and 0 <= n.minute < 10):
         return
@@ -1378,22 +1564,20 @@ def weather_post(s, period):
         code, current_code = int(daily['weather_code'][index]), int(cur['weather_code'])
         rain_values = daily.get('precipitation_probability_max', [None, None])
         rain = rain_values[index] if len(rain_values) > index else None
-
         current_text = (
             f'Сейчас в Нячанге {round(cur["temperature_2m"])}°C, '
             f'{names.get(current_code, "переменная погода")} {icons.get(current_code, "🌤️")}; '
             f'по ощущениям {round(cur["apparent_temperature"])}°C.'
         )
-        forecast_text = (
-            f'Сегодня ожидается {names.get(code, "переменная погода")} '
-            f'{icons.get(code, "🌤️")} и температура {round(daily["temperature_2m_min"][index])}–'
-            f'{round(daily["temperature_2m_max"][index])}°C.'
-        )
-        if period == 'evening':
+        if period == 'morning':
             forecast_text = (
-                f'Завтра ожидается {names.get(code, "переменная погода")} {icons.get(code, "🌤️")} '
-                f'и температура {round(daily["temperature_2m_min"][index])}–'
-                f'{round(daily["temperature_2m_max"][index])}°C.'
+                f'Сегодня ожидается {names.get(code, "переменная погода")} {icons.get(code, "🌤️")}; '
+                f'температура {round(daily["temperature_2m_min"][index])}–{round(daily["temperature_2m_max"][index])}°C.'
+            )
+        else:
+            forecast_text = (
+                f'Завтра ожидается {names.get(code, "переменная погода")} {icons.get(code, "🌤️")}; '
+                f'температура {round(daily["temperature_2m_min"][index])}–{round(daily["temperature_2m_max"][index])}°C.'
             )
         rain_text = f'Вероятность осадков — {rain}%.' if rain is not None else 'Вероятность осадков сейчас недоступна.'
         if rain is not None and rain >= 60:
@@ -1426,9 +1610,13 @@ def weather_post(s, period):
                     snippets.append(first_sentence)
             if snippets:
                 text += '\n\nЗа последние сутки: ' + ' '.join(snippets)
-
-        text += footer()
-        post_with_image(text)
+            image_query = 'Nha Trang Vietnam morning weather city coastal view'
+        elif rain is not None and rain >= 35:
+            image_query = 'Nha Trang Vietnam rainy weather wet street tropical rain'
+        else:
+            image_query = 'Nha Trang Vietnam coastal city weather seaside'
+        text += '\n\n👍 — прогноз полезен; ❤️ — следим за погодой вместе.' + footer()
+        post_with_image(text, image_query=image_query)
         bump_today(s)
         mark_slot(s, key)
     except Exception as e:
@@ -1436,7 +1624,7 @@ def weather_post(s, period):
 
 
 def publish_news(s):
-    """Publish useful, recent local news as text only, without added headlines or source/media links."""
+    """Publish useful local stories with an article photo first and no visible source link or headline."""
     n = now()
     hour_key = n.strftime('%Y-%m-%d-%H')
     items, links = [], set()
@@ -1457,12 +1645,12 @@ def publish_news(s):
                 if not is_recent_source_date(source_published_at, n, urgent=urgent_candidate):
                     print('Skipping missing, future-dated, or stale RSS story:', title)
                     continue
-                items.append((title, desc, link, is_urgent_news(title + ' ' + desc), source_published_at))
+                items.append((title, desc, link, is_urgent_news(title + ' ' + desc), source_published_at, extract_rss_image(item, link)))
         except Exception as e:
             print('Feed error:', type(e).__name__)
 
     items.sort(key=lambda item: not item[3])
-    for title, desc, link, urgent, source_published_at in items:
+    for title, desc, link, urgent, source_published_at, rss_image in items:
         if is_duplicate_news(s, title, link):
             continue
         if is_paused(s) and not urgent:
@@ -1479,16 +1667,24 @@ def publish_news(s):
             continue
         internal_title = clean(translated_title)
         translated_body = translate(desc) if desc else ''
+        article_page = ''
+        article_image = None
+        # Fetch a selected story once: extract the publisher's article image and reuse page text if needed.
+        try:
+            article_page = get_url(link).decode('utf-8', 'ignore')
+            article_image = extract_article_image(article_page, link)
+        except Exception as e:
+            print('Source page unavailable; try the RSS image:', type(e).__name__)
+        image_url = article_image or rss_image
 
         if len(translated_body) < 180 or len(translated_body.split()) < 24:
-            # Fetch a source page only when RSS has too little detail; limit work to avoid long runs.
             try:
-                page = get_url(link).decode('utf-8', 'ignore')
-                article_match = re.search(r'<article\b[^>]*>(.*?)</article>', page, re.I | re.S)
+                page = article_page
+                article_match = re.search(r'<article\b[^>]*>(.*?)</article>', page, re.I | re.S) if page else None
                 if article_match:
                     raw_article = article_match.group(1)
                 else:
-                    paragraphs = re.findall(r'<p\b[^>]*>(.*?)</p>', page, re.I | re.S)
+                    paragraphs = re.findall(r'<p\b[^>]*>(.*?)</p>', page, re.I | re.S) if page else []
                     raw_article = '\n'.join(paragraphs[:20])
                 raw_article = re.sub(r'<(script|style|noscript|svg)\b[^>]*>.*?</\1>', ' ', raw_article, flags=re.I | re.S)
                 raw_article = re.sub(r'</?(p|div|br|li|h[1-6])\b[^>]*>', '\n', raw_article, flags=re.I)
@@ -1506,13 +1702,16 @@ def publish_news(s):
             continue
         urgent = is_urgent_news(title + ' ' + desc + ' ' + internal_title + ' ' + body)
 
-        # No source URL, article title, or picture is attached to the public post.
         news_text = (('⚠️ ' if urgent else '') + html.escape(body))
         line = reaction_line(title + ' ' + internal_title + ' ' + body)
         if line:
             news_text += '\n\n' + line
         news_text += footer()
-        post_with_image(news_text)
+        post_with_image(
+            news_text,
+            image_url=image_url,
+            image_query=news_image_query(internal_title, body)
+        )
 
         s['seen_links'] = (s.get('seen_links', []) + [link])[-1000:]
         s['seen_titles'] = (s.get('seen_titles', []) + [title])[-500:]
@@ -1524,7 +1723,7 @@ def publish_news(s):
         }])[-100:]
         bump_today(s)
         s['last_news_hour'] = hour_key
-        print('Published news: text-only; urgent=', urgent)
+        print('Published news with image:', 'article' if article_image else ('RSS' if rss_image else 'topical fallback'), 'urgent=', urgent)
         return
 
 def main():

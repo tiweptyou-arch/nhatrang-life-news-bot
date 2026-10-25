@@ -92,19 +92,20 @@ class NewsQualityTests(unittest.TestCase):
             "seen_fingerprints": [], "published_news": []
         }
         admin = {"from": {"id": uid}, "chat": {"id": uid}, "text": "/approve item-234"}
-        with patch.object(bot, "post_text", return_value={"message_id": 777}) as post_mock:
+        with patch.object(bot, "post_with_image", return_value={"message_id": 777}) as image_post_mock:
             with patch.object(bot, "send_dm"):
                 with patch.object(bot.time, "sleep"):
                     bot.handle_admin_message(admin, state)
         self.assertEqual(item["status"], "published")
         self.assertEqual(item["published_message_id"], 777)
-        self.assertEqual(post_mock.call_count, 1)
+        image_post_mock.assert_called_once()
+        posted_text = image_post_mock.call_args.args[0]
         self.assertEqual(state["published_news"][0]["title"], "Road repair update")
         self.assertEqual(state["published_news"][0]["link"], "https://example.com/road")
-        self.assertIn("The city announced repair works.", post_mock.call_args.args[0])
-        self.assertNotIn("Road repair update", post_mock.call_args.args[0])
-        self.assertNotIn("example.com/road", post_mock.call_args.args[0])
-        self.assertNotIn("<b>", post_mock.call_args.args[0])
+        self.assertIn("The city announced repair works.", posted_text)
+        self.assertNotIn("Road repair update", posted_text)
+        self.assertNotIn("example.com/road", posted_text)
+        self.assertNotIn("<b>", posted_text)
 
     def test_manual_album_is_queued_and_not_published_until_approved(self):
         uid = 1335496436
@@ -299,14 +300,147 @@ class NewsQualityTests(unittest.TestCase):
         self.assertTrue(all(len(piece) <= 3900 for piece in pieces))
         self.assertEqual(" ".join(pieces).split(), original.split())
 
-    def test_public_news_helper_does_not_attach_images(self):
+    def test_public_news_helper_attaches_the_supplied_article_image(self):
         post = "Полезная новость без заголовка. Подробности для жителей Нячанга."
-        with patch.object(bot, "api") as api_mock, \
+        response = {"message_id": 100, "chat": {"id": -1001}}
+        with patch.object(bot, "commons_image") as commons_mock, \
+             patch.object(bot, "api", return_value=response) as api_mock, \
+             patch.object(bot, "post_text") as text_mock:
+            bot.post_with_image(post, "https://cdn.publisher.example/road-photo.jpg")
+        self.assertEqual(api_mock.call_args.args[0], "sendPhoto")
+        self.assertEqual(api_mock.call_args.args[1]["photo"], "https://cdn.publisher.example/road-photo.jpg")
+        self.assertIn("Полезная новость", api_mock.call_args.args[1]["caption"])
+        commons_mock.assert_not_called()
+        text_mock.assert_not_called()
+        self.assertNotIn("publisher.example/story", api_mock.call_args.args[1]["caption"])
+
+    def test_long_photo_caption_preserves_continuation(self):
+        post = ("Полезная информация для жителей Нячанга. " * 45) + "\n\nUNIQUE_END_MARKER"
+        response = {"message_id": 100, "chat": {"id": -1001}}
+        with patch.object(bot, "commons_image") as commons_mock, \
+             patch.object(bot, "api", return_value=response) as api_mock, \
              patch.object(bot, "post_text", return_value={"message_id": 101}) as text_mock:
-            bot.post_with_image(post, "https://example.com/image.jpg", illustration=True)
-        api_mock.assert_not_called()
-        text_mock.assert_called_once_with(post)
-        self.assertNotIn("Изображение — иллюстрация", text_mock.call_args.args[0])
+            bot.post_with_image(post, "https://cdn.publisher.example/road-photo.jpg")
+        caption = api_mock.call_args.args[1]["caption"]
+        self.assertLessEqual(len(caption), 950)
+        self.assertGreaterEqual(text_mock.call_count, 1)
+        self.assertIn("UNIQUE_END_MARKER", "\n".join(c.args[0] for c in text_mock.call_args_list))
+        commons_mock.assert_not_called()
+
+    def test_extract_article_image_prefers_open_graph_image(self):
+        page = (
+            '<html><head>'
+            '<meta name="twitter:image" content="/media/social.jpg">'
+            '<meta property="og:image" content="https://cdn.publisher.example/news/bridge.jpg">'
+            '</head><body><article><img src="/media/thumbnail.jpg" width="120" height="80"></article></body></html>'
+        )
+        self.assertEqual(
+            bot.extract_article_image(page, "https://publisher.example/story"),
+            "https://cdn.publisher.example/news/bridge.jpg"
+        )
+
+    def test_extract_article_image_resolves_relative_url(self):
+        page = '<meta property="og:image" content="/photos/road.jpg">'
+        self.assertEqual(
+            bot.extract_article_image(page, "https://publisher.example/news/road"),
+            "https://publisher.example/photos/road.jpg"
+        )
+
+    def test_extract_rss_image_reads_media_content(self):
+        xml = (
+            '<rss xmlns:media="http://search.yahoo.com/mrss/"><channel><item>'
+            '<title>Road closure</title><link>https://publisher.example/news</link>'
+            '<media:content url="https://cdn.publisher.example/road.jpg" type="image/jpeg"/>'
+            '</item></channel></rss>'
+        )
+        item = bot.ET.fromstring(xml).find(".//item")
+        self.assertEqual(
+            bot.extract_rss_image(item, "https://publisher.example/news"),
+            "https://cdn.publisher.example/road.jpg"
+        )
+
+
+
+    def test_morning_routine_posts_greeting_at_six_with_reaction_choices(self):
+        current = datetime(2026, 10, 26, 6, 2, tzinfo=bot.TZ)
+        state = {"published_news": [], "daily_counts": {}, "last_slots": {}}
+        with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "is_paused", return_value=False), \
+             patch.object(bot, "count_today", return_value=0), \
+             patch.object(bot, "slot_once", return_value=False), \
+             patch.object(bot, "post_with_image") as post_mock, \
+             patch.object(bot, "bump_today"), \
+             patch.object(bot, "mark_slot") as mark_mock:
+            bot.routine_posts(state)
+        post_mock.assert_called_once()
+        text = post_mock.call_args.args[0]
+        self.assertIn("Доброе утро", text)
+        self.assertIn("👍", text)
+        self.assertIn("❤️", text)
+        self.assertIn("🙏", text)
+        self.assertIn("image_query", post_mock.call_args.kwargs)
+        mark_mock.assert_called_once_with(state, "morning")
+
+    def test_night_routine_includes_goodnight_and_interaction(self):
+        current = datetime(2026, 10, 26, 22, 32, tzinfo=bot.TZ)
+        state = {"published_news": [], "daily_counts": {}, "last_slots": {}}
+        with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "is_paused", return_value=False), \
+             patch.object(bot, "count_today", return_value=0), \
+             patch.object(bot, "slot_once", return_value=False), \
+             patch.object(bot, "get_url", side_effect=OSError("offline")), \
+             patch.object(bot, "post_with_image") as post_mock, \
+             patch.object(bot, "bump_today"), \
+             patch.object(bot, "mark_slot") as mark_mock:
+            bot.routine_posts(state)
+        post_mock.assert_called_once()
+        text = post_mock.call_args.args[0]
+        self.assertIn("Доброй ночи", text)
+        self.assertIn("выбери реакцию", text)
+        self.assertIn("❤️", text)
+        self.assertIn("🙏", text)
+        self.assertIn("🤣", text)
+        self.assertIn("image_query", post_mock.call_args.kwargs)
+        mark_mock.assert_called_once_with(state, "night")
+
+    def test_morning_weather_is_scheduled_for_eight_not_six_thirty(self):
+        early = datetime(2026, 10, 26, 6, 32, tzinfo=bot.TZ)
+        state = {"daily_counts": {}, "last_slots": {}, "published_news": []}
+        with patch.object(bot, "now", return_value=early), \
+             patch.object(bot, "slot_once", return_value=False), \
+             patch.object(bot, "count_today", return_value=0), \
+             patch.object(bot, "is_paused", return_value=False), \
+             patch.object(bot, "get_url") as get_mock, \
+             patch.object(bot, "post_with_image") as post_mock:
+            bot.weather_post(state, "morning")
+        get_mock.assert_not_called()
+        post_mock.assert_not_called()
+
+        current = datetime(2026, 10, 26, 8, 2, tzinfo=bot.TZ)
+        forecast = {
+            "current": {"temperature_2m": 28, "apparent_temperature": 32, "weather_code": 2},
+            "daily": {
+                "weather_code": [2, 3],
+                "temperature_2m_min": [25, 26],
+                "temperature_2m_max": [31, 30],
+                "precipitation_probability_max": [20, 55]
+            }
+        }
+        with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "slot_once", return_value=False), \
+             patch.object(bot, "count_today", return_value=0), \
+             patch.object(bot, "is_paused", return_value=False), \
+             patch.object(bot, "get_url", return_value=json.dumps(forecast).encode("utf-8")), \
+             patch.object(bot, "post_with_image") as post_mock, \
+             patch.object(bot, "bump_today"), \
+             patch.object(bot, "mark_slot"):
+            bot.weather_post(state, "morning")
+        post_mock.assert_called_once()
+        text = post_mock.call_args.args[0]
+        self.assertIn("Сейчас в Нячанге", text)
+        self.assertIn("Сегодня ожидается", text)
+        self.assertNotIn("<b>", text)
+        self.assertIn("image_query", post_mock.call_args.kwargs)
 
     def test_limit_news_body_is_concise_and_removes_urls(self):
         source = ("Первая важная информация для жителей города. " * 30) + " https://publisher.example/story "
@@ -315,7 +449,7 @@ class NewsQualityTests(unittest.TestCase):
         self.assertNotIn("publisher.example", result)
         self.assertTrue(result.endswith("…") or result.endswith((".", "!", "?")))
 
-    def test_publish_news_posts_body_without_generated_headline_or_source_link(self):
+    def test_publish_news_uses_article_image_without_generated_headline_or_source_link(self):
         current = datetime(2026, 10, 26, 10, 15, tzinfo=bot.TZ)
         description = (
             "Local authorities in Khanh Hoa warned that heavy rain may cause flooding on several "
@@ -347,24 +481,27 @@ class NewsQualityTests(unittest.TestCase):
                 "Также рекомендуется не проезжать через затопленные участки и следить за обновлениями служб."
             )
 
+        article_image = "https://cdn.publisher.example/news/flooded-road.jpg"
         with patch.object(bot, "now", return_value=current), \
              patch.object(bot, "FEEDS", ["https://fake-feed.example/rss"]), \
              patch.object(bot, "get_url", return_value=rss), \
              patch.object(bot, "parse_source_date", return_value=current), \
              patch.object(bot, "translate", side_effect=fake_translate), \
-             patch.object(bot, "commons_image") as image_mock, \
-             patch.object(bot, "post_text", return_value={"message_id": 222}) as post_mock:
+             patch.object(bot, "extract_article_image", return_value=article_image), \
+             patch.object(bot, "commons_image") as commons_mock, \
+             patch.object(bot, "post_with_image") as post_mock:
             bot.publish_news(state)
 
-        image_mock.assert_not_called()
-        self.assertEqual(post_mock.call_count, 1)
+        commons_mock.assert_not_called()
+        post_mock.assert_called_once()
         posted = post_mock.call_args.args[0]
         self.assertIn("Власти сообщили", posted)
         self.assertNotIn("Предупреждение о сильном дожде", posted)
         self.assertNotIn("publisher.example/story-123", posted)
-        self.assertNotIn("upload.wikimedia.org", posted)
         self.assertNotIn("<b>", posted)
+        self.assertEqual(post_mock.call_args.kwargs["image_url"], article_image)
         self.assertEqual(state["published_news"][0]["link"], "https://publisher.example/story-123")
+
 
     def test_translation_does_not_drop_text_after_4000_characters(self):
         text = ". ".join(["Уникальный факт о городской жизни"] * 220) + ". ПОСЛЕДНЯЯ_УНИКАЛЬНАЯ_СТРОКА"

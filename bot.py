@@ -896,6 +896,18 @@ def handle_callback(q,s):
     except Exception: pass
 
 
+def ensure_polling_no_webhook():
+    """Fail safe if a webhook is configured; never remove another integration's webhook automatically."""
+    info = api('getWebhookInfo')
+    webhook_url = (info or {}).get('url') or ''
+    if webhook_url.strip():
+        print('Webhook is configured; polling skipped and webhook left unchanged.')
+        raise RuntimeError(
+            'У Telegram-бота настроен webhook, который конфликтует с getUpdates. '
+            'Webhook не отключён автоматически; сначала проверь, какой сервис его использует.'
+        )
+
+
 def get_updates(s):
     try:
         updates = api('getUpdates', {
@@ -1203,6 +1215,7 @@ def publish_news(s):
 
 def main():
     s = load_state()
+    ensure_polling_no_webhook()
     get_updates(s)
     process_ad_timers(s)
     if not is_paused(s):

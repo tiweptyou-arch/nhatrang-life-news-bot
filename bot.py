@@ -884,7 +884,18 @@ def handle_admin_message(msg,s):
         s['pending_manual_post']={'user_id':uid,'awaiting_content':True}
         send_dm(uid,'Пришли следующим сообщением текст новости, ссылку или фото/видео с подписью.\nМатериал попадёт в очередь и не опубликуется без твоего подтверждения.\n/cancel — отмена.', main_menu())
     elif cmd=='/newsqueue':
-        send_dm(uid,'Очередь проверки новостей пока будет добавлена следующим этапом. Сейчас можно управлять рекламой и статусом кнопками.', main_menu())
+        pending_items = [p for p in s.get('manual_posts', []) if p.get('status', 'pending') == 'pending']
+        if not pending_items:
+            send_dm(uid, 'Очередь новостей пуста. Добавить материал: /suggest', main_menu())
+            return
+        send_dm(uid, f'<b>Очередь новостей</b> · на проверке: {len(pending_items)}', main_menu())
+        for item in pending_items[-10:]:
+            preview = html.escape(clean_multiline(item.get('content', ''))[:700])
+            media_note = ' · есть фото/видео' if item.get('file_id') else ''
+            item_id = html.escape(str(item.get('id', '?')))
+            send_dm(uid, f'ID <code>{item_id}</code>{media_note}\n\n{preview}\n\n'
+                         f'Опубликовать: <code>/approve {item_id}</code>\n'
+                         f'Отклонить: <code>/reject {item_id}</code>')
     elif cmd=='/ads':
         rows=[]
         for a in s['ads'][-30:]:

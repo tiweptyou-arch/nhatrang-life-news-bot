@@ -322,6 +322,21 @@ class NewsQualityTests(unittest.TestCase):
             self.assertIn("published_news", saved)
             self.assertFalse(os.path.exists(path + ".tmp"))
 
+    def test_long_text_ad_tracks_every_message_for_expiry(self):
+        responses = iter([
+            {"message_id": 501, "chat": {"id": -1001}},
+            {"message_id": 502, "chat": {"id": -1001}},
+            {"message_id": 503, "chat": {"id": -1001}},
+        ])
+        ad = {"text": " ".join(["advertising"] * 1200)}
+        with patch.object(bot, "post_text", side_effect=lambda text: next(responses)) as post_mock:
+            with patch.object(bot.time, "sleep"):
+                result = bot.send_ad_content(ad)
+        self.assertEqual(post_mock.call_count, 3)
+        self.assertEqual(result["message_id"], 501)
+        self.assertEqual(result["_message_ids"], [501, 502, 503])
+        self.assertEqual(result["chat"]["id"], -1001)
+
     def test_ad_album_sends_and_tracks_every_message_id(self):
         response = [
             {"message_id": 201, "chat": {"id": -1001}},

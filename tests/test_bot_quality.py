@@ -551,14 +551,14 @@ class NewsQualityTests(unittest.TestCase):
     def test_publish_news_queues_article_image_without_generated_headline_or_source_link(self):
         current = datetime(2026, 10, 26, 10, 15, tzinfo=bot.TZ)
         description = (
-            "The city announced renovation work at a public park in Nha Trang. "
-            "The project will improve paths, seating, lighting and green spaces for residents. "
-            "Work is expected to proceed in stages while the park remains available to visitors. "
-            "Residents can check local notices for updates about the renovation schedule."
+            "The local authority announced road repairs in Nha Trang. "
+            "The project will improve the road surface and pedestrian crossings in the neighbourhood. "
+            "Work is expected to proceed in stages while residents can still reach nearby homes and shops. "
+            "The authority will publish further details about the road repair schedule."
         )
         rss = (
             '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><item>'
-            '<title>Nha Trang công bố nâng cấp công viên công cộng</title>'
+            '<title>Nha Trang công bố sửa chữa đường tại khu dân cư</title>'
             '<description>' + description + '</description>'
             '<link>https://publisher.example/story-123</link>'
             '<pubDate>Mon, 26 Oct 2026 03:00:00 GMT</pubDate>'
@@ -571,13 +571,13 @@ class NewsQualityTests(unittest.TestCase):
         }
 
         def fake_translate(value):
-            if value.startswith("Nha Trang công bố nâng cấp"):
-                return "Обновление общественного парка в Нячанге"
+            if value.startswith("Nha Trang công bố sửa chữa"):
+                return "Ремонт дороги в жилом районе Нячанга"
             return (
-                "Город объявил о реконструкции общественного парка в Нячанге. "
-                "Проект улучшит дорожки, места для отдыха, освещение и зелёные зоны. "
-                "Работы планируют проводить поэтапно, пока парк остаётся доступен посетителям. "
-                "Жители могут следить за местными уведомлениями, чтобы узнавать об изменениях графика."
+                "Местные власти объявили о ремонте дороги в Нячанге. "
+                "Проект улучшит дорожное покрытие и пешеходные переходы в районе. "
+                "Работы планируют проводить поэтапно, при этом жители смогут добираться до домов и магазинов. "
+                "Дополнительные сведения о графике ремонта опубликуют позднее."
             )
 
         article_image = "https://cdn.publisher.example/news/flooded-road.jpg"
@@ -596,7 +596,7 @@ class NewsQualityTests(unittest.TestCase):
         queue_mock.assert_called_once()
         candidate = queue_mock.call_args.args[1]
         self.assertIn("Город объявил", candidate["body"])
-        self.assertNotIn("Обновление общественного парка", candidate["body"])
+        self.assertNotIn("Ремонт дороги в жилом районе Нячанга", candidate["body"])
         self.assertNotIn("publisher.example/story-123", candidate["body"])
         self.assertNotIn("<b>", candidate["body"])
         self.assertEqual(candidate["image_url"], article_image)

@@ -103,6 +103,50 @@ class NewsQualityTests(unittest.TestCase):
         self.assertEqual(state["published_news"][0]["link"], "https://example.com/road")
         self.assertIn("The city announced repair works.", post_mock.call_args.args[0])
 
+    def test_manual_album_is_queued_and_not_published_until_approved(self):
+        uid = 1335496436
+        state = {"pending_manual_post": {"user_id": str(uid), "awaiting_content": True},
+                 "pending_ad": {}, "manual_posts": [], "ads": [], "paused": False,
+                 "pause_until": "", "daily_counts": {}}
+        messages = [
+            {"message_id": 501, "media_group_id": "album-1", "from": {"id": uid},
+             "chat": {"id": uid}, "caption": "Road closure update",
+             "photo": [{"file_id": "photo-1"}]},
+            {"message_id": 502, "media_group_id": "album-1", "from": {"id": uid},
+             "chat": {"id": uid}, "video": {"file_id": "video-1"}}
+        ]
+        with patch.object(bot, "send_dm"):
+            with patch.object(bot, "api") as api_mock:
+                bot.handle_admin_album(messages, state)
+        self.assertEqual(len(state["manual_posts"]), 1)
+        self.assertEqual(state["manual_posts"][0]["type"], "album")
+        self.assertEqual(len(state["manual_posts"][0]["media_items"]), 2)
+        self.assertEqual(state["manual_posts"][0]["status"], "pending")
+        api_mock.assert_not_called()
+
+    def test_approved_manual_album_publishes_all_media_items(self):
+        uid = 1335496436
+        item = {"id": "album-777", "status": "pending", "type": "album",
+                "content": "Road closure update\\n\\nUse another street.",
+                "media_items": [{"type": "photo", "file_id": "p1"},
+                                {"type": "video", "file_id": "v2"}]}
+        state = {"pending_ad": {}, "pending_manual_post": {}, "manual_posts": [item],
+                 "ads": [], "paused": False, "pause_until": "", "daily_counts": {},
+                 "seen_links": [], "seen_titles": [], "seen_fingerprints": [], "published_news": []}
+        admin = {"from": {"id": uid}, "chat": {"id": uid}, "text": "/approve album-777"}
+        with patch.object(bot, "api", return_value=[
+            {"message_id": 800, "chat": {"id": -1001}},
+            {"message_id": 801, "chat": {"id": -1001}}
+        ]) as api_mock:
+            with patch.object(bot, "send_dm"):
+                with patch.object(bot.time, "sleep"):
+                    bot.handle_admin_message(admin, state)
+        self.assertEqual(item["status"], "published")
+        self.assertEqual(item["published_message_ids"], [800, 801])
+        self.assertEqual(api_mock.call_args.args[0], "sendMediaGroup")
+        sent_media = json.loads(api_mock.call_args.args[1]["media"])
+        self.assertEqual([m["media"] for m in sent_media], ["p1", "v2"])
+
     def test_reject_manual_post_never_publishes(self):
         uid = 1335496436
         item = {"id": "item-345", "status": "pending", "content": "Unverified claim"}
@@ -171,6 +215,19 @@ class NewsQualityTests(unittest.TestCase):
         self.assertIn("Jane Doe", image["credit_html"])
         self.assertIn("CC BY-SA 4.0", image["credit_html"])
         self.assertIn("https://creativecommons.org/licenses/by-sa/4.0/", image["credit_html"])
+
+    def test_commons_noncommercial_license_is_rejected_for_monetized_channel(self):
+        response = {"query": {"pages": {"123": {
+            "fullurl": "https://commons.wikimedia.org/wiki/File:noncommercial.jpg",
+            "imageinfo": [{"thumburl": "https://upload.wikimedia.org/noncommercial.jpg",
+                           "extmetadata": {
+                               "Artist": {"value": "Jane Doe"},
+                               "LicenseShortName": {"value": "CC BY-NC-SA 4.0"},
+                               "LicenseUrl": {"value": "https://creativecommons.org/licenses/by-nc-sa/4.0/"}
+                           }}]
+        }}}}
+        with patch.object(bot, "get_url", return_value=json.dumps(response).encode("utf-8")):
+            self.assertIsNone(bot.commons_image("Nha Trang public services"))
 
     def test_commons_image_without_identifiable_license_is_rejected(self):
         response = {

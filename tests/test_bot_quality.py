@@ -49,6 +49,86 @@ class NewsQualityTests(unittest.TestCase):
         self.assertFalse(bot.is_recent_source_date(current + timedelta(minutes=20), current))
         self.assertTrue(bot.is_recent_source_date(current + timedelta(minutes=10), current))
 
+    def test_suggest_command_collects_a_review_only_submission(self):
+        uid = 1335496436
+        state = {"pending_ad": {}, "pending_manual_post": {}, "manual_posts": []}
+        admin = {"from": {"id": uid}, "chat": {"id": uid}, "text": "/suggest", "message_id": 10}
+        with patch.object(bot, "send_dm"):
+            bot.handle_admin_message(admin, state)
+            self.assertTrue(state["pending_manual_post"]["awaiting_content"])
+            submission = {
+                "from": {"id": uid}, "chat": {"id": uid}, "message_id": 11,
+                "text": "Repair works announced for Nha Trang road. https://example.com/road"
+            }
+            bot.handle_admin_message(submission, state)
+        self.assertEqual(len(state["manual_posts"]), 1)
+        self.assertEqual(state["manual_posts"][0]["status"], "pending")
+        self.assertFalse(state["pending_manual_post"].get("awaiting_content", False))
+
+    def test_newsqueue_lists_pending_item_id(self):
+        uid = 1335496436
+        state = {
+            "pending_ad": {}, "pending_manual_post": {},
+            "manual_posts": [{"id": "item-123", "status": "pending", "content": "Road repair notice"}]
+        }
+        admin = {"from": {"id": uid}, "chat": {"id": uid}, "text": "/newsqueue"}
+        with patch.object(bot, "send_dm") as send_mock:
+            bot.handle_admin_message(admin, state)
+        sent = "\n".join(str(call.args) for call in send_mock.call_args_list)
+        self.assertIn("item-123", sent)
+        self.assertIn("/approve item-123", sent)
+
+    def test_approve_manual_post_publishes_only_after_explicit_command(self):
+        uid = 1335496436
+        item = {
+            "id": "item-234", "status": "pending",
+            "type": "text",
+            "content": "Road repair update\n\nThe city announced repair works.\nSource: https://example.com/road"
+        }
+        state = {
+            "pending_ad": {}, "pending_manual_post": {}, "manual_posts": [item],
+            "ads": [], "paused": False, "pause_until": "",
+            "daily_counts": {}, "seen_links": [], "seen_titles": [],
+            "seen_fingerprints": [], "published_news": []
+        }
+        admin = {"from": {"id": uid}, "chat": {"id": uid}, "text": "/approve item-234"}
+        with patch.object(bot, "post_text", return_value={"message_id": 777}) as post_mock:
+            with patch.object(bot, "send_dm"):
+                with patch.object(bot.time, "sleep"):
+                    bot.handle_admin_message(admin, state)
+        self.assertEqual(item["status"], "published")
+        self.assertEqual(item["published_message_id"], 777)
+        self.assertEqual(post_mock.call_count, 1)
+        self.assertEqual(state["published_news"][0]["title"], "Road repair update")
+        self.assertEqual(state["published_news"][0]["link"], "https://example.com/road")
+        self.assertIn("The city announced repair works.", post_mock.call_args.args[0])
+
+    def test_reject_manual_post_never_publishes(self):
+        uid = 1335496436
+        item = {"id": "item-345", "status": "pending", "content": "Unverified claim"}
+        state = {
+            "pending_ad": {}, "pending_manual_post": {}, "manual_posts": [item],
+            "ads": [], "paused": False, "pause_until": "", "daily_counts": {}
+        }
+        admin = {"from": {"id": uid}, "chat": {"id": uid}, "text": "/reject item-345"}
+        with patch.object(bot, "send_dm"):
+            with patch.object(bot, "post_text") as post_mock:
+                bot.handle_admin_message(admin, state)
+        self.assertEqual(item["status"], "rejected")
+        post_mock.assert_not_called()
+
+    def test_manual_photo_without_context_is_not_queued(self):
+        uid = 1335496436
+        state = {"pending_manual_post": {}, "manual_posts": []}
+        msg = {
+            "from": {"id": uid}, "chat": {"id": uid}, "message_id": 45,
+            "photo": [{"file_id": "small"}, {"file_id": "large"}]
+        }
+        with patch.object(bot, "send_dm"):
+            bot.capture_manual_post(msg, state, str(uid))
+        self.assertEqual(state["manual_posts"], [])
+        self.assertEqual(state["pending_manual_post"], {})
+
     def test_practical_local_story_is_kept(self):
         self.assertTrue(bot.is_relevant_news(
             "Khánh Hòa cảnh báo mưa lớn tại Nha Trang",

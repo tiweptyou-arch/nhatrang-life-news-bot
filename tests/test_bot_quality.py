@@ -135,6 +135,13 @@ class NewsQualityTests(unittest.TestCase):
             "Chính quyền thông báo nguy cơ ngập ở một số tuyến đường."
         ))
 
+    def test_image_search_matches_russian_translated_topics(self):
+        self.assertIn("storm", bot.news_image_query("Сильный дождь и шторм в Нячанге"))
+        self.assertIn("school", bot.news_image_query("Новые правила для школьников в Нячанге"))
+        self.assertIn("hospital", bot.news_image_query("Изменения в больницах и клиниках"))
+        self.assertIn("road traffic", bot.news_image_query("Ремонт дороги и новые ограничения движения"))
+        self.assertIn("immigration", bot.news_image_query("Новые правила визы для иностранцев"))
+
     def test_urgent_terms_match_whole_words(self):
         self.assertTrue(bot.is_urgent_news("Cảnh báo bão lớn tại Nha Trang"))
         self.assertFalse(bot.is_urgent_news("Một nghệ sĩ nổi tiếng đến Nha Trang"))

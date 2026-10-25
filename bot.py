@@ -946,6 +946,35 @@ def handle_admin_message(msg,s):
         ad=next((a for a in s['ads'] if a.get('id')==target and not a.get('deleted') and a.get('message_id')),None)
         if not ad: send_dm(uid,'Не нашёл активный рекламный пост с таким ID. Посмотри /ads.'); return
         new_text=html.escape(new_text)
+        if ad.get('type') not in ('photo', 'video', 'document', 'album') and (
+            len(ad.get('message_ids') or [ad.get('message_id')]) > 1 or
+            len((new_text + footer()).strip()) > 3900
+        ):
+            old_ids = list(ad.get('message_ids') or [ad.get('message_id')])
+            old_ids.extend(ad.get('stale_message_ids') or [])
+            old_ids = list(dict.fromkeys(mid for mid in old_ids if mid))
+            replacement = dict(ad)
+            replacement['text'] = new_text
+            try:
+                result = send_ad_content(replacement)
+            except Exception as e:
+                send_dm(uid, f'Не удалось заменить рекламный текст: {html.escape(str(e)[:350])}')
+                return
+            try:
+                delete_ad_message({
+                    'chat_id': ad.get('chat_id', CHANNEL),
+                    'message_ids': old_ids
+                })
+                ad['stale_message_ids'] = []
+            except Exception as e:
+                ad['stale_message_ids'] = old_ids
+                print('Old ad text cleanup will retry:', ad.get('id'), type(e).__name__)
+            ad['message_id'] = result['message_id']
+            ad['message_ids'] = result.get('_message_ids') or [result['message_id']]
+            ad['chat_id'] = result['chat']['id']
+            ad['text'] = new_text
+            send_dm(uid, f'Текст рекламы {target} обновлён. Если запись была закреплена, проверь закрепление через /ads.')
+            return
         if ad.get('type') in ('photo','video','document','album'):
             caption=(new_text+footer()).strip()
             if len(caption)>1024: send_dm(uid,'Подпись слишком длинная: максимум 1024 символа вместе с футером.'); return

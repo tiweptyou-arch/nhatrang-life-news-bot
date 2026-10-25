@@ -954,7 +954,9 @@ def handle_admin_message(msg,s):
     elif cmd=='/resume':
         s['paused']=False; s['pause_until']=''; send_dm(uid,'Ручная пауза снята. Бот продолжит расписание, если сейчас нет активного рекламного окна.')
     elif cmd=='/cancel':
-        s['pending_ad']={}; send_dm(uid,'Черновик отменён.')
+        s['pending_ad']={}
+        s['pending_manual_post']={}
+        send_dm(uid,'Текущий черновик отменён.')
     elif cmd=='/status':
         until=top_pause_until(s)
         send_dm(uid, f'<b>Статус</b>\nВремя Нячанга: {now().strftime("%d.%m.%Y %H:%M:%S")}\nПостов сегодня: {count_today(s)}/10\nНовости: {"на паузе" if is_paused(s) else "разрешены"}\nОкно без новостей до: {until.strftime("%d.%m %H:%M") if until>now() else "нет"}\nАктивных реклам: {sum(1 for a in s["ads"] if not a.get("deleted") and a.get("message_id"))}')

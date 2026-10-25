@@ -11,6 +11,17 @@ import bot  # noqa: E402
 
 
 class NewsQualityTests(unittest.TestCase):
+    def test_polling_guard_accepts_missing_webhook(self):
+        with patch.object(bot, "api", return_value={"url": ""}) as api_mock:
+            bot.ensure_polling_no_webhook()
+        self.assertEqual(api_mock.call_args.args[0], "getWebhookInfo")
+
+    def test_polling_guard_refuses_active_webhook_without_deleting_it(self):
+        with patch.object(bot, "api", return_value={"url": "https://example.com/webhook"}) as api_mock:
+            with self.assertRaises(RuntimeError):
+                bot.ensure_polling_no_webhook()
+        self.assertEqual([call.args[0] for call in api_mock.call_args_list], ["getWebhookInfo"])
+
     def test_parse_rss_publication_date(self):
         parsed = bot.parse_source_date("Sun, 25 Oct 2026 10:00:00 GMT")
         self.assertIsNotNone(parsed)

@@ -28,7 +28,7 @@ FEEDS = [
  'https://news.google.com/rss/search?q=Kh%C3%A1nh+H%C3%B2a&hl=vi&gl=VN&ceid=VN:vi',
  'https://news.google.com/rss/search?q=Nha+Trang+Kh%C3%A1nh+H%C3%B2a&hl=en&gl=US&ceid=US:en',
 ]
-KEYWORDS = ['nha trang','khánh hòa','khanh hoa','cam ranh','diên khánh','dien khanh','vạn ninh','van ninh','trường sa','truong sa']
+KEYWORDS = ['nha trang','khánh hòa','khanh hoa','cam ranh','diên khánh','dien khanh','vạn ninh','van ninh','trường sa','truong sa', 'нячанг','кханьхоа','кхань хоа','камрань']
 
 
 def now(): return datetime.now(TZ)
@@ -242,7 +242,12 @@ SPORTS_NOISE_TERMS = (
 URGENT_NEWS_TERMS = (
     'cảnh báo', 'khẩn cấp', 'bão', 'ngập', 'lũ', 'sạt lở', 'sơ tán', 'cháy', 'nổ',
     'tai nạn nghiêm trọng', 'mất tích', 'nguy hiểm', 'cấm tắm biển', 'sóng lớn',
-    'dịch bệnh', 'đóng đường khẩn cấp', 'emergency', 'flood', 'storm', 'evacuation'
+    'dịch bệnh', 'đóng đường khẩn cấp', 'emergency', 'flood', 'storm', 'evacuation',
+    'fire', 'explosion', 'serious accident', 'road accident', 'missing person',
+    'landslide', 'earthquake', 'tsunami', 'danger', 'strong wind', 'injured', 'dead',
+    'наводнение', 'шторм', 'ливень', 'затопление', 'авария', 'пожар', 'взрыв',
+    'эвакуация', 'оползень', 'землетрясение', 'цунами', 'опасность', 'сильный ветер',
+    'погибли', 'пострадавшие', 'запрет купания', 'перекрытие дороги'
 )
 ALLOWED_REACTIONS = ('🤣', '😱', '👍', '❤️', '🙏')
 

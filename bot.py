@@ -143,11 +143,11 @@ def load_state():
       'seen_links': [], 'seen_titles': [], 'seen_fingerprints': [], 'last_update_id': 0, 'pending_ad': {},
       'ads': [], 'paused': False, 'pause_until': '', 'daily_counts': {}, 'last_slots': {},
       'game_history': [], 'last_news_hour': '', 'manual_posts': [], 'pending_manual_post': {}, 'published_news': [],
-      'pending_news_review': {}, 'review_editing': {}, 'rejected_news_links': [], 'rejected_news_fingerprints': []
+      'pending_news_review': {}, 'review_editing': {}, 'rejected_news_links': [], 'rejected_news_fingerprints': [], 'rejected_news_titles': []
     }
     for k, v in defaults.items():
         s.setdefault(k, v)
-    for key in ('seen_links', 'seen_titles', 'seen_fingerprints', 'ads', 'published_news', 'game_history', 'manual_posts', 'rejected_news_links', 'rejected_news_fingerprints'):
+    for key in ('seen_links', 'seen_titles', 'seen_fingerprints', 'ads', 'published_news', 'game_history', 'manual_posts', 'rejected_news_links', 'rejected_news_fingerprints', 'rejected_news_titles'):
         if not isinstance(s.get(key), list):
             raise RuntimeError(
                 f'Поле {key} в {STATE_FILE} имеет неверный формат; файл не будет сохранён, чтобы не потерять данные.'
@@ -897,12 +897,35 @@ def split_html_text(text, limit=3900):
 
 
 
-def post_with_image(text, image_url=None, illustration=False, image_query=None):
-    """Publish a photo-led post: article image first, topical illustration as fallback."""
+
+def post_with_image(text, image_url=None, illustration=False, image_query=None, image_file_id=None):
+    """Publish a photo-led post, preferring the reviewed photo before trying a topical Vietnam image."""
     if not text or not text.strip():
         return None
+
     query = image_query or news_image_query('', clean(text))
-    candidates = [image_url] if image_url else []
+    # Reuse the exact image file reviewed by an admin when possible.
+    if image_file_id:
+        caption_limit = 800 if 'Wikimedia Commons' in text else 950
+        caption, continuation = split_photo_caption(text, limit=caption_limit)
+        try:
+            result = api('sendPhoto', {
+                'chat_id': CHANNEL, 'photo': image_file_id,
+                'caption': caption or '🇻🇳 Новости Нячанга',
+                'parse_mode': 'HTML'
+            })
+            if continuation:
+                for part in split_html_text(continuation, limit=3900):
+                    post_text(part)
+                    time.sleep(0.2)
+            return result
+        except Exception as e:
+            print('Reviewed image could not be reused; trying article image/fallback:', type(e).__name__)
+
+    candidates = []
+    normalized = normalize_image_url(image_url or '')
+    if normalized:
+        candidates.append(normalized)
     fallback_loaded = False
 
     while True:
@@ -922,7 +945,7 @@ def post_with_image(text, image_url=None, illustration=False, image_query=None):
 
         content = text
         credit = candidate.get('credit_html') if isinstance(candidate, dict) else None
-        if credit:
+        if credit and 'Wikimedia Commons' not in content:
             if FOOTER in content:
                 content = content.replace(FOOTER, '\n\n' + credit + FOOTER, 1)
             else:
@@ -941,14 +964,14 @@ def post_with_image(text, image_url=None, illustration=False, image_query=None):
                     time.sleep(0.2)
             return result
         except Exception as e:
-            print('Photo send failed; trying a topical fallback:', type(e).__name__)
+            print('Photo send failed; trying topical fallback:', type(e).__name__)
             if not fallback_loaded:
                 fallback_loaded = True
                 fallback = commons_image(query)
                 if fallback:
                     candidates.append(fallback)
 
-    # Last-resort delivery protects urgent information if every image host is unavailable.
+    # Last-resort protection: do not drop important information if Telegram cannot fetch any image.
     print('No usable image could be sent; publishing text fallback.')
     result = None
     for part in split_html_text(text, limit=3900):

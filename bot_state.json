@@ -35,7 +35,8 @@
     "https://news.google.com/rss/articles/CBMivAFBVV95cUxPWEVOaTEyeFNKZ3FMNHMyVWdGM2o1ZnZiUHNULUVHVGVfdnQ4X3hqRThwbHl6d05wX1d3LXVLMEFld3BMam03WnVQUmZzWGR5ajhDaG1CeDA5RTgyek14OHFXRFZrT204dnkwMFZlQTFpNmtiM0ZGVHYxSlVJamJzOGVkQVFLRVAwWG02aFhVYjExMXVBS3BXc1otUU8zTkJxZjk4TG8wNEZISWxXWHJpQVBaWFhRUVRRZ3I5Yg?oc=5",
     "https://news.google.com/rss/articles/CBMimwFBVV95cUxQdF9FTENETEl1ZlQ4N1BHaHJSTktONjRpSUl5LWNRaG9DRXZNVVZwR1Zjc2Z0azRYakpDUmVuOXRIMms5b1VEU3l4VlpSWVRPS1RaM3FRV21HcW43VFZRSVNTNmcwbzZUOWdxM19wbS03YjU0R0JrZVFHMHhka1Z2aDM2V1Znd1l2UWdjUWFkVzNuSE1uenhvSFZZNA?oc=5",
     "https://news.google.com/rss/articles/CBMi6AFBVV95cUxOQUo2ckg5bEZ1VDhQRzRKOFo3aXoyS0tZTHNoZVh0Tk5sQ05WWFVRVG5WRVFLdGlwZW9rTzFDbU5aU0ZEcWhMNEJhVFdBN09idENXUXZXM1gwXzBwZkN4VXp0LVRmd3V5S01HaE41cnFXVkF6Y0prSFhiWnBXN2ZVVnpRa2lIVmlSSWEtUEJKSGRBYlJ2VlR3bnMteHZrR2tjYVZXZm0xSno4Wk9uVGh0cDZielQzcEtUV21NT0lSYm1fMTlpSlBWR2xZejVrSzhPSV8zMFdGUUstQks0bnlYRnpGSVJ6Y2k0?oc=5",
-    "https://news.google.com/rss/articles/CBMinwFBVV95cUxQQU1ESF9ZbHZ0WkhKQnVlM3F3MUtaSE5KRkZNNlI1RC1TUzJBMjA4WHRxQUlscHktOGlBOFdUdE5KS0RCU3V6QjZJaGoyNUZOTDNnXzd6OWotLV9Bd0VxcDhQWlRIWElGZ1BSeWVRMFJXd0MtWTRvOE5rSTZfU1hTQ0lkZUJ3bDRzWjBCOEM1NHFVSnFhZ0dNZ3V4WGtEaWc?oc=5"
+    "https://news.google.com/rss/articles/CBMinwFBVV95cUxQQU1ESF9ZbHZ0WkhKQnVlM3F3MUtaSE5KRkZNNlI1RC1TUzJBMjA4WHRxQUlscHktOGlBOFdUdE5KS0RCU3V6QjZJaGoyNUZOTDNnXzd6OWotLV9Bd0VxcDhQWlRIWElGZ1BSeWVRMFJXd0MtWTRvOE5rSTZfU1hTQ0lkZUJ3bDRzWjBCOEM1NHFVSnFhZ0dNZ3V4WGtEaWc?oc=5",
+    "https://news.google.com/rss/articles/CBMilwFBVV95cUxPdDFvdC1vLUx3TnRjb09jV0lEOXB0VjMwUmRqTHZXRm9haUlPaFhHNFFNd1lTOTNhRndQZndEeExicGVsc3Q2Tk1QLW9oSTFPSUxna21aazNRbWtiTnVFUVg1RUhSNnVJaDVFUUZta1pBa1RiTU1FVkdZUWxRazlkeVgybnJEZzBQdkQ0cE8tZmlYWWc0c2hj?oc=5"
   ],
   "seen_titles": [
     "81ad2659c044ab5b3959bd5bf50991b824ba9f7027554127e94c3dceb4216621",
@@ -72,7 +73,8 @@
     "Vận hành đập ngăn mặn sông Cái Nha Trang gây ngập nhà cửa, ruộng vườn của dân - Báo Thanh Niên",
     "Lịch cắt điện Khánh Hòa (Nha Trang) ngày mai 26/10 cập nhật mới nhất - Bnews.vn",
     "Phường Nam Nha Trang trao giấy chứng nhận quyền sử dụng đất cho Đại học Kinh tế TP. Hồ Chí Minh - Báo Khánh Hòa",
-    "Hỗ trợ gia đình hai mẹ con mắc bệnh hiểm nghèo ở Nha Trang - Laodong.vn"
+    "Hỗ trợ gia đình hai mẹ con mắc bệnh hiểm nghèo ở Nha Trang - Laodong.vn",
+    "Trải nghiệm công nghệ số ngay bên biển Nha Trang - Báo Thanh Niên"
   ],
   "manual_posts": [],
   "last_update_id": 420020173,
@@ -91,14 +93,15 @@
   "pause_until": "",
   "daily_counts": {
     "2026-10-24": 4,
-    "2026-10-25": 10
+    "2026-10-25": 10,
+    "2026-10-26": 1
   },
   "last_slots": {
     "weather_morning": "2026-10-24",
     "weather_evening": "2026-10-24"
   },
   "game_history": [],
-  "last_news_hour": "2026-10-25-16",
+  "last_news_hour": "2026-10-26-00",
   "seen_fingerprints": [
     "daeaad4357dd60ca5edb9bfef3860995a6c5ffb5d2597484f3c8b464002ab6ec",
     "ecb52d4884100186fc14fd7aaf87274ceac440c34685c465f3ee6202fba760df",
@@ -110,6 +113,7 @@
     "52688f18b7bad5a9551a7bc768e06dc50eb05c8b8876a69bda1990eec59808d9",
     "31fb255439177ad7465de7dc42ac946cdb51b7069cee3adca6a14b6681a7f8c0",
     "7a0567778b050750d66cc4cd59fb4fec2ca644f0603c3bd32feff8b0202a5e1c",
-    "a3a1584f718d0ec67bb42897c5d0556ff95bb488a31dcb7cbb26ed8fd370792e"
+    "a3a1584f718d0ec67bb42897c5d0556ff95bb488a31dcb7cbb26ed8fd370792e",
+    "395ddb7e99f01c0519e9b8ccdf9694661d16d75e31307e9c5973f4084707f1d6"
   ]
 }

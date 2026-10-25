@@ -72,7 +72,7 @@ class NewsQualityTests(unittest.TestCase):
     def test_generic_local_mention_without_practical_value_is_rejected(self):
         self.assertFalse(bot.is_relevant_news(
             "Một nghệ sĩ nổi tiếng đến Nha Trang",
-            "Thông tin giải trí chung, không có hướng dẫn hoặc hệ quả thiết thực."
+            "Thông tin giải trí chung về một sự kiện, không có hướng dẫn hoặc hệ quả thiết thực."
         ))
 
     def test_short_word_fragment_does_not_trigger_false_urgent_story(self):

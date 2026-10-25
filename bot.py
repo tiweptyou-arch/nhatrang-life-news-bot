@@ -98,14 +98,20 @@ def load_state():
     }
     for k, v in defaults.items():
         s.setdefault(k, v)
-    for key in ('seen_links', 'seen_titles', 'seen_fingerprints', 'ads', 'published_news'):
+    for key in ('seen_links', 'seen_titles', 'seen_fingerprints', 'ads', 'published_news', 'game_history', 'manual_posts'):
         if not isinstance(s.get(key), list):
-            print(f'Invalid state field {key}; using an empty list for this field only.')
-            s[key] = []
+            raise RuntimeError(
+                f'Поле {key} в {STATE_FILE} имеет неверный формат; файл не будет сохранён, чтобы не потерять данные.'
+            )
     for key in ('daily_counts', 'last_slots', 'pending_ad'):
         if not isinstance(s.get(key), dict):
-            print(f'Invalid state field {key}; using an empty object for this field only.')
-            s[key] = {}
+            raise RuntimeError(
+                f'Поле {key} в {STATE_FILE} имеет неверный формат; файл не будет сохранён, чтобы не потерять данные.'
+            )
+    if not isinstance(s.get('last_update_id'), int):
+        raise RuntimeError(f'Поле last_update_id в {STATE_FILE} имеет неверный формат; сохранение остановлено.')
+    if not isinstance(s.get('paused'), bool):
+        raise RuntimeError(f'Поле paused в {STATE_FILE} имеет неверный формат; сохранение остановлено.')
     return s
 
 

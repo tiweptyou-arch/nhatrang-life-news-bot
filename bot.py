@@ -781,6 +781,10 @@ def handle_admin_message(msg,s):
     chat_id = str((msg.get('chat') or {}).get('id',''))
     if chat_id != uid: return  # management is private-chat only
     text = (msg.get('text') or msg.get('caption') or '').strip()
+    manual_pending = s.get('pending_manual_post') or {}
+    if manual_pending.get('awaiting_content') and not text.startswith('/'):
+        capture_manual_post(msg, s, uid)
+        return
     pending = s.get('pending_ad') or {}
     # Complete ad draft by sending the next message after /ad FORMAT.
     if pending.get('awaiting_content') and not text.startswith('/'):

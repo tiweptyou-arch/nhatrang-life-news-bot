@@ -92,10 +92,10 @@ class NewsQualityTests(unittest.TestCase):
         )
 
     def test_long_article_paragraphs_are_preserved(self):
-            "First useful paragraph.\n\nSecond paragraph with more facts."
+        html_article = "<p>First useful paragraph.</p><p>Second paragraph with more facts.</p>"
         self.assertEqual(
             bot.clean_multiline(html_article),
-            "First useful paragraph.\\n\\nSecond paragraph with more facts."
+            "First useful paragraph.\n\nSecond paragraph with more facts."
         )
 
     def test_telegram_transport_errors_do_not_leak_bot_token(self):

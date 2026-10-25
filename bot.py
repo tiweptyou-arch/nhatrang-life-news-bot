@@ -1289,6 +1289,7 @@ def mark_slot(s,key): s['last_slots'][key]=now().date().isoformat()
 
 
 
+
 def routine_posts(s):
     """Publish an end-of-day recap only when there is useful news or a real warning."""
     n = now()
@@ -1340,16 +1341,17 @@ def routine_posts(s):
         mark_slot(s, 'night')
         return
 
-    parts = ['🌙']
+    parts = []
     if recap:
-        parts.append('Сегодня в Нячанге: ' + ' '.join(recap))
-    if tomorrow_warning:
+        parts.append('🌙 Сегодня в Нячанге: ' + ' '.join(recap))
+    elif tomorrow_warning:
+        parts.append('🌙 ' + tomorrow_warning)
+    if recap and tomorrow_warning:
         parts.append(tomorrow_warning)
     text = '\n\n'.join(parts) + footer()
     post_with_image(text)
     bump_today(s)
     mark_slot(s, 'night')
-
 
 def weather_post(s, period):
     key = 'weather_' + period

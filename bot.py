@@ -133,7 +133,7 @@ def load_state():
     defaults = {
       'seen_links': [], 'seen_titles': [], 'seen_fingerprints': [], 'last_update_id': 0, 'pending_ad': {},
       'ads': [], 'paused': False, 'pause_until': '', 'daily_counts': {}, 'last_slots': {},
-      'game_history': [], 'last_news_hour': '', 'manual_posts': [], 'published_news': []
+      'game_history': [], 'last_news_hour': '', 'manual_posts': [], 'pending_manual_post': {}, 'published_news': []
     }
     for k, v in defaults.items():
         s.setdefault(k, v)
@@ -142,7 +142,7 @@ def load_state():
             raise RuntimeError(
                 f'Поле {key} в {STATE_FILE} имеет неверный формат; файл не будет сохранён, чтобы не потерять данные.'
             )
-    for key in ('daily_counts', 'last_slots', 'pending_ad'):
+    for key in ('daily_counts', 'last_slots', 'pending_ad', 'pending_manual_post'):
         if not isinstance(s.get(key), dict):
             raise RuntimeError(
                 f'Поле {key} в {STATE_FILE} имеет неверный формат; файл не будет сохранён, чтобы не потерять данные.'
@@ -613,6 +613,129 @@ def top_pause_until(s):
     return latest
 
 def is_paused(s): return top_pause_until(s) > now()
+
+
+
+def capture_manual_post(msg, s, uid):
+    """Save an admin-submitted news tip for review; never publish it automatically."""
+    content = (msg.get('text') or msg.get('caption') or '').strip()
+    post_type, file_id = 'text', None
+    if msg.get('photo'):
+        post_type, file_id = 'photo', msg['photo'][-1]['file_id']
+    elif msg.get('video'):
+        post_type, file_id = 'video', msg['video']['file_id']
+    if not content and not file_id:
+        send_dm(uid, 'Добавь текст новости, ссылку или фото/видео с подписью. Для отмены: /cancel')
+        return
+    message_id = str((msg.get('message_id') or int(time.time() * 1000)))
+    item_id = f'{uid}-{message_id}'
+    s.setdefault('manual_posts', []).append({
+        'id': item_id,
+        'status': 'pending',
+        'content': content,
+        'type': post_type,
+        'file_id': file_id,
+        'submitted_by': uid,
+        'created_at': iso(now())
+    })
+    s['pending_manual_post'] = {}
+    send_dm(
+        uid,
+        f'Материал добавлен в очередь проверки. ID: <code>{html.escape(item_id)}</code>.\\n'
+        'Посмотреть очередь: /newsqueue\\n'
+        'Опубликовать после проверки: /approve ID\\n'
+        'Отклонить: /reject ID'
+    )
+
+
+def split_manual_content(content):
+    """Extract a separate first-line headline without repeating it in the body."""
+    content = clean_multiline(content)
+    paragraphs = [p.strip() for p in content.split('\\n\\n') if p.strip()]
+    if not paragraphs:
+        return 'Предложенная новость', ''
+    if len(paragraphs) > 1:
+        first = paragraphs[0]
+        title = first[:180].strip() or 'Предложенная новость'
+        overflow = first[180:].strip()
+        body_parts = ([overflow] if overflow else []) + paragraphs[1:]
+        return title, '\\n\\n'.join(body_parts).strip()
+    only = paragraphs[0]
+    sentences = re.split(r'(?<=[.!?…])\\s+', only, maxsplit=1)
+    if len(sentences) > 1 and len(sentences[0]) <= 180:
+        return sentences[0].strip(), only[len(sentences[0]):].strip()
+    return 'Предложенная новость', only
+
+
+def publish_manual_post(item, s, uid=None):
+    """Publish an explicitly approved manual item, preserving full text and optional media."""
+    if is_paused(s):
+        raise ValueError('Публикации на паузе из-за ручной или рекламной паузы.')
+    if count_today(s) >= 10:
+        raise ValueError('Достигнут дневной лимит в 10 публикаций.')
+    raw = (item.get('content') or '').strip()
+    title, body = split_manual_content(raw)
+    title_html = html.escape(title)
+    body_html = html.escape(body)
+    lead = '📰 <b>' + title_html + '</b>'
+    result = None
+
+    post_type = item.get('type') or 'text'
+    file_id = item.get('file_id')
+    if post_type in ('photo', 'video') and file_id:
+        # Use a compact caption while sending the full remainder as follow-up text.
+        body_excerpt = ''
+        remainder = body
+        if len(body) > 420:
+            cut = body.rfind(' ', 0, 420)
+            if cut < 250:
+                cut = 420
+            body_excerpt = body[:cut].strip()
+            remainder = body[cut:].strip()
+        else:
+            body_excerpt, remainder = body, ''
+        caption = lead
+        if body_excerpt:
+            caption += '\\n\\n' + html.escape(body_excerpt)
+        caption += footer()
+        method, field = ('sendPhoto', 'photo') if post_type == 'photo' else ('sendVideo', 'video')
+        result = api(method, {
+            'chat_id': CHANNEL, field: file_id,
+            'caption': caption, 'parse_mode': 'HTML'
+        })
+        if remainder:
+            for part in split_html_text(html.escape(remainder)):
+                post_text(part)
+                time.sleep(0.2)
+    else:
+        full_text = lead + ('\\n\\n' + body_html if body_html else '') + footer()
+        for part in split_html_text(full_text):
+            result = post_text(part)
+            time.sleep(0.2)
+
+    item['status'] = 'published'
+    item['published_at'] = iso(now())
+    item['published_message_id'] = (result or {}).get('message_id')
+    item['title'] = title
+    link_match = re.search(r'https?://[^\\s<>]+', raw)
+    source_link = link_match.group(0).rstrip('.,);]') if link_match else ''
+    s['published_news'] = (s.get('published_news', []) + [{
+        'title': title,
+        'summary': body or raw,
+        'link': source_link,
+        'published_at': iso(now()),
+        'source_published_at': iso(now()),
+        'urgent': False,
+        'manual': True
+    }])[-100:]
+    if source_link:
+        s['seen_links'] = (s.get('seen_links', []) + [source_link])[-1000:]
+    s['seen_titles'] = (s.get('seen_titles', []) + [title])[-500:]
+    s['seen_fingerprints'] = (s.get('seen_fingerprints', []) + [title_fingerprint(title)])[-1000:]
+    bump_today(s)
+    if uid:
+        send_dm(uid, f'Материал <code>{html.escape(item["id"])}</code> опубликован в канале.')
+    return result
 
 
 def handle_admin_album(messages, s):

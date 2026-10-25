@@ -551,14 +551,14 @@ class NewsQualityTests(unittest.TestCase):
     def test_publish_news_queues_article_image_without_generated_headline_or_source_link(self):
         current = datetime(2026, 10, 26, 10, 15, tzinfo=bot.TZ)
         description = (
-            "Local authorities in Khanh Hoa warned that heavy rain may cause flooding on several "
-            "streets in Nha Trang. Residents should avoid low-lying roads during intense rainfall. "
-            "Traffic may slow down, and people should check local notices before travelling. "
-            "The advisory asks residents to keep away from flooded areas and follow updated guidance."
+            "The city announced renovation work at a public park in Nha Trang. "
+            "The project will improve paths, seating, lighting and green spaces for residents. "
+            "Work is expected to proceed in stages while the park remains available to visitors. "
+            "Residents can check local notices for updates about the renovation schedule."
         )
         rss = (
             '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><item>'
-            '<title>Khánh Hòa cảnh báo mưa lớn tại Nha Trang</title>'
+            '<title>Nha Trang công bố nâng cấp công viên công cộng</title>'
             '<description>' + description + '</description>'
             '<link>https://publisher.example/story-123</link>'
             '<pubDate>Mon, 26 Oct 2026 03:00:00 GMT</pubDate>'
@@ -571,13 +571,13 @@ class NewsQualityTests(unittest.TestCase):
         }
 
         def fake_translate(value):
-            if value.startswith("Khánh Hòa cảnh báo"):
-                return "Предупреждение о сильном дожде в Нячанге"
+            if value.startswith("Nha Trang công bố nâng cấp"):
+                return "Обновление общественного парка в Нячанге"
             return (
-                "Власти сообщили, что сильный дождь может вызвать затопление нескольких улиц Нячанга. "
-                "Жителям рекомендуют избегать низко расположенных дорог во время интенсивных осадков. "
-                "Движение может замедлиться, поэтому перед поездкой стоит проверить местные уведомления. "
-                "Также рекомендуется не проезжать через затопленные участки и следить за обновлениями служб."
+                "Город объявил о реконструкции общественного парка в Нячанге. "
+                "Проект улучшит дорожки, места для отдыха, освещение и зелёные зоны. "
+                "Работы планируют проводить поэтапно, пока парк остаётся доступен посетителям. "
+                "Жители могут следить за местными уведомлениями, чтобы узнавать об изменениях графика."
             )
 
         article_image = "https://cdn.publisher.example/news/flooded-road.jpg"
@@ -595,8 +595,8 @@ class NewsQualityTests(unittest.TestCase):
         commons_mock.assert_not_called()
         queue_mock.assert_called_once()
         candidate = queue_mock.call_args.args[1]
-        self.assertIn("Власти сообщили", candidate["body"])
-        self.assertNotIn("Предупреждение о сильном дожде", candidate["body"])
+        self.assertIn("Город объявил", candidate["body"])
+        self.assertNotIn("Обновление общественного парка", candidate["body"])
         self.assertNotIn("publisher.example/story-123", candidate["body"])
         self.assertNotIn("<b>", candidate["body"])
         self.assertEqual(candidate["image_url"], article_image)

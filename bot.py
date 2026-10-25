@@ -339,7 +339,7 @@ def post_with_image(text, image_url=None, illustration=False):
                 text = text.replace(FOOTER, '\n\n' + attribution + FOOTER, 1)
             else:
                 text += '\n\n' + attribution
-        illustration = True
+        illustration = not bool(attribution)
 
     paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text.strip()) if p.strip()]
     caption_parts = []

@@ -28,6 +28,18 @@ def parse_dt(value):
     try: return datetime.fromisoformat(value).astimezone(TZ)
     except Exception: return now()
 
+def parse_dt_strict(value):
+    """Parse a schedule/expiry timestamp safely; invalid dates must never trigger an action."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=TZ)
+        return parsed.astimezone(TZ)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
 def get_url(url):
     req = urllib.request.Request(url, headers={'User-Agent':'Mozilla/5.0 NhaTrangLifeNewsBot/2.0'})
     with urllib.request.urlopen(req, timeout=20) as r: return r.read()
@@ -743,26 +755,49 @@ def delete_ad_message(ad):
     message_ids = ad.get('message_ids') or ([ad['message_id']] if ad.get('message_id') else [])
     errors = []
     for mid in message_ids:
-        # Unpin explicitly first. If it was not pinned, Telegram returns an error; deletion still proceeds.
         try: api('unpinChatMessage', {'chat_id': chat_id, 'message_id': mid})
-        except Exception as e: print('Unpin skipped/failed for', mid, e)
-        try: api('deleteMessage', {'chat_id': chat_id, 'message_id': mid})
-        except Exception as e: errors.append(f'{mid}: {e}')
-    if errors: raise RuntimeError('; '.join(errors))
+        except Exception as e: print('Unpin skipped/failed for', mid, type(e).__name__)
+        try:
+            api('deleteMessage', {'chat_id': chat_id, 'message_id': mid})
+        except Exception as e:
+            error_text = str(e).casefold()
+            # Deletion is idempotent: a media-group item that is already gone is not a failure.
+            if 'message to delete not found' in error_text or 'message not found' in error_text:
+                print('Ad message already absent:', mid)
+                continue
+            errors.append(f'{mid}: {type(e).__name__}: {e}')
+    if errors:
+        raise RuntimeError('; '.join(errors))
 
 def process_ad_timers(s):
     for ad in s['ads']:
-        if ad.get('deleted'): continue
-        if ad.get('scheduled_at') and not ad.get('message_id') and parse_dt(ad['scheduled_at'])<=now():
-            try: publish_ad(ad,s)
-            except Exception as e: print('Scheduled ad error',ad.get('id'),e)
-        if ad.get('message_id') and ad.get('expires_at') and parse_dt(ad['expires_at'])<=now():
-            try:
-                delete_ad_message(ad)
-                ad['deleted']=True; ad['deleted_at']=iso(now()); print('Deleted expired ad',ad.get('id'))
-            except Exception as e:
-                # Retry on next workflow run; Telegram may reject old/already deleted messages.
-                print('Ad deletion error',ad.get('id'),e)
+        if ad.get('deleted'):
+            continue
+        if ad.get('scheduled_at') and not ad.get('message_id'):
+            scheduled_at = parse_dt_strict(ad.get('scheduled_at'))
+            if scheduled_at is None:
+                if not ad.get('_invalid_schedule_logged'):
+                    print('Scheduled ad has an invalid timestamp; not publishing:', ad.get('id'))
+                    ad['_invalid_schedule_logged'] = True
+            elif scheduled_at <= now():
+                try:
+                    publish_ad(ad, s)
+                except Exception as e:
+                    print('Scheduled ad error', ad.get('id'), type(e).__name__, e)
+        if ad.get('message_id') and ad.get('expires_at'):
+            expires_at = parse_dt_strict(ad.get('expires_at'))
+            if expires_at is None:
+                if not ad.get('_invalid_expiry_logged'):
+                    print('Ad has an invalid expiry timestamp; not deleting automatically:', ad.get('id'))
+                    ad['_invalid_expiry_logged'] = True
+            elif expires_at <= now():
+                try:
+                    delete_ad_message(ad)
+                    ad['deleted'] = True
+                    ad['deleted_at'] = iso(now())
+                    print('Deleted expired ad', ad.get('id'))
+                except Exception as e:
+                    print('Ad deletion error', ad.get('id'), type(e).__name__, e)
 
 def handle_callback(q,s):
     user=q.get('from') or {}; uid=str(user.get('id',''))

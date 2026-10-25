@@ -896,6 +896,29 @@ def handle_admin_message(msg,s):
             send_dm(uid, f'ID <code>{item_id}</code>{media_note}\n\n{preview}\n\n'
                          f'Опубликовать: <code>/approve {item_id}</code>\n'
                          f'Отклонить: <code>/reject {item_id}</code>')
+    elif cmd=='/approve':
+        target = arg.strip()
+        item = next((p for p in s.get('manual_posts', [])
+                     if str(p.get('id')) == target and p.get('status', 'pending') == 'pending'), None)
+        if not item:
+            send_dm(uid, 'Не нашёл материал на проверке с таким ID. Посмотри /newsqueue.')
+            return
+        try:
+            publish_manual_post(item, s, uid)
+        except Exception as e:
+            print('Manual post publication failed:', type(e).__name__, e)
+            send_dm(uid, f'Не удалось опубликовать материал <code>{html.escape(target)}</code>: {html.escape(str(e)[:400])}')
+    elif cmd=='/reject':
+        target = arg.strip()
+        item = next((p for p in s.get('manual_posts', [])
+                     if str(p.get('id')) == target and p.get('status', 'pending') == 'pending'), None)
+        if not item:
+            send_dm(uid, 'Не нашёл материал на проверке с таким ID. Посмотри /newsqueue.')
+            return
+        item['status'] = 'rejected'
+        item['reviewed_at'] = iso(now())
+        item['reviewed_by'] = uid
+        send_dm(uid, f'Материал <code>{html.escape(target)}</code> отклонён и не опубликован.')
     elif cmd=='/ads':
         rows=[]
         for a in s['ads'][-30:]:

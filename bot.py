@@ -406,23 +406,275 @@ def news_image_query(title, body=''):
         return 'Nha Trang Vietnam urban infrastructure utilities'
     return local + ' city street public services'
 
+
+def review_keyboard(item_id):
+    """Inline controls for the private review preview."""
+    return {'inline_keyboard': [
+        [
+            {'text': '✅ Опубликовать сейчас', 'callback_data': f'review:publish:{item_id}'},
+            {'text': '✏️ Изменить текст', 'callback_data': f'review:edit:{item_id}'}
+        ],
+        [{'text': '🗑 Отклонить', 'callback_data': f'review:reject:{item_id}'}]
+    ]}
+
+
+def review_post_text(item):
+    """Build the exact public post from plain text; keep article links out of the message."""
+    body = clean_multiline(item.get('body', ''))
+    prefix = '⚠️ ' if item.get('urgent') and item.get('kind') == 'news' else ''
+    parts = [html.escape(prefix + body)]
+    reaction = clean_multiline(item.get('reaction_line', ''))
+    if reaction:
+        parts.append(html.escape(reaction))
+    credit = item.get('image_credit_html') or ''
+    if credit:
+        parts.append(credit)
+    parts.append(footer().strip())
+    return '\n\n'.join(part for part in parts if part)
+
+
+def delete_review_previews(item):
+    """Remove the private draft previews after publication or rejection."""
+    for message in item.get('preview_messages', []):
+        try:
+            api('deleteMessage', {
+                'chat_id': message.get('chat_id'),
+                'message_id': message.get('message_id')
+            })
+        except Exception as e:
+            print('Review preview cleanup skipped:', type(e).__name__)
+
+
+def send_review_preview(item):
+    """Send a private photo preview and review controls to every configured admin."""
+    admins = sorted(ADMIN_USER_IDS)
+    if not admins:
+        print('No configured admins; review item was not queued.')
+        return False
+
+    item.setdefault('preview_messages', [])
+    item['image_file_id'] = item.get('image_file_id') or ''
+    image_fallback_attempted = False
+
+    for admin_id in admins:
+        if item.get('image_file_id'):
+            photo = item['image_file_id']
+        else:
+            photo = normalize_image_url(item.get('image_url') or '')
+            if not photo:
+                photo = ''
+        while True:
+            if not photo:
+                if image_fallback_attempted:
+                    break
+                image_fallback_attempted = True
+                fallback = commons_image(item.get('image_query') or news_image_query(item.get('title', ''), item.get('body', '')))
+                if not fallback:
+                    break
+                if isinstance(fallback, dict):
+                    item['image_url'] = fallback.get('url') or ''
+                    item['image_credit_html'] = fallback.get('credit_html') or ''
+                else:
+                    item['image_url'] = fallback
+                    item['image_credit_html'] = ''
+                item['image_file_id'] = ''
+                photo = normalize_image_url(item.get('image_url') or '')
+                continue
+
+            full_text = review_post_text(item)
+            caption_limit = 800 if item.get('image_credit_html') else 950
+            caption, continuation = split_photo_caption(full_text, limit=caption_limit)
+            if not caption:
+                caption = '🇻🇳 Новости Нячанга'
+            try:
+                sent_photo = api('sendPhoto', {
+                    'chat_id': admin_id,
+                    'photo': photo,
+                    'caption': caption,
+                    'parse_mode': 'HTML'
+                })
+                item['image_file_id'] = (
+                    ((sent_photo.get('photo') or [])[-1]).get('file_id', '')
+                    if isinstance(sent_photo, dict) else ''
+                )
+                item['preview_messages'].append({
+                    'chat_id': admin_id, 'message_id': sent_photo.get('message_id')
+                })
+                if continuation:
+                    continued = send_dm(admin_id, 'Продолжение текста публикации:\n\n' + continuation)
+                    if continued and continued.get('message_id'):
+                        item['preview_messages'].append({
+                            'chat_id': admin_id, 'message_id': continued['message_id']
+                        })
+                planned = parse_dt_strict(item.get('planned_at')) or (now() + timedelta(minutes=15))
+                status_text = (
+                    f'<b>Черновик: {html.escape(item.get("kind_label", "новость"))}</b>\n'
+                    f'План публикации: <b>{planned.strftime("%d.%m.%Y в %H:%M")}</b> по времени Нячанга.\n\n'
+                    'Если ничего не менять, бот опубликует этот материал в указанное время. '
+                    'Можно изменить текст, опубликовать сразу или отклонить. '
+                    'Не удаляй предпросмотр вручную вместо отклонения: Telegram не сообщает боту об удалении сообщения.'
+                )
+                status = send_dm(admin_id, status_text, review_keyboard(item['id']))
+                if status and status.get('message_id'):
+                    item['preview_messages'].append({
+                        'chat_id': admin_id, 'message_id': status['message_id']
+                    })
+                break
+            except Exception as e:
+                print('Review photo preview failed:', type(e).__name__)
+                item['image_file_id'] = ''
+                photo = ''
+                continue
+
+    return bool(item.get('preview_messages')) and bool(item.get('image_file_id'))
+
+
+def queue_review_item(s, item, planned_at=None, slot_key=None):
+    """Persist one private review candidate; publication waits until its planned time."""
+    if s.get('pending_news_review'):
+        return False
+    item = dict(item)
+    stamp = str(int(time.time()))
+    fingerprint = hashlib.md5(
+        ((item.get('link') or '') + stamp + (item.get('title') or '')).encode('utf-8')
+    ).hexdigest()[:7]
+    item_id = 'rv' + stamp + fingerprint
+    item['id'] = item_id
+    item['created_at'] = iso(now())
+    item['status'] = 'pending_review'
+    item['review_count'] = 0
+    minimum_time = now() + timedelta(minutes=15)
+    requested_time = planned_at or minimum_time
+    item['planned_at'] = iso(max(requested_time, minimum_time))
+    item['slot_key'] = slot_key or ''
+    item['preview_messages'] = []
+    item['image_url'] = normalize_image_url(item.get('image_url') or '') or ''
+    item['image_file_id'] = item.get('image_file_id') or ''
+
+    # Find a Vietnam/topic-specific fallback before sending the preview if the article has no usable image.
+    if not item['image_url'] and not item['image_file_id']:
+        fallback = commons_image(item.get('image_query') or news_image_query(item.get('title', ''), item.get('body', '')))
+        if not fallback:
+            print('No suitable image found; candidate was not queued:', item.get('title', item_id))
+            return False
+        if isinstance(fallback, dict):
+            item['image_url'] = normalize_image_url(fallback.get('url') or '') or ''
+            item['image_credit_html'] = fallback.get('credit_html') or ''
+        else:
+            item['image_url'] = normalize_image_url(fallback) or ''
+            item['image_credit_html'] = ''
+        if not item['image_url']:
+            print('Fallback image was not a usable web image; candidate was not queued:', item_id)
+            return False
+
+    if not send_review_preview(item):
+        delete_review_previews(item)
+        print('Private photo preview could not be delivered; candidate not queued:', item_id)
+        return False
+
+    s['pending_news_review'] = item
+    s['review_editing'] = {}
+    print('Queued for review:', item_id, 'planned_at=', item['planned_at'], 'kind=', item.get('kind'))
+    return True
+
+
+def publish_review_item(s, item):
+    """Publish an approved/due candidate once, then persist it to the normal deduplication history."""
+    text = review_post_text(item)
+    result = post_with_image(
+        text,
+        image_url=item.get('image_url') or None,
+        image_file_id=item.get('image_file_id') or None,
+        image_query=item.get('image_query') or None
+    )
+    if not result:
+        raise RuntimeError('Публикация не вернула подтверждение Telegram.')
+    timestamp = iso(now())
+    if item.get('kind') == 'news':
+        source_link = item.get('link') or ''
+        original_title = item.get('source_title') or item.get('title') or ''
+        if source_link:
+            s['seen_links'] = (s.get('seen_links', []) + [source_link])[-1000:]
+        s['seen_titles'] = (s.get('seen_titles', []) + [original_title])[-500:]
+        s['seen_fingerprints'] = (s.get('seen_fingerprints', []) + [title_fingerprint(original_title)])[-1000:]
+        s['published_news'] = (s.get('published_news', []) + [{
+            'title': item.get('title') or original_title,
+            'summary': clean_multiline(item.get('body', '')),
+            'link': source_link,
+            'published_at': timestamp,
+            'source_published_at': item.get('source_published_at') or timestamp,
+            'urgent': bool(item.get('urgent'))
+        }])[-100:]
+        s['last_news_hour'] = now().strftime('%Y-%m-%d-%H')
+    bump_today(s)
+    delete_review_previews(item)
+    s['pending_news_review'] = {}
+    s['review_editing'] = {}
+    for admin_id in sorted(ADMIN_USER_IDS):
+        try:
+            send_dm(admin_id, f'✅ Материал <code>{html.escape(item.get("id", ""))}</code> опубликован в канале.')
+        except Exception as e:
+            print('Review publication notice failed:', type(e).__name__)
+    return result
+
+
+def process_news_review(s):
+    """Publish a queued item only when its planned time arrives, unless an admin rejects it."""
+    item = s.get('pending_news_review') or {}
+    if not item or item.get('status') != 'pending_review':
+        return
+    planned = parse_dt_strict(item.get('planned_at'))
+    if not planned:
+        # Invalid queued timestamps are never interpreted as due.
+        print('Review item has an invalid planned timestamp; leaving it for admin review:', item.get('id'))
+        return
+    if now() < planned:
+        return
+    if is_paused(s):
+        later = top_pause_until(s)
+        planned = later if later > now() else now() + timedelta(minutes=5)
+        item['planned_at'] = iso(planned)
+        for admin_id in sorted(ADMIN_USER_IDS):
+            send_dm(admin_id, f'⏸ Материал <code>{html.escape(item.get("id", ""))}</code> сдвинут на {planned.strftime("%d.%m %H:%M")}: сейчас действует пауза.')
+        return
+    try:
+        publish_review_item(s, item)
+        if item.get('slot_key'):
+            mark_slot(s, item['slot_key'])
+    except Exception as e:
+        print('Scheduled review publication failed:', type(e).__name__)
+        item['last_publish_error_at'] = iso(now())
+        retry_at = now() + timedelta(minutes=5)
+        item['planned_at'] = iso(retry_at)
+        if not item.get('publish_error_notified'):
+            item['publish_error_notified'] = True
+            for admin_id in sorted(ADMIN_USER_IDS):
+                send_dm(admin_id, f'⚠️ Не удалось опубликовать материал <code>{html.escape(item.get("id", ""))}</code>. Черновик сохранён, повторная попытка — через 5 минут.')
+
+
+
 def is_duplicate_news(s, title, link):
     norm = normalized_title(title)
     fp = title_fingerprint(title)
     if link in s.get('seen_links', []) or fp in s.get('seen_fingerprints', []):
         return True
+    if link in s.get('rejected_news_links', []) or fp in s.get('rejected_news_fingerprints', []):
+        return True
     # Catch near-identical titles from different RSS feeds.
     words = set(norm.split())
     if len(words) >= 5:
+        rejected_words = [set(normalized_title(x).split()) for x in s.get('rejected_news_titles', [])[-100:]]
+        for old_words in rejected_words:
+            if old_words and len(words & old_words) / max(1, min(len(words), len(old_words))) >= 0.82:
+                return True
         for old in s.get('seen_titles', [])[-300:]:
             old_words = set(normalized_title(old).split())
-            if not old_words: continue
+            if not old_words:
+                continue
             overlap = len(words & old_words) / max(1, min(len(words), len(old_words)))
             if overlap >= 0.82:
                 return True
     return False
-
-
 
 def normalize_image_url(candidate, base_url=''):
     """Normalize an article photo URL and reject Google-served search/preview images."""

@@ -105,11 +105,14 @@ def clean(value):
     value = re.sub(r'<[^>]+>',' ',value or '')
     return re.sub(r'\s+',' ',html.unescape(value)).strip()
 
+
 def normalized_title(value):
     value = clean(value).casefold()
-    value = re.sub(r'https?://\S+', ' ', value)
-    value = re.sub(r'[^a-zа-яё0-9\s]', ' ', value)
-    return re.sub(r'\s+', ' ', value).strip()
+    value = re.sub(r'https?://\\S+', ' ', value)
+    # \\w respects Unicode letters, including Vietnamese diacritics.
+    value = re.sub(r'[^\\w\\s]', ' ', value, flags=re.UNICODE)
+    value = re.sub(r'_+', ' ', value)
+    return re.sub(r'\\s+', ' ', value).strip()
 
 
 def title_fingerprint(value):
@@ -249,23 +252,46 @@ def is_duplicate_news(s, title, link):
                 return True
     return False
 
+
 def commons_image(query):
-    """Find a reusable Wikimedia Commons thumbnail for atmosphere/illustration only."""
+    """Find a topical reusable Wikimedia Commons illustration and build attribution."""
     try:
         params = urllib.parse.urlencode({
-            'action':'query','generator':'search','gsrsearch':query+' filetype:bitmap',
-            'gsrnamespace':6,'gsrlimit':8,'prop':'imageinfo','iiprop':'url|extmetadata',
-            'iiurlwidth':1000,'format':'json'
+            'action': 'query',
+            'generator': 'search',
+            'gsrsearch': query + ' filetype:bitmap',
+            'gsrnamespace': 6,
+            'gsrlimit': 8,
+            'prop': 'imageinfo|info',
+            'inprop': 'url',
+            'iiprop': 'url|extmetadata',
+            'iiurlwidth': 1000,
+            'format': 'json'
         })
-        data=json.loads(get_url('https://commons.wikimedia.org/w/api.php?'+params).decode())
-        pages=(data.get('query') or {}).get('pages') or {}
+        data = json.loads(get_url('https://commons.wikimedia.org/w/api.php?' + params).decode('utf-8'))
+        pages = (data.get('query') or {}).get('pages') or {}
         for page in pages.values():
-            info=(page.get('imageinfo') or [{}])[0]
-            url=info.get('thumburl') or info.get('url')
-            if url and url.lower().split('?')[0].endswith(('.jpg','.jpeg','.png','.webp')):
-                return url
+            info = (page.get('imageinfo') or [{}])[0]
+            url = info.get('thumburl') or info.get('url')
+            if not url or not url.lower().split('?')[0].endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                continue
+            metadata = info.get('extmetadata') or {}
+            artist_raw = (metadata.get('Artist') or {}).get('value') or ''
+            artist = clean(artist_raw)
+            license_name = clean((metadata.get('LicenseShortName') or {}).get('value') or '')
+            license_url = clean((metadata.get('LicenseUrl') or {}).get('value') or '')
+            page_url = page.get('fullurl') or info.get('descriptionurl') or info.get('descriptionshorturl')
+            credits = ['📷 Иллюстрация: <a href="' + html.escape(page_url, quote=True) + '">Wikimedia Commons</a>'] if page_url else ['📷 Иллюстрация из Wikimedia Commons']
+            if artist:
+                credits.append('автор: ' + html.escape(artist))
+            if license_name:
+                if license_url and license_url.startswith('https://'):
+                    credits.append('лицензия: <a href="' + html.escape(license_url, quote=True) + '">' + html.escape(license_name) + '</a>')
+                else:
+                    credits.append('лицензия: ' + html.escape(license_name))
+            return {'url': url, 'credit_html': ' · '.join(credits)}
     except Exception as e:
-        print('Commons image search error:',e)
+        print('Commons image search error:', e)
     return None
 
 
@@ -304,6 +330,16 @@ def post_with_image(text, image_url=None, illustration=False):
     """Always pair a topical image with a short caption and preserve the complete article text."""
     if not text.strip():
         return None
+    if isinstance(image_url, dict):
+        image_info = image_url
+        image_url = image_info.get('url')
+        attribution = image_info.get('credit_html')
+        if attribution:
+            if FOOTER in text:
+                text = text.replace(FOOTER, '\n\n' + attribution + FOOTER, 1)
+            else:
+                text += '\n\n' + attribution
+        illustration = True
 
     paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text.strip()) if p.strip()]
     caption_parts = []
@@ -957,12 +993,12 @@ def publish_news(s):
             continue
         urgent = is_urgent_news(title + ' ' + desc + ' ' + headline + ' ' + body)
 
-        illustration = False
-        if not image_url:
-            image_url = commons_image(news_image_query(headline, body))
-            illustration = bool(image_url)
+        # Do not republish an RSS publisher's image without knowing its licence.
+        # Prefer a Wikimedia Commons image and label it as an illustration with attribution.
+        image_url = commons_image(news_image_query(headline, body))
+        illustration = bool(image_url)
         if not image_url and not urgent:
-            print('Skipping non-urgent news without a suitable image:', headline)
+            print('Skipping non-urgent news without a suitable licensed illustration:', headline)
             continue
 
         emoji = '⚠️' if urgent else '📰'

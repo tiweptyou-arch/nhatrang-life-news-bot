@@ -332,7 +332,12 @@ def commons_image(query):
             license_name = clean((metadata.get('LicenseShortName') or {}).get('value') or '')
             license_url = clean((metadata.get('LicenseUrl') or {}).get('value') or '')
             page_url = page.get('fullurl') or info.get('descriptionurl') or info.get('descriptionshorturl')
-            credits = ['📷 Иллюстрация: <a href="' + html.escape(page_url, quote=True) + '">Wikimedia Commons</a>'] if page_url else ['📷 Иллюстрация из Wikimedia Commons']
+            # Skip files whose licence cannot be identified. CC BY variants also need an author credit.
+            if not license_name or not page_url:
+                continue
+            if ('cc by' in license_name.casefold() or 'cc-by' in license_name.casefold()) and not artist:
+                continue
+            credits = ['📷 Иллюстрация: <a href="' + html.escape(page_url, quote=True) + '">Wikimedia Commons</a>']
             if artist:
                 credits.append('автор: ' + html.escape(artist))
             if license_name:
@@ -875,7 +880,7 @@ def mark_slot(s,key): s['last_slots'][key]=now().date().isoformat()
 def routine_posts(s):
     """Publish an end-of-day digest only when there is useful news or a real forecast warning."""
     n = now()
-    if is_paused(s) or n.hour != 22 or not (30 <= n.minute < 35) or slot_once(s, 'night'):
+    if is_paused(s) or count_today(s) >= 10 or n.hour != 22 or not (30 <= n.minute < 35) or slot_once(s, 'night'):
         return
 
     todays = [item for item in s.get('published_news', [])

@@ -16,6 +16,53 @@ class NewsQualityTests(unittest.TestCase):
             "Chính quyền thông báo nguy cơ ngập ở một số tuyến đường."
         ))
 
+    def test_urgent_terms_match_whole_words(self):
+        self.assertTrue(bot.is_urgent_news("Cảnh báo bão lớn tại Nha Trang"))
+        self.assertFalse(bot.is_urgent_news("Một nghệ sĩ nổi tiếng đến Nha Trang"))
+
+    def test_commons_image_includes_license_and_author_credit(self):
+        response = {
+            "query": {
+                "pages": {
+                    "123": {
+                        "fullurl": "https://commons.wikimedia.org/wiki/File:road.jpg",
+                        "imageinfo": [{
+                            "thumburl": "https://upload.wikimedia.org/road-thumb.jpg",
+                            "extmetadata": {
+                                "Artist": {"value": "Jane Doe"},
+                                "LicenseShortName": {"value": "CC BY-SA 4.0"},
+                                "LicenseUrl": {"value": "https://creativecommons.org/licenses/by-sa/4.0/"}
+                            }
+                        }]
+                    }
+                }
+            }
+        }
+        with patch.object(bot, "get_url", return_value=json.dumps(response).encode("utf-8")):
+            image = bot.commons_image("Nha Trang public services")
+        self.assertIsNotNone(image)
+        self.assertEqual(image["url"], "https://upload.wikimedia.org/road-thumb.jpg")
+        self.assertIn("Jane Doe", image["credit_html"])
+        self.assertIn("CC BY-SA 4.0", image["credit_html"])
+        self.assertIn("https://creativecommons.org/licenses/by-sa/4.0/", image["credit_html"])
+
+    def test_commons_image_without_identifiable_license_is_rejected(self):
+        response = {
+            "query": {
+                "pages": {
+                    "123": {
+                        "fullurl": "https://commons.wikimedia.org/wiki/File:unknown.jpg",
+                        "imageinfo": [{
+                            "thumburl": "https://upload.wikimedia.org/unknown.jpg",
+                            "extmetadata": {}
+                        }]
+                    }
+                }
+            }
+        }
+        with patch.object(bot, "get_url", return_value=json.dumps(response).encode("utf-8")):
+            self.assertIsNone(bot.commons_image("Nha Trang public services"))
+
     def test_irrelevant_local_sports_story_is_rejected(self):
         self.assertFalse(bot.is_relevant_news(
             "Khánh Hòa gặp Cần Thơ trong trận đấu bóng đá",

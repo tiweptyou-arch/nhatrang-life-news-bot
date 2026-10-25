@@ -131,7 +131,19 @@ PRACTICAL_NEWS_TERMS = (
     'hạ tầng', 'công trình', 'sửa chữa', 'đóng cửa', 'khai trương', 'mở cửa',
     'miễn phí', 'dịch vụ công', 'giờ hoạt động', 'bãi biển', 'cấm tắm biển',
     'thực phẩm', 'giá xăng', 'giá cả', 'chi phí sinh hoạt', 'bất động sản',
-    'động đất', 'dịch vụ', 'lễ hội', 'sự kiện', 'đình chỉ', 'thu hồi'
+    'động đất', 'dịch vụ', 'lễ hội', 'sự kiện', 'đình chỉ', 'thu hồi',
+    # English-language sources need the same practical-life filter.
+    'weather', 'heavy rain', 'flood warning', 'typhoon', 'storm warning', 'road closure',
+    'traffic', 'public transport', 'bus route', 'airport', 'hospital', 'clinic', 'pharmacy',
+    'school', 'students', 'education', 'visa', 'immigration', 'residency', 'foreign residents',
+    'electricity outage', 'power outage', 'water outage', 'internet outage', 'rental prices',
+    'cost of living', 'water quality', 'pollution', 'road repairs', 'government announces',
+    'official warning', 'emergency services', 'beach closure', 'food safety',
+    # Russian terms help if an RSS provider already returns a Russian-language headline.
+    'погода', 'ливень', 'шторм', 'наводнение', 'предупреждение', 'авария', 'пожар',
+    'перекрытие дороги', 'транспорт', 'аэропорт', 'больница', 'аптека', 'школа',
+    'виза', 'миграция', 'электричество', 'отключение воды', 'интернет', 'аренда',
+    'цены', 'качество воды', 'загрязнение', 'правила пребывания'
 )
 SPORTS_NOISE_TERMS = (
     'bóng đá', 'bóng chuyền', 'trận đấu', 'giải đấu', 'cầu thủ', 'huấn luyện viên',
@@ -193,7 +205,7 @@ def reaction_line(text):
         return '❤️ — такая история заслуживает поддержки.'
     if any(x in value for x in ('hài hước', 'buồn cười', 'dở khóc dở cười', 'tình huống hài')):
         return '🤣 — редкий повод улыбнуться.'
-    if any(x in value for x in ('giao thông', 'xe buýt', 'bệnh viện', 'trường học', 'quy định', 'giá điện', 'giá nước', 'dịch vụ', 'công trình', 'khai trương', 'mở cửa')):
+    if any(x in value for x in ('giao thông', 'xe buýt', 'bệnh viện', 'trường học', 'quy định', 'giá điện', 'giá nước', 'dịch vụ', 'công trình', 'khai trương', 'mở cửa', 'транспорт', 'больница', 'школа', 'правила', 'цены', 'услуги', 'открытие', 'ремонт дороги')):
         return '👍 — полезная информация для жизни в Нячанге.'
     return ''
 

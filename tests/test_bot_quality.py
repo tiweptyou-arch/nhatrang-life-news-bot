@@ -174,6 +174,28 @@ class NewsQualityTests(unittest.TestCase):
         ]
         self.assertEqual(len(deleted), 3)
 
+    def test_invalid_ad_timestamps_never_publish_or_delete_automatically(self):
+        state = {
+            "ads": [
+                {"id": "bad-schedule", "scheduled_at": "not-a-date", "top_hours": 1, "life_hours": 24},
+                {"id": "bad-expiry", "message_id": 301, "expires_at": "not-a-date"},
+            ]
+        }
+        with patch.object(bot, "publish_ad") as publish_mock, \\
+             patch.object(bot, "delete_ad_message") as delete_mock:
+            bot.process_ad_timers(state)
+        publish_mock.assert_not_called()
+        delete_mock.assert_not_called()
+
+    def test_missing_album_item_does_not_block_expiry_cleanup(self):
+        def fake_api(method, data=None):
+            if method == "deleteMessage" and data.get("message_id") == 401:
+                raise RuntimeError("Telegram API deleteMessage failed: Bad Request: message to delete not found")
+            return {}
+        ad = {"chat_id": -1001, "message_id": 401, "message_ids": [401, 402]}
+        with patch.object(bot, "api", side_effect=fake_api):
+            bot.delete_ad_message(ad)
+
 
 if __name__ == "__main__":
     unittest.main()

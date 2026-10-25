@@ -491,8 +491,8 @@ def post_with_image(text, image_url=None, illustration=False):
                 text = text.replace(FOOTER, '\n\n' + attribution + FOOTER, 1)
             else:
                 text += '\n\n' + attribution
-        # Commons search results are thematic illustrations, not verified photos of the specific event.
-        illustration = True
+        # Commons attribution already labels the picture as an illustration. Avoid adding a second label.
+        illustration = not bool(attribution)
 
     paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text.strip()) if p.strip()]
     caption_parts = []
@@ -560,7 +560,7 @@ def translate(text):
     translated_paragraphs = []
     # Google Translate's unauthenticated GET endpoint percent-encodes Vietnamese
     # characters heavily. Keeping q <= 1000 characters prevents oversized URLs.
-    chunk_limit = 1000
+    chunk_limit = 700
 
     def split_long_sentence(sentence):
         """Split a pathological long sentence on words, with a hard character fallback."""

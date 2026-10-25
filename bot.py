@@ -844,7 +844,7 @@ def handle_admin_message(msg,s):
         if not m: send_dm(uid,'Формат: <code>/ad 1/24</code> — 1 час без новостей, удаление через 24 часа.', main_menu()); return
         top_hours, life_hours=map(int,m.groups())
         if not (1<=top_hours<=72 and top_hours<=life_hours<=720): send_dm(uid,'Допустимо: время в топе 1–72 часа, срок жизни не меньше времени в топе и не больше 720 часов.'); return
-        s['pending_ad']={'format':f'{top_hours}/{life_hours}','top_hours':top_hours,'life_hours':life_hours,'awaiting_content':True}
+        s['pending_ad']={'format':f'{top_hours}/{life_hours}','top_hours':top_hours,'life_hours':life_hours,'created_by':uid,'awaiting_content':True}
         send_dm(uid,f'Пришли следующим сообщением рекламный текст, фото или видео.\nФормат: <b>{top_hours}/{life_hours}</b>.\nПервые {top_hours} ч. бот не будет публиковать обычные новости и рубрики; реклама удалится через {life_hours} ч.\n/cancel — отмена.', main_menu())
 
     elif cmd=='/preview':
@@ -909,7 +909,7 @@ def handle_admin_message(msg,s):
         try: when=datetime.strptime(arg,'%Y-%m-%d %H:%M').replace(tzinfo=TZ)
         except ValueError: send_dm(uid,'Формат: /schedule 2026-10-25 14:30'); return
         if when<=now(): send_dm(uid,'Время должно быть в будущем.'); return
-        ad['scheduled_at']=iso(when); ad['awaiting_content']=False; ad['id']=str(int(time.time()))
+        ad['scheduled_at']=iso(when); ad['awaiting_content']=False; ad['created_by']=uid; ad['id']=str(int(time.time()))
         s['ads'].append(ad); s['pending_ad']={}
         send_dm(uid,f'Реклама запланирована на {when.strftime("%d.%m.%Y %H:%M")} по времени Нячанга. ID: <code>{ad["id"]}</code>.')
     elif cmd=='/togglepause':
@@ -1040,7 +1040,10 @@ def publish_ad(ad,s,uid=None):
     if not any(existing is ad for existing in s['ads']):
         s['ads'].append(ad)
     s['pending_ad']={}; bump_today(s)
-    if uid: send_dm(uid,f'Опубликовано! ID: <code>{ad["id"]}</code>. Окно без новостей до {parse_dt(ad["top_until"]).strftime("%d.%m %H:%M")}; автоматическое удаление {parse_dt(ad["expires_at"]).strftime("%d.%m %H:%M")} (Нячанг).')
+    ad.pop('_publish_error_notified', None)
+    notify_uid = uid or ad.get('created_by')
+    if notify_uid:
+        send_dm(notify_uid, f'Опубликовано! ID: <code>{ad["id"]}</code>. Окно без новостей до {parse_dt(ad["top_until"]).strftime("%d.%m %H:%M")}; автоматическое удаление {parse_dt(ad["expires_at"]).strftime("%d.%m %H:%M")} (Нячанг).')
 
 def delete_ad_message(ad):
     chat_id = ad.get('chat_id', CHANNEL)
@@ -1087,6 +1090,13 @@ def process_ad_timers(s):
                     publish_ad(ad, s)
                 except Exception as e:
                     print('Scheduled ad error', ad.get('id'), type(e).__name__, e)
+                    creator = ad.get('created_by')
+                    if creator and not ad.get('_publish_error_notified'):
+                        try:
+                            send_dm(creator, f'Не удалось опубликовать запланированную рекламу <code>{html.escape(str(ad.get("id", "?")))}</code>. Бот повторит попытку: {html.escape(str(e)[:300])}')
+                        except Exception as notify_error:
+                            print('Could not notify ad owner:', type(notify_error).__name__)
+                        ad['_publish_error_notified'] = True
         if ad.get('message_id') and ad.get('expires_at'):
             expires_at = parse_dt_strict(ad.get('expires_at'))
             if expires_at is None:
@@ -1101,6 +1111,13 @@ def process_ad_timers(s):
                     print('Deleted expired ad', ad.get('id'))
                 except Exception as e:
                     print('Ad deletion error', ad.get('id'), type(e).__name__, e)
+                    creator = ad.get('created_by')
+                    if creator and not ad.get('_expiry_error_notified'):
+                        try:
+                            send_dm(creator, f'Не удалось автоматически удалить рекламу <code>{html.escape(str(ad.get("id", "?")))}</code>. Бот продолжит повторять попытки: {html.escape(str(e)[:300])}')
+                        except Exception as notify_error:
+                            print('Could not notify ad owner about expiry:', type(notify_error).__name__)
+                        ad['_expiry_error_notified'] = True
 
 def handle_callback(q,s):
     user=q.get('from') or {}; uid=str(user.get('id',''))

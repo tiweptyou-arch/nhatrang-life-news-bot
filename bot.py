@@ -807,6 +807,9 @@ def handle_admin_message(msg,s):
     if cmd in ('/start','/menu','/help'):
         send_dm(uid, '<b>Панель Нячанг Лайф</b>\nВыбери действие кнопками ниже.\n\nРеклама: /ad 1/24 → отправь содержимое → /preview → /publish.\nДругие команды: /ads, /status, /pause, /resume, /cancel.', main_menu())
     elif cmd=='/ad':
+        if (s.get('pending_manual_post') or {}).get('awaiting_content'):
+            send_dm(uid, 'Сначала отправь материал для очереди новостей или отмени этот черновик командой /cancel.')
+            return
         if not arg: arg='1/24'
         m=re.fullmatch(r'(\d{1,2})\s*/\s*(\d{1,3})',arg)
         if not m: send_dm(uid,'Формат: <code>/ad 1/24</code> — 1 час без новостей, удаление через 24 часа.', main_menu()); return

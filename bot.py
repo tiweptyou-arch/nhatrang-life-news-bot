@@ -108,11 +108,11 @@ def clean(value):
 
 def normalized_title(value):
     value = clean(value).casefold()
-    value = re.sub(r'https?://\\S+', ' ', value)
-    # \\w respects Unicode letters, including Vietnamese diacritics.
-    value = re.sub(r'[^\\w\\s]', ' ', value, flags=re.UNICODE)
+    value = re.sub(r'https?://\S+', ' ', value)
+    # \w respects Unicode letters, including Vietnamese diacritics.
+    value = re.sub(r'[^\w\s]', ' ', value, flags=re.UNICODE)
     value = re.sub(r'_+', ' ', value)
-    return re.sub(r'\\s+', ' ', value).strip()
+    return re.sub(r'\s+', ' ', value).strip()
 
 
 def title_fingerprint(value):

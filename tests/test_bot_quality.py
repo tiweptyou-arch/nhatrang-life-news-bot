@@ -127,7 +127,7 @@ class NewsQualityTests(unittest.TestCase):
     def test_approved_manual_album_publishes_all_media_items(self):
         uid = 1335496436
         item = {"id": "album-777", "status": "pending", "type": "album",
-                "content": "Road closure update\\n\\nUse another street.",
+                "content": "Road closure update\n\nUse another street.",
                 "media_items": [{"type": "photo", "file_id": "p1"},
                                 {"type": "video", "file_id": "v2"}]}
         state = {"pending_ad": {}, "pending_manual_post": {}, "manual_posts": [item],

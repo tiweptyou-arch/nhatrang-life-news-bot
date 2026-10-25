@@ -907,8 +907,34 @@ def weather_post(s, period):
             ('☀️' if period == 'morning' else '🌆') + ' <b>' + title + '</b>\n\n' +
             extra + f'Температура: {round(daily["temperature_2m_min"][i])}–{round(daily["temperature_2m_max"][i])}°C.\n' +
             'Вероятность осадков: ' + (f'{rain}%' if rain is not None else 'нет данных') + '.\n\n' +
-            advice + '\n\nИсточник прогноза: <a href="https://open-meteo.com/">Open-Meteo</a>' + footer()
+            advice
         )
+        if period == 'morning':
+            cutoff = n - timedelta(hours=24)
+            recent = []
+            for entry in s.get('published_news', []):
+                try:
+                    published_at = datetime.fromisoformat(entry.get('published_at', '')).astimezone(TZ)
+                except (TypeError, ValueError):
+                    continue
+                if cutoff <= published_at <= n and entry.get('title'):
+                    recent.append(entry)
+            if recent:
+                digest_lines = ['<b>Что важно знать за последние сутки</b>']
+                for entry in recent[-3:]:
+                    summary = clean(entry.get('summary', ''))
+                    first_sentence = re.split(r'(?<=[.!?])\s+', summary, maxsplit=1)[0]
+                    if len(first_sentence) > 220:
+                        first_sentence = first_sentence[:217].rsplit(' ', 1)[0] + '…'
+                    link = entry.get('link', '')
+                    item = '• <b>' + html.escape(clean(entry.get('title', ''))) + '</b>'
+                    if first_sentence:
+                        item += '\n' + html.escape(first_sentence)
+                    if link.startswith('https://') or link.startswith('http://'):
+                        item += ' <a href="' + html.escape(link, quote=True) + '">Источник</a>'
+                    digest_lines.append(item)
+                text += '\n\n' + '\n\n'.join(digest_lines)
+        text += '\n\nИсточник прогноза: <a href="https://open-meteo.com/">Open-Meteo</a>' + footer()
         img = commons_image('Nha Trang Vietnam weather rainy season coastline' if (rain is not None and rain >= 35)
                             else 'Nha Trang Vietnam city coastal view')
         post_with_image(text, img, illustration=bool(img))

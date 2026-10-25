@@ -274,6 +274,21 @@ class NewsQualityTests(unittest.TestCase):
             ""
         )
 
+    def test_duplicate_check_compares_published_translated_headlines(self):
+        state = {
+            "seen_links": [],
+            "seen_fingerprints": [],
+            "seen_titles": ["Cảnh báo mưa lớn tại Nha Trang"],
+            "published_news": [{
+                "title": "Ремонт дороги в центре Нячанга начнётся в понедельник"
+            }]
+        }
+        self.assertTrue(bot.is_duplicate_news(
+            state,
+            "Ремонт дороги в центре Нячанга начнётся в понедельник",
+            "https://example.com/another-feed-item"
+        ))
+
     def test_long_article_paragraphs_are_preserved(self):
         html_article = "<p>First useful paragraph.</p><p>Second paragraph with more facts.</p>"
         self.assertEqual(
@@ -313,6 +328,55 @@ class NewsQualityTests(unittest.TestCase):
         self.assertIn("https://example.com", posted_text)
         self.assertGreaterEqual(text_mock.call_count, 1)
 
+    def test_credited_commons_photo_is_still_labeled_as_illustration(self):
+        image = {
+            "url": "https://upload.wikimedia.org/example.jpg",
+            "credit_html": '📷 Иллюстрация: <a href="https://commons.wikimedia.org/wiki/File:Example.jpg">Wikimedia Commons</a> · автор: Example · лицензия: CC BY-SA 4.0'
+        }
+        post = (
+            "<b>Заголовок новости</b>\\n\\nПолезный текст для жителей Нячанга."
+            '\\n\\n<a href="https://example.com/story">Источник</a>'
+        )
+        with patch.object(bot, "api", return_value={"message_id": 10, "chat": {"id": -1001}}) as api_mock, \\
+             patch.object(bot, "post_text", return_value={"message_id": 11}) as text_mock, \\
+             patch.object(bot.time, "sleep"):
+            bot.post_with_image(post, image)
+        self.assertEqual(api_mock.call_args.args[0], "sendPhoto")
+        self.assertIn("📷 Изображение — иллюстрация", api_mock.call_args.args[1]["caption"])
+        text_mock.assert_not_called()
+
+    def test_translation_preserves_paragraph_boundaries(self):
+        original = "Первый абзац сообщает факт.\\n\\nВторой абзац объясняет последствия."
+        requested = []
+
+        def fake_get_url(url):
+            query = parse_qs(urlparse(url).query).get("q", [""])[0]
+            requested.append(query)
+            return json.dumps([[[query, None, None]]]).encode("utf-8")
+
+        with patch.object(bot, "get_url", side_effect=fake_get_url):
+            result = bot.translate(original)
+        self.assertEqual(result, original)
+        self.assertEqual(requested, [
+            "Первый абзац сообщает факт.",
+            "Второй абзац объясняет последствия."
+        ])
+
+    def test_translation_limits_encoded_get_chunks_for_vietnamese(self):
+        original = "Cảnh báo " * 500 + "tại Nha Trang."
+        requested = []
+
+        def fake_get_url(url):
+            query = parse_qs(urlparse(url).query).get("q", [""])[0]
+            requested.append(query)
+            return json.dumps([[[query, None, None]]]).encode("utf-8")
+
+        with patch.object(bot, "get_url", side_effect=fake_get_url):
+            bot.translate(original)
+        self.assertGreater(len(requested), 1)
+        self.assertTrue(all(len(query) <= 1000 for query in requested))
+        self.assertIn("tại Nha Trang.", requested[-1])
+
     def test_translation_does_not_drop_text_after_4000_characters(self):
         text = ". ".join(["Уникальный факт о городской жизни"] * 220) + ". ПОСЛЕДНЯЯ_УНИКАЛЬНАЯ_СТРОКА"
         requested = []
@@ -327,6 +391,29 @@ class NewsQualityTests(unittest.TestCase):
         self.assertGreater(len(requested), 1)
         self.assertIn("ПОСЛЕДНЯЯ_УНИКАЛЬНАЯ_СТРОКА", " ".join(requested))
         self.assertTrue(result)
+
+    def test_morning_weather_retries_after_delayed_runner_start(self):
+        current = datetime(2026, 10, 25, 7, 15, tzinfo=bot.TZ)
+        state = {
+            "last_slots": {}, "daily_counts": {}, "paused": False, "pause_until": "",
+            "ads": [], "published_news": []
+        }
+        forecast = {
+            "current": {"temperature_2m": 28, "apparent_temperature": 32, "weather_code": 2},
+            "daily": {
+                "weather_code": [1, 2],
+                "precipitation_probability_max": [10, 20],
+                "temperature_2m_min": [24, 25],
+                "temperature_2m_max": [31, 32]
+            }
+        }
+        with patch.object(bot, "now", return_value=current), \\
+             patch.object(bot, "get_url", return_value=json.dumps(forecast).encode("utf-8")), \\
+             patch.object(bot, "commons_image", return_value=None), \\
+             patch.object(bot, "post_with_image") as post_mock:
+            bot.weather_post(state, "morning")
+        post_mock.assert_called_once()
+        self.assertEqual(state["last_slots"]["weather_morning"], "2026-10-25")
 
     def test_only_approved_reaction_emojis_are_suggested(self):
         examples = [
@@ -411,6 +498,44 @@ class NewsQualityTests(unittest.TestCase):
         self.assertEqual(result["_message_ids"], expected_ids)
         self.assertEqual(result["chat"]["id"], -1001)
         self.assertTrue(all(len(text) <= 3900 for text in sent))
+
+    def test_partial_long_text_ad_is_cleaned_before_retry(self):
+        ad = {"text": " ".join(["advertising"] * 1200)}
+        attempt = []
+
+        def fail_on_second_chunk(text):
+            attempt.append(text)
+            if len(attempt) == 2:
+                raise RuntimeError("temporary Telegram failure")
+            return {"message_id": 501, "chat": {"id": -1001}}
+
+        with patch.object(bot, "post_text", side_effect=fail_on_second_chunk), \\
+             patch.object(bot.time, "sleep"):
+            with self.assertRaises(RuntimeError):
+                bot.send_ad_content(ad)
+        self.assertEqual(ad.get("_partial_message_ids"), [501])
+
+        def successful_retry(text):
+            return {"message_id": 600 + successful_retry.counter, "chat": {"id": -1001}}
+        successful_retry.counter = 0
+        def counted_success(text):
+            successful_retry.counter += 1
+            return successful_retry(text)
+
+        with patch.object(bot, "api", return_value={}) as api_mock, \\
+             patch.object(bot, "post_text", side_effect=counted_success), \\
+             patch.object(bot.time, "sleep"):
+            result = bot.send_ad_content(ad)
+
+        deleted = [
+            call.args[1].get("message_id")
+            for call in api_mock.call_args_list
+            if call.args[0] == "deleteMessage"
+        ]
+        self.assertEqual(deleted, [501])
+        self.assertGreater(len(result["_message_ids"]), 1)
+        self.assertNotIn("_partial_message_ids", ad)
+        self.assertNotIn("_partial_chat_id", ad)
 
     def test_ad_album_sends_and_tracks_every_message_id(self):
         response = [

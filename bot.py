@@ -28,7 +28,7 @@ FEEDS = [
  'https://news.google.com/rss/search?q=Kh%C3%A1nh+H%C3%B2a&hl=vi&gl=VN&ceid=VN:vi',
  'https://news.google.com/rss/search?q=Nha+Trang+Kh%C3%A1nh+H%C3%B2a&hl=en&gl=US&ceid=US:en',
 ]
-KEYWORDS = ['nha trang','khánh hòa','khanh hoa','cam ranh','diên khánh','dien khanh','vạn ninh','van ninh','trường sa','truong sa']
+KEYWORDS = ['nha trang','khánh hòa','khanh hoa','cam ranh','diên khánh','dien khanh','vạn ninh','van ninh','trường sa','truong sa', 'нячанг','нячанге','нячанга','нячангу','кханьхоа','кхань хоа','камрань','камрани']
 
 
 def now(): return datetime.now(TZ)
@@ -242,7 +242,12 @@ SPORTS_NOISE_TERMS = (
 URGENT_NEWS_TERMS = (
     'cảnh báo', 'khẩn cấp', 'bão', 'ngập', 'lũ', 'sạt lở', 'sơ tán', 'cháy', 'nổ',
     'tai nạn nghiêm trọng', 'mất tích', 'nguy hiểm', 'cấm tắm biển', 'sóng lớn',
-    'dịch bệnh', 'đóng đường khẩn cấp', 'emergency', 'flood', 'storm', 'evacuation'
+    'dịch bệnh', 'đóng đường khẩn cấp', 'emergency', 'flood', 'storm', 'evacuation',
+    'fire', 'explosion', 'serious accident', 'road accident', 'missing person',
+    'landslide', 'earthquake', 'tsunami', 'danger', 'strong wind', 'injured', 'dead',
+    'наводнение', 'шторм', 'ливень', 'затопление', 'авария', 'пожар', 'взрыв',
+    'эвакуация', 'оползень', 'землетрясение', 'цунами', 'опасность', 'сильный ветер',
+    'погибли', 'пострадавшие', 'запрет купания', 'перекрытие дороги'
 )
 ALLOWED_REACTIONS = ('🤣', '😱', '👍', '❤️', '🙏')
 
@@ -369,12 +374,21 @@ def is_duplicate_news(s, title, link):
     fp = title_fingerprint(title)
     if link in s.get('seen_links', []) or fp in s.get('seen_fingerprints', []):
         return True
-    # Catch near-identical titles from different RSS feeds.
+
+    # Include published Russian headlines. RSS feeds may carry the same story in
+    # Vietnamese and English, while their raw source titles have no words in common.
+    known_titles = list(s.get('seen_titles', [])[-300:])
+    for item in s.get('published_news', [])[-100:]:
+        if isinstance(item, dict) and item.get('title'):
+            known_titles.append(item['title'])
+
+    # Catch near-identical titles from different feeds and languages after translation.
     words = set(norm.split())
     if len(words) >= 5:
-        for old in s.get('seen_titles', [])[-300:]:
+        for old in known_titles:
             old_words = set(normalized_title(old).split())
-            if not old_words: continue
+            if not old_words:
+                continue
             overlap = len(words & old_words) / max(1, min(len(words), len(old_words)))
             if overlap >= 0.82:
                 return True
@@ -477,6 +491,7 @@ def post_with_image(text, image_url=None, illustration=False):
                 text = text.replace(FOOTER, '\n\n' + attribution + FOOTER, 1)
             else:
                 text += '\n\n' + attribution
+        # Commons attribution already labels the picture as an illustration. Avoid adding a second label.
         illustration = not bool(attribution)
 
     paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text.strip()) if p.strip()]
@@ -536,48 +551,74 @@ def post_with_image(text, image_url=None, illustration=False):
 
 
 def translate(text):
-    """Translate the whole text in bounded chunks instead of silently truncating at 4,000 chars."""
-    text = clean(text)
+    """Translate the whole article without flattening paragraphs or exceeding GET URL limits."""
+    text = clean_multiline(text)
     if not text:
         return ''
-    # Keep requests modest; prefer paragraph/sentence boundaries and carry all chunks forward.
-    chunks, current = [], ''
-    for paragraph in re.split(r'\n+', text):
-        paragraph = paragraph.strip()
-        if not paragraph:
-            continue
-        sentences = re.split(r'(?<=[.!?。！？])\s+', paragraph)
-        for sentence in sentences:
-            sentence = sentence.strip()
-            if not sentence:
+
+    paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
+    translated_paragraphs = []
+    # Google Translate's unauthenticated GET endpoint percent-encodes Vietnamese
+    # characters heavily. Keeping q <= 1000 characters prevents oversized URLs.
+    chunk_limit = 700
+
+    def split_long_sentence(sentence):
+        """Split a pathological long sentence on words, with a hard character fallback."""
+        pieces, current = [], ''
+        for word in sentence.split():
+            if len(word) > chunk_limit:
+                if current:
+                    pieces.append(current)
+                    current = ''
+                pieces.extend(word[i:i + chunk_limit] for i in range(0, len(word), chunk_limit))
                 continue
-            if len(sentence) > 3400:
+            candidate = word if not current else current + ' ' + word
+            if len(candidate) > chunk_limit and current:
+                pieces.append(current)
+                current = word
+            else:
+                current = candidate
+        if current:
+            pieces.append(current)
+        return pieces
+
+    for paragraph in paragraphs:
+        sentences = [x.strip() for x in re.split(r'(?<=[.!?。！？])\s+', paragraph) if x.strip()]
+        chunks, current = [], ''
+        for sentence in sentences:
+            if len(sentence) > chunk_limit:
                 if current:
                     chunks.append(current)
                     current = ''
-                for offset in range(0, len(sentence), 3200):
-                    chunks.append(sentence[offset:offset + 3200])
+                chunks.extend(split_long_sentence(sentence))
                 continue
             candidate = sentence if not current else current + ' ' + sentence
-            if len(candidate) > 3400 and current:
+            if len(candidate) > chunk_limit and current:
                 chunks.append(current)
                 current = sentence
             else:
                 current = candidate
-    if current:
-        chunks.append(current)
+        if current:
+            chunks.append(current)
 
-    translated = []
-    for chunk in chunks:
-        q = urllib.parse.urlencode({'client': 'gtx', 'sl': 'auto', 'tl': 'ru', 'dt': 't', 'q': chunk})
-        try:
-            data = json.loads(get_url('https://translate.googleapis.com/translate_a/single?' + q).decode())
-            translated.append(''.join(x[0] for x in data[0] if x[0]).strip())
-        except Exception as e:
-            print('Translation error:', e)
-            # Do not pretend that an untranslated source passage was successfully translated.
-            return ''
-    return '\n\n'.join(part for part in translated if part).strip()
+        translated_chunks = []
+        for chunk in chunks:
+            q = urllib.parse.urlencode({
+                'client': 'gtx', 'sl': 'auto', 'tl': 'ru', 'dt': 't', 'q': chunk
+            })
+            try:
+                data = json.loads(get_url('https://translate.googleapis.com/translate_a/single?' + q).decode())
+                translated_chunk = ''.join(x[0] for x in data[0] if x[0]).strip()
+                if translated_chunk:
+                    translated_chunks.append(translated_chunk)
+            except Exception as e:
+                print('Translation error:', type(e).__name__)
+                # Do not pretend that an untranslated source passage was successfully translated.
+                return ''
+        if translated_chunks:
+            translated_paragraphs.append(' '.join(translated_chunks))
+
+    return '\n\n'.join(translated_paragraphs).strip()
 
 
 def footer(): return '\n\n' + FOOTER
@@ -604,6 +645,18 @@ def validate_ad_draft(ad):
 
 def send_ad_content(ad):
     validate_ad_draft(ad)
+
+    # If a previous attempt sent only part of a long text ad, remove those fragments
+    # before retrying. Failure to clean them stops the retry instead of duplicating them.
+    partial_ids = list(ad.get('_partial_message_ids') or [])
+    if partial_ids:
+        delete_ad_message({
+            'chat_id': ad.get('_partial_chat_id', CHANNEL),
+            'message_ids': partial_ids
+        })
+        ad.pop('_partial_message_ids', None)
+        ad.pop('_partial_chat_id', None)
+
     caption = (ad.get('text') or '').strip()
     if ad.get('type') == 'album':
         full_caption = (caption + footer()).strip()
@@ -634,19 +687,29 @@ def send_ad_content(ad):
             raise ValueError('Подпись к фото/видео/документу длиннее лимита Telegram 1024 символа. Сократи текст.')
         method = {'photo':'sendPhoto','video':'sendVideo','document':'sendDocument'}[ad['type']]
         field = {'photo':'photo','video':'video','document':'document'}[ad['type']]
-        return api(method, {'chat_id':CHANNEL,field:ad['file_id'],'caption':full_caption,'parse_mode':'HTML'})
+        return api(method, {'chat_id': CHANNEL,field:ad['file_id'],'caption':full_caption,'parse_mode':'HTML'})
+
     full_text = (caption + footer()).strip()
     sent = []
     for part in split_html_text(full_text):
-        sent.append(post_text(part))
+        message = post_text(part)
+        sent.append(message)
+        ids = [item.get('message_id') for item in sent if item.get('message_id')]
+        if ids:
+            ad['_partial_message_ids'] = ids
+            ad['_partial_chat_id'] = (sent[0].get('chat') or {}).get('id', CHANNEL)
         time.sleep(0.2)
     if not sent:
         raise RuntimeError('Рекламный текст оказался пустым.')
-    return {
+
+    result = {
         'message_id': sent[0]['message_id'],
         'chat': sent[0]['chat'],
         '_message_ids': [message['message_id'] for message in sent]
     }
+    ad.pop('_partial_message_ids', None)
+    ad.pop('_partial_chat_id', None)
+    return result
 
 
 def count_today(s):
@@ -1067,6 +1130,11 @@ def handle_admin_message(msg,s):
             try:
                 result = send_ad_content(replacement)
             except Exception as e:
+                partial_ids = replacement.get('_partial_message_ids') or []
+                if partial_ids:
+                    ad['stale_message_ids'] = list(dict.fromkeys(
+                        (ad.get('stale_message_ids') or []) + partial_ids
+                    ))
                 send_dm(uid, f'Не удалось заменить рекламный текст: {html.escape(str(e)[:350])}')
                 return
             try:
@@ -1314,7 +1382,7 @@ def mark_slot(s,key): s['last_slots'][key]=now().date().isoformat()
 def routine_posts(s):
     """Publish an end-of-day digest only when there is useful news or a real forecast warning."""
     n = now()
-    if is_paused(s) or count_today(s) >= 10 or n.hour != 22 or not (30 <= n.minute < 35) or slot_once(s, 'night'):
+    if is_paused(s) or count_today(s) >= 10 or not (1350 <= n.hour * 60 + n.minute < 1440) or slot_once(s, 'night'):
         return
 
     todays = [item for item in s.get('published_news', [])
@@ -1379,9 +1447,12 @@ def weather_post(s, period):
     if slot_once(s, key) or count_today(s) >= 10 or is_paused(s):
         return
     n = now()
-    if period == 'morning' and not (n.hour == 6 and 30 <= n.minute < 40):
+    minute_of_day = n.hour * 60 + n.minute
+    # Preferred times remain 06:30 and 18:00; the wider same-day windows only
+    # permit a retry if the scheduled GitHub Actions runner starts late.
+    if period == 'morning' and not (390 <= minute_of_day < 510):  # 06:30–08:30
         return
-    if period == 'evening' and not (n.hour == 18 and 0 <= n.minute < 10):
+    if period == 'evening' and not (1080 <= minute_of_day < 1200):  # 18:00–20:00
         return
 
     url = ('https://api.open-meteo.com/v1/forecast?latitude=12.2388&longitude=109.1967'
@@ -1511,6 +1582,9 @@ def publish_news(s):
         if not translated_title:
             continue
         headline = clean(translated_title)
+        if is_duplicate_news(s, headline, link):
+            print('Skipping cross-source duplicate after translation:', headline)
+            continue
         translated_body = translate(desc) if desc else ''
 
         if len(translated_body) < 180 or len(translated_body.split()) < 24:
@@ -1554,8 +1628,10 @@ def publish_news(s):
         news_text = '\n\n'.join(sections)
         post_with_image(news_text, image_url, illustration=illustration)
         s['seen_links'] = (s.get('seen_links', []) + [link])[-1000:]
-        s['seen_titles'] = (s.get('seen_titles', []) + [title])[-500:]
-        s['seen_fingerprints'] = (s.get('seen_fingerprints', []) + [title_fingerprint(title)])[-1000:]
+        recorded_titles = list(dict.fromkeys([title, headline]))
+        s['seen_titles'] = (s.get('seen_titles', []) + recorded_titles)[-500:]
+        recorded_fingerprints = list(dict.fromkeys(title_fingerprint(item) for item in recorded_titles))
+        s['seen_fingerprints'] = (s.get('seen_fingerprints', []) + recorded_fingerprints)[-1000:]
         s['published_news'] = (s.get('published_news', []) + [{
             'title': headline, 'summary': body, 'link': link, 'published_at': iso(now()), 'source_published_at': iso(source_published_at), 'urgent': bool(urgent)
         }])[-100:]

@@ -875,7 +875,11 @@ def handle_admin_message(msg,s):
         ad=s.get('pending_ad') or {}
         if not ad or ad.get('awaiting_content') or not (ad.get('text') or ad.get('file_id') or ad.get('media_items')):
             send_dm(uid,'Сначала создай черновик: /ad 1/24, затем пришли содержимое.'); return
-        publish_ad(ad,s,uid)
+        try:
+            publish_ad(ad, s, uid)
+        except Exception as e:
+            print('Manual ad publication failed:', type(e).__name__, e)
+            send_dm(uid, f'Не удалось опубликовать рекламу: {html.escape(str(e)[:400])}. Черновик сохранён; исправь текст или попробуй ещё раз.')
     elif cmd=='/schedule':
         ad=s.get('pending_ad') or {}
         if not ad or ad.get('awaiting_content') or not (ad.get('text') or ad.get('file_id') or ad.get('media_items')):

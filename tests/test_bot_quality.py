@@ -16,10 +16,14 @@ class NewsQualityTests(unittest.TestCase):
             bot.ensure_polling_no_webhook()
         self.assertEqual(api_mock.call_args.args[0], "getWebhookInfo")
 
-    def test_polling_guard_refuses_active_webhook_without_deleting_it(self):
+    def test_polling_guard_skips_polling_when_webhook_is_active(self):
         with patch.object(bot, "api", return_value={"url": "https://example.com/webhook"}) as api_mock:
-            with self.assertRaises(RuntimeError):
-                bot.ensure_polling_no_webhook()
+            self.assertFalse(bot.ensure_polling_no_webhook())
+        self.assertEqual([call.args[0] for call in api_mock.call_args_list], ["getWebhookInfo"])
+
+    def test_polling_guard_skips_polling_if_webhook_status_cannot_be_checked(self):
+        with patch.object(bot, "api", side_effect=RuntimeError("network error")) as api_mock:
+            self.assertFalse(bot.ensure_polling_no_webhook())
         self.assertEqual([call.args[0] for call in api_mock.call_args_list], ["getWebhookInfo"])
 
     def test_parse_rss_publication_date(self):

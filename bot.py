@@ -161,14 +161,23 @@ URGENT_NEWS_TERMS = (
 ALLOWED_REACTIONS = ('🤣', '😱', '👍', '❤️', '🙏')
 
 
+def contains_term(text, term):
+    """Match a whole word or phrase so short syllables don't create false alerts."""
+    words = [re.escape(part) for part in term.split()]
+    if not words:
+        return False
+    pattern = r'(?<!\w)' + r'\s+'.join(words) + r'(?!\w)'
+    return re.search(pattern, text, flags=re.UNICODE) is not None
+
+
 def is_relevant_news(title, description):
     """Only accept local stories with a practical-life signal."""
     text = clean((title or '') + ' ' + (description or '')).casefold()
-    if not text or not any(k in text for k in KEYWORDS):
+    if not text or not any(contains_term(text, k) for k in KEYWORDS):
         return False
-    practical = any(term in text for term in PRACTICAL_NEWS_TERMS)
-    sports = any(term in text for term in SPORTS_NOISE_TERMS)
-    urgent_or_safety = any(term in text for term in URGENT_NEWS_TERMS)
+    practical = any(contains_term(text, term) for term in PRACTICAL_NEWS_TERMS)
+    sports = any(contains_term(text, term) for term in SPORTS_NOISE_TERMS)
+    urgent_or_safety = any(contains_term(text, term) for term in URGENT_NEWS_TERMS)
     if sports and not urgent_or_safety:
         return False
     return practical or urgent_or_safety
@@ -176,7 +185,7 @@ def is_relevant_news(title, description):
 
 def is_urgent_news(text):
     value = clean(text).casefold()
-    return any(term in value for term in URGENT_NEWS_TERMS)
+    return any(contains_term(value, term) for term in URGENT_NEWS_TERMS)
 
 
 def remove_repeated_lead(headline, body):
@@ -200,15 +209,15 @@ def remove_repeated_lead(headline, body):
 def reaction_line(text):
     """Optional topic-specific reaction line; serious stories deliberately get none."""
     value = clean(text).casefold()
-    if is_urgent_news(value) or any(x in value for x in ('thiệt mạng', 'tử vong', 'người chết', 'bị thương nặng')):
+    if is_urgent_news(value) or any(contains_term(value, x) for x in ('thiệt mạng', 'tử vong', 'người chết', 'bị thương nặng')):
         return ''
-    if any(x in value for x in ('tình nguyện', 'giúp đỡ', 'hỗ trợ người dân', 'cứu trợ', 'quyên góp', 'cảm ơn')):
+    if any(contains_term(value, x) for x in ('tình nguyện', 'giúp đỡ', 'hỗ trợ người dân', 'cứu trợ', 'quyên góp', 'cảm ơn')):
         return '🙏 — спасибо всем, кто помогает.'
-    if any(x in value for x in ('câu chuyện cảm động', 'đoàn tụ', 'giúp đỡ trẻ em', 'lan tỏa yêu thương')):
+    if any(contains_term(value, x) for x in ('câu chuyện cảm động', 'đoàn tụ', 'giúp đỡ trẻ em', 'lan tỏa yêu thương')):
         return '❤️ — такая история заслуживает поддержки.'
-    if any(x in value for x in ('hài hước', 'buồn cười', 'dở khóc dở cười', 'tình huống hài')):
+    if any(contains_term(value, x) for x in ('hài hước', 'buồn cười', 'dở khóc dở cười', 'tình huống hài')):
         return '🤣 — редкий повод улыбнуться.'
-    if any(x in value for x in ('giao thông', 'xe buýt', 'bệnh viện', 'trường học', 'quy định', 'giá điện', 'giá nước', 'dịch vụ', 'công trình', 'khai trương', 'mở cửa', 'транспорт', 'больница', 'школа', 'правила', 'цены', 'услуги', 'открытие', 'ремонт дороги')):
+    if any(contains_term(value, x) for x in ('giao thông', 'xe buýt', 'bệnh viện', 'trường học', 'quy định', 'giá điện', 'giá nước', 'dịch vụ', 'công trình', 'khai trương', 'mở cửa', 'транспорт', 'больница', 'школа', 'правила', 'цены', 'услуги', 'открытие', 'ремонт дороги')):
         return '👍 — полезная информация для жизни в Нячанге.'
     return ''
 

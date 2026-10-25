@@ -102,6 +102,9 @@ class NewsQualityTests(unittest.TestCase):
         self.assertEqual(state["published_news"][0]["title"], "Road repair update")
         self.assertEqual(state["published_news"][0]["link"], "https://example.com/road")
         self.assertIn("The city announced repair works.", post_mock.call_args.args[0])
+        self.assertNotIn("Road repair update", post_mock.call_args.args[0])
+        self.assertNotIn("example.com/road", post_mock.call_args.args[0])
+        self.assertNotIn("<b>", post_mock.call_args.args[0])
 
     def test_manual_album_is_queued_and_not_published_until_approved(self):
         uid = 1335496436
@@ -296,22 +299,72 @@ class NewsQualityTests(unittest.TestCase):
         self.assertTrue(all(len(piece) <= 3900 for piece in pieces))
         self.assertEqual(" ".join(pieces).split(), original.split())
 
-    def test_long_photo_post_keeps_image_and_full_body(self):
-        body = " ".join(["thongtin"] * 1300) + " UNIQUE_ENDING_MARKER"
-        post = "<b>Tiêu đề hữu ích</b>\n\n" + body + '\n\n<a href="https://example.com">Nguồn</a>'
-        photo_response = {"message_id": 100, "chat": {"id": -1001}}
-        with patch.object(bot, "api", return_value=photo_response) as api_mock, \
-             patch.object(bot, "post_text", return_value={"message_id": 101}) as text_mock, \
-             patch.object(bot.time, "sleep"):
+    def test_public_news_helper_does_not_attach_images(self):
+        post = "Полезная новость без заголовка. Подробности для жителей Нячанга."
+        with patch.object(bot, "api") as api_mock, \
+             patch.object(bot, "post_text", return_value={"message_id": 101}) as text_mock:
             bot.post_with_image(post, "https://example.com/image.jpg", illustration=True)
-        self.assertEqual(api_mock.call_args_list[0].args[0], "sendPhoto")
-        caption = api_mock.call_args_list[0].args[1]["caption"]
-        self.assertLessEqual(len(caption), 1024)
-        self.assertIn("Tiêu đề hữu ích", caption)
-        posted_text = "\n".join(call.args[0] for call in text_mock.call_args_list)
-        self.assertIn("UNIQUE_ENDING_MARKER", posted_text)
-        self.assertIn("https://example.com", posted_text)
-        self.assertGreaterEqual(text_mock.call_count, 1)
+        api_mock.assert_not_called()
+        text_mock.assert_called_once_with(post)
+        self.assertNotIn("Изображение — иллюстрация", text_mock.call_args.args[0])
+
+    def test_limit_news_body_is_concise_and_removes_urls(self):
+        source = ("Первая важная информация для жителей города. " * 30) + " https://publisher.example/story "
+        result = bot.limit_news_body(source, max_chars=600)
+        self.assertLessEqual(len(result), 600)
+        self.assertNotIn("publisher.example", result)
+        self.assertTrue(result.endswith("…") or result.endswith((".", "!", "?")))
+
+    def test_publish_news_posts_body_without_generated_headline_or_source_link(self):
+        current = datetime(2026, 10, 26, 10, 15, tzinfo=bot.TZ)
+        description = (
+            "Local authorities in Khanh Hoa warned that heavy rain may cause flooding on several "
+            "streets in Nha Trang. Residents should avoid low-lying roads during intense rainfall. "
+            "Traffic may slow down, and people should check local notices before travelling. "
+            "The advisory asks residents to keep away from flooded areas and follow updated guidance."
+        )
+        rss = (
+            '<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><item>'
+            '<title>Khánh Hòa cảnh báo mưa lớn tại Nha Trang</title>'
+            '<description>' + description + '</description>'
+            '<link>https://publisher.example/story-123</link>'
+            '<pubDate>Mon, 26 Oct 2026 03:00:00 GMT</pubDate>'
+            '</item></channel></rss>'
+        ).encode("utf-8")
+        state = {
+            "seen_links": [], "seen_titles": [], "seen_fingerprints": [],
+            "published_news": [], "ads": [], "paused": False, "pause_until": "",
+            "daily_counts": {}, "last_slots": {}, "last_news_hour": ""
+        }
+
+        def fake_translate(value):
+            if value.startswith("Khánh Hòa cảnh báo"):
+                return "Предупреждение о сильном дожде в Нячанге"
+            return (
+                "Власти сообщили, что сильный дождь может вызвать затопление нескольких улиц Нячанга. "
+                "Жителям рекомендуют избегать низко расположенных дорог во время интенсивных осадков. "
+                "Движение может замедлиться, поэтому перед поездкой стоит проверить местные уведомления. "
+                "Также рекомендуется не проезжать через затопленные участки и следить за обновлениями служб."
+            )
+
+        with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "FEEDS", ["https://fake-feed.example/rss"]), \
+             patch.object(bot, "get_url", return_value=rss), \
+             patch.object(bot, "parse_source_date", return_value=current), \
+             patch.object(bot, "translate", side_effect=fake_translate), \
+             patch.object(bot, "commons_image") as image_mock, \
+             patch.object(bot, "post_text", return_value={"message_id": 222}) as post_mock:
+            bot.publish_news(state)
+
+        image_mock.assert_not_called()
+        self.assertEqual(post_mock.call_count, 1)
+        posted = post_mock.call_args.args[0]
+        self.assertIn("Власти сообщили", posted)
+        self.assertNotIn("Предупреждение о сильном дожде", posted)
+        self.assertNotIn("publisher.example/story-123", posted)
+        self.assertNotIn("upload.wikimedia.org", posted)
+        self.assertNotIn("<b>", posted)
+        self.assertEqual(state["published_news"][0]["link"], "https://publisher.example/story-123")
 
     def test_translation_does_not_drop_text_after_4000_characters(self):
         text = ". ".join(["Уникальный факт о городской жизни"] * 220) + ". ПОСЛЕДНЯЯ_УНИКАЛЬНАЯ_СТРОКА"

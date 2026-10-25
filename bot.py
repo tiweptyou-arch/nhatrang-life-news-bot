@@ -300,6 +300,40 @@ def remove_repeated_lead(headline, body):
     return body
 
 
+def limit_news_body(value, max_chars=1450):
+    """Keep the useful beginning of a translated article without turning it into a wall of text."""
+    value = clean_multiline(re.sub(r'https?://\\S+', '', value or ''))
+    if len(value) <= max_chars:
+        return value
+    paragraphs = [p.strip() for p in value.split('\\n\\n') if p.strip()]
+    kept = []
+    for paragraph in paragraphs:
+        candidate = paragraph if not kept else '\\n\\n'.join(kept + [paragraph])
+        if len(candidate) <= max_chars:
+            kept.append(paragraph)
+            continue
+        room = max_chars - len('\\n\\n'.join(kept))
+        if kept:
+            room -= 2
+        if room > 100:
+            sentence_parts = re.split(r'(?<=[.!?…])\\s+', paragraph)
+            for sentence in sentence_parts:
+                candidate_text = sentence if not kept and not kept else ''
+                current = '\\n\\n'.join(kept)
+                trial = (current + ('\\n\\n' if current else '') + sentence).strip()
+                if len(trial) <= max_chars:
+                    kept.append(sentence) if not current else kept.__setitem__(-1, kept[-1] + ' ' + sentence)
+                else:
+                    break
+        break
+    result = '\\n\\n'.join(kept).strip()
+    if len(result) > max_chars:
+        result = result[:max_chars].rsplit(' ', 1)[0].rstrip(' ,;:-') + '…'
+    elif len(result) < len(value) and not result.endswith(('…', '.', '!', '?')):
+        result = result.rstrip() + '…'
+    return result
+
+
 def reaction_line(text):
     """Optional topic-specific reaction line; serious stories deliberately get none."""
     value = clean(text).casefold()
@@ -464,76 +498,18 @@ def split_html_text(text, limit=3900):
 
 
 
+
 def post_with_image(text, image_url=None, illustration=False):
-    """Always pair a topical image with a short caption and preserve the complete article text."""
-    if not text.strip():
+    """Publish a text-only channel post; RSS images and article URLs are never attached."""
+    if not text or not text.strip():
         return None
-    if isinstance(image_url, dict):
-        image_info = image_url
-        image_url = image_info.get('url')
-        attribution = image_info.get('credit_html')
-        if attribution:
-            if FOOTER in text:
-                text = text.replace(FOOTER, '\n\n' + attribution + FOOTER, 1)
-            else:
-                text += '\n\n' + attribution
-        illustration = not bool(attribution)
-
-    paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text.strip()) if p.strip()]
-    caption_parts = []
-    remaining = []
-    caption_limit = 850
-
-    for index, paragraph in enumerate(paragraphs):
-        candidate = paragraph if not caption_parts else '\n\n'.join(caption_parts + [paragraph])
-        if len(candidate) <= caption_limit:
-            caption_parts.append(paragraph)
-        else:
-            remaining = paragraphs[index:]
-            break
-
-    if not caption_parts and paragraphs:
-        # Headlines are expected to fit; safeguard unusual long first blocks without dropping text.
-        words = paragraphs[0].split()
-        caption, tail = '', []
-        for word in words:
-            candidate = word if not caption else caption + ' ' + word
-            if len(candidate) <= caption_limit:
-                caption = candidate
-            else:
-                tail.append(word)
-        caption_parts = [caption] if caption else []
-        remaining = ([' '.join(tail)] if tail else []) + paragraphs[1:]
-
-    caption = '\n\n'.join(caption_parts)
-    full_body = '\n\n'.join(remaining)
-    if illustration:
-        label = '📷 Изображение — иллюстрация'
-        if len(caption) + len(label) + 2 <= 1024:
-            caption = (caption + '\n\n' + label).strip()
-        else:
-            full_body = (label + ('\n\n' + full_body if full_body else '')).strip()
-
     result = None
-    photo_sent = False
-    if image_url and caption and len(caption) <= 1024:
-        try:
-            result = api('sendPhoto', {
-                'chat_id': CHANNEL, 'photo': image_url,
-                'caption': caption, 'parse_mode': 'HTML'
-            })
-            photo_sent = True
-        except Exception as e:
-            print('Photo send failed; falling back to full text:', e)
-
-    # If a picture cannot be used, include the title in the text fallback instead.
-    text_parts = split_html_text(full_body) if photo_sent else split_html_text(text)
-    for part in text_parts:
+    parts = split_html_text(text, limit=3900)
+    for index, part in enumerate(parts):
         result = post_text(part)
-        time.sleep(0.25)
+        if index < len(parts) - 1:
+            time.sleep(0.2)
     return result
-
-
 
 def translate(text):
     """Translate the whole text in bounded chunks instead of silently truncating at 4,000 chars."""
@@ -1311,14 +1287,17 @@ def slot_once(s,key):
 def mark_slot(s,key): s['last_slots'][key]=now().date().isoformat()
 
 
+
 def routine_posts(s):
-    """Publish an end-of-day digest only when there is useful news or a real forecast warning."""
+    """Publish a short end-of-day recap only when there is useful news or a real warning."""
     n = now()
     if is_paused(s) or count_today(s) >= 10 or n.hour != 22 or not (30 <= n.minute < 35) or slot_once(s, 'night'):
         return
 
-    todays = [item for item in s.get('published_news', [])
-              if str(item.get('published_at', '')).startswith(n.date().isoformat())]
+    todays = [
+        item for item in s.get('published_news', [])
+        if str(item.get('published_at', '')).startswith(n.date().isoformat())
+    ]
     tomorrow_warning = ''
     try:
         url = ('https://api.open-meteo.com/v1/forecast?latitude=12.2388&longitude=109.1967'
@@ -1327,51 +1306,48 @@ def routine_posts(s):
         forecast = json.loads(get_url(url).decode('utf-8'))
         daily = forecast['daily']
         code = int(daily['weather_code'][1])
-        rain = daily.get('precipitation_probability_max', [None, None])[1]
+        rain_values = daily.get('precipitation_probability_max', [None, None])
+        rain = rain_values[1] if len(rain_values) > 1 else None
         names = {
-          0:'ясно',1:'преимущественно ясно',2:'переменная облачность',3:'облачно',
-          45:'туман',48:'туман',51:'морось',53:'морось',55:'сильная морось',
-          61:'небольшой дождь',63:'дождь',65:'сильный дождь',80:'кратковременный дождь',
-          81:'ливни',82:'сильные ливни',95:'гроза',96:'гроза с градом',99:'сильная гроза с градом'
+            0:'ясно',1:'преимущественно ясно',2:'переменная облачность',3:'облачно',
+            45:'туман',48:'туман',51:'морось',53:'морось',55:'сильная морось',
+            61:'небольшой дождь',63:'дождь',65:'сильный дождь',80:'кратковременный дождь',
+            81:'ливни',82:'сильные ливни',95:'гроза',96:'гроза с градом',99:'сильная гроза с градом'
         }
         if (rain is not None and rain >= 60) or code in (65, 81, 82, 95, 96, 99):
+            rain_text = f'Вероятность осадков — {rain}%' if rain is not None else 'Вероятность осадков не указана'
             tomorrow_warning = (
-                f'По прогнозу на завтра: {names.get(code, "переменная погода")}, вероятность осадков '
-                f'{rain if rain is not None else "не указана"}%. Учти это при планировании поездок.'
+                f'На завтра прогнозируют {names.get(code, "переменную погоду")}. {rain_text}. '
+                'Учитывай прогноз при планировании поездок и дел на улице.'
             )
     except Exception as e:
-        print('Night forecast unavailable; no weather warning inferred:', e)
+        print('Night forecast unavailable; no weather warning inferred:', type(e).__name__)
 
-    # No fabricated "goodnight" filler when there is nothing important to recap.
-    if not todays and not tomorrow_warning:
+    recap = []
+    for item in todays[-4:]:
+        summary = clean_multiline(item.get('summary', ''))
+        if not summary:
+            continue
+        sentences = re.split(r'(?<=[.!?])\\s+', summary.replace('\\n', ' '))
+        brief = ' '.join(sentences[:2]).strip()
+        if len(brief) > 300:
+            brief = brief[:297].rsplit(' ', 1)[0] + '…'
+        if brief and brief not in recap:
+            recap.append(brief)
+
+    if not recap and not tomorrow_warning:
         mark_slot(s, 'night')
         return
 
-    sections = ['🌙 <b>Доброй ночи, Нячанг!</b>']
-    if todays:
-        lines = ['<b>Что важного было сегодня</b>']
-        for item in todays[-4:]:
-            title = clean(item.get('title', ''))
-            summary = clean(item.get('summary', ''))
-            if not title:
-                continue
-            sentences = re.split(r'(?<=[.!?])\s+', summary)
-            brief = ' '.join(sentences[:2]).strip()
-            if len(brief) > 320:
-                brief = brief[:317].rsplit(' ', 1)[0] + '…'
-            lines.append('• <b>' + html.escape(title) + '</b>' +
-                         (('\n' + html.escape(brief)) if brief else ''))
-        if len(lines) > 1:
-            sections.append('\n'.join(lines))
+    parts = ['🌙']
+    if recap:
+        parts.append('Сегодня в Нячанге: ' + ' '.join(recap))
     if tomorrow_warning:
-        sections.append('<b>На завтра</b>\n' + html.escape(tomorrow_warning))
-    sections.append('Источник прогноза: <a href="https://open-meteo.com/">Open-Meteo</a>' + footer())
-    text = '\n\n'.join(sections)
-    image = commons_image('Nha Trang Vietnam city at night street')
-    post_with_image(text, image, illustration=bool(image))
+        parts.append(tomorrow_warning)
+    text = '\\n\\n'.join(parts) + footer()
+    post_with_image(text)
     bump_today(s)
     mark_slot(s, 'night')
-
 
 
 def weather_post(s, period):
@@ -1389,39 +1365,46 @@ def weather_post(s, period):
            '&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code'
            '&timezone=Asia%2FHo_Chi_Minh&forecast_days=2')
     try:
-        d = json.loads(get_url(url).decode('utf-8'))
-        cur, daily = d['current'], d['daily']
-        i = 0 if period == 'morning' else 1
+        data = json.loads(get_url(url).decode('utf-8'))
+        cur, daily = data['current'], data['daily']
+        index = 0 if period == 'morning' else 1
         icons = {0:'☀️',1:'🌤️',2:'⛅',3:'☁️',45:'🌫️',48:'🌫️',51:'🌦️',53:'🌦️',55:'🌧️',
                  61:'🌧️',63:'🌧️',65:'🌧️',80:'🌦️',81:'🌧️',82:'⛈️',95:'⛈️',96:'⛈️',99:'⛈️'}
         names = {0:'ясно',1:'преимущественно ясно',2:'переменная облачность',3:'облачно',
                  45:'туман',48:'туман',51:'морось',53:'морось',55:'сильная морось',
                  61:'небольшой дождь',63:'дождь',65:'сильный дождь',80:'кратковременный дождь',
                  81:'ливни',82:'сильные ливни',95:'гроза',96:'гроза с градом',99:'сильная гроза с градом'}
-        code, current_code = int(daily['weather_code'][i]), int(cur['weather_code'])
-        rain = daily.get('precipitation_probability_max', [None, None])[i]
-        if period == 'morning':
-            title = 'Доброе утро, Нячанг! Погода на сегодня'
-            extra = (f'Сейчас: {round(cur["temperature_2m"])}°C, {names.get(current_code, "переменная погода")} '
-                     f'{icons.get(current_code, "🌤️")} (ощущается как {round(cur["apparent_temperature"])}°C).\n')
-        else:
-            title = 'Погода в Нячанге: вечер и завтра'
-            extra = (f'Сейчас: {round(cur["temperature_2m"])}°C. Завтра: '
-                     f'{names.get(code, "переменная погода")} {icons.get(code, "🌤️")}.\n')
+        code, current_code = int(daily['weather_code'][index]), int(cur['weather_code'])
+        rain_values = daily.get('precipitation_probability_max', [None, None])
+        rain = rain_values[index] if len(rain_values) > index else None
+
+        current_text = (
+            f'Сейчас в Нячанге {round(cur["temperature_2m"])}°C, '
+            f'{names.get(current_code, "переменная погода")} {icons.get(current_code, "🌤️")}; '
+            f'по ощущениям {round(cur["apparent_temperature"])}°C.'
+        )
+        forecast_text = (
+            f'Сегодня ожидается {names.get(code, "переменная погода")} '
+            f'{icons.get(code, "🌤️")} и температура {round(daily["temperature_2m_min"][index])}–'
+            f'{round(daily["temperature_2m_max"][index])}°C.'
+        )
+        if period == 'evening':
+            forecast_text = (
+                f'Завтра ожидается {names.get(code, "переменная погода")} {icons.get(code, "🌤️")} '
+                f'и температура {round(daily["temperature_2m_min"][index])}–'
+                f'{round(daily["temperature_2m_max"][index])}°C.'
+            )
+        rain_text = f'Вероятность осадков — {rain}%.' if rain is not None else 'Вероятность осадков сейчас недоступна.'
         if rain is not None and rain >= 60:
-            advice = 'Вероятность осадков высокая — учитывай это при поездках и планах на улице.'
+            advice = 'Вероятность дождя высокая — учитывай это при поездках и планах на улице.'
         elif rain is not None and rain >= 35:
-            advice = 'Возможен дождь — проверь погоду перед выходом.'
+            advice = 'Возможен дождь, поэтому проверь прогноз перед выходом.'
         elif code in (82, 95, 96, 99):
             advice = 'В прогнозе есть гроза. Следи за обновлениями погоды перед выходом.'
         else:
-            advice = 'Проверь прогноз повторно, если собираешься надолго выходить на улицу.'
-        text = (
-            ('☀️' if period == 'morning' else '🌆') + ' <b>' + title + '</b>\n\n' +
-            extra + f'Температура: {round(daily["temperature_2m_min"][i])}–{round(daily["temperature_2m_max"][i])}°C.\n' +
-            'Вероятность осадков: ' + (f'{rain}%' if rain is not None else 'нет данных') + '.\n\n' +
-            advice
-        )
+            advice = 'Перед длительной поездкой проверь прогноз ещё раз.'
+
+        text = current_text + '\\n' + forecast_text + '\\n' + rain_text + '\\n\\n' + advice
         if period == 'morning':
             cutoff = n - timedelta(hours=24)
             recent = []
@@ -1430,36 +1413,29 @@ def weather_post(s, period):
                     published_at = datetime.fromisoformat(entry.get('published_at', '')).astimezone(TZ)
                 except (TypeError, ValueError):
                     continue
-                if cutoff <= published_at <= n and entry.get('title'):
+                if cutoff <= published_at <= n and entry.get('summary'):
                     recent.append(entry)
-            if recent:
-                digest_lines = ['<b>Что важно знать за последние сутки</b>']
-                for entry in recent[-3:]:
-                    summary = clean(entry.get('summary', ''))
-                    first_sentence = re.split(r'(?<=[.!?])\s+', summary, maxsplit=1)[0]
-                    if len(first_sentence) > 220:
-                        first_sentence = first_sentence[:217].rsplit(' ', 1)[0] + '…'
-                    link = entry.get('link', '')
-                    item = '• <b>' + html.escape(clean(entry.get('title', ''))) + '</b>'
-                    if first_sentence:
-                        item += '\n' + html.escape(first_sentence)
-                    if link.startswith('https://') or link.startswith('http://'):
-                        item += ' <a href="' + html.escape(link, quote=True) + '">Источник</a>'
-                    digest_lines.append(item)
-                text += '\n\n' + '\n\n'.join(digest_lines)
-        text += '\n\nИсточник прогноза: <a href="https://open-meteo.com/">Open-Meteo</a>' + footer()
-        img = commons_image('Nha Trang Vietnam weather rainy season coastline' if (rain is not None and rain >= 35)
-                            else 'Nha Trang Vietnam city coastal view')
-        post_with_image(text, img, illustration=bool(img))
+            snippets = []
+            for entry in recent[-3:]:
+                summary = clean_multiline(entry.get('summary', ''))
+                first_sentence = re.split(r'(?<=[.!?])\\s+', summary.replace('\\n', ' '), maxsplit=1)[0]
+                if len(first_sentence) > 220:
+                    first_sentence = first_sentence[:217].rsplit(' ', 1)[0] + '…'
+                if first_sentence and first_sentence not in snippets:
+                    snippets.append(first_sentence)
+            if snippets:
+                text += '\\n\\nЗа последние сутки: ' + ' '.join(snippets)
+
+        text += footer()
+        post_with_image(text)
         bump_today(s)
         mark_slot(s, key)
     except Exception as e:
-        print('Weather error; no unverified weather message was posted:', e)
-
+        print('Weather error; no unverified weather message was posted:', type(e).__name__)
 
 
 def publish_news(s):
-    """Publish screened local stories; urgent safety information can bypass quiet windows."""
+    """Publish useful, recent local news as text only, without an added headline or source/media links."""
     n = now()
     hour_key = n.strftime('%Y-%m-%d-%H')
     items, links = [], set()
@@ -1480,22 +1456,12 @@ def publish_news(s):
                 if not is_recent_source_date(source_published_at, n, urgent=urgent_candidate):
                     print('Skipping missing, future-dated, or stale RSS story:', title)
                     continue
-                image_url = None
-                for node in list(item):
-                    tag = node.tag.lower()
-                    if tag.endswith('}content') or tag.endswith('}thumbnail') or tag.endswith('enclosure'):
-                        candidate = node.attrib.get('url') or node.attrib.get('href')
-                        media_type = node.attrib.get('type', '')
-                        if candidate and (media_type.startswith('image/') or
-                                          re.search(r'\.(jpg|jpeg|png|webp)(\?|$)', candidate, re.I)):
-                            image_url = candidate
-                            break
-                items.append((title, desc, link, image_url, is_urgent_news(title + ' ' + desc), source_published_at))
+                items.append((title, desc, link, is_urgent_news(title + ' ' + desc), source_published_at))
         except Exception as e:
-            print('Feed error:', e)
+            print('Feed error:', type(e).__name__)
 
-    items.sort(key=lambda item: not item[4])
-    for title, desc, link, image_url, urgent, source_published_at in items:
+    items.sort(key=lambda item: not item[3])
+    for title, desc, link, urgent, source_published_at in items:
         if is_duplicate_news(s, title, link):
             continue
         if is_paused(s) and not urgent:
@@ -1507,64 +1473,58 @@ def publish_news(s):
         if n.hour in (6, 7, 8, 11, 12, 17, 18, 22, 23) and not urgent:
             continue
 
-        translated_title = translate(re.split(r'\s[-–|]\s', title, maxsplit=1)[0])
+        translated_title = translate(re.split(r'\\s[-–|]\\s', title, maxsplit=1)[0])
         if not translated_title:
             continue
-        headline = clean(translated_title)
+        internal_title = clean(translated_title)
         translated_body = translate(desc) if desc else ''
 
         if len(translated_body) < 180 or len(translated_body.split()) < 24:
-            # Only fetch a source page when RSS lacks usable detail; don't let one slow page stall a run.
+            # Fetch a source page only when RSS has too little detail; limit work to avoid long runs.
             try:
                 page = get_url(link).decode('utf-8', 'ignore')
-                article_match = re.search(r'<article\b[^>]*>(.*?)</article>', page, re.I | re.S)
+                article_match = re.search(r'<article\\b[^>]*>(.*?)</article>', page, re.I | re.S)
                 if article_match:
                     raw_article = article_match.group(1)
                 else:
-                    paragraphs = re.findall(r'<p\b[^>]*>(.*?)</p>', page, re.I | re.S)
-                    raw_article = '\n'.join(paragraphs[:35])
-                raw_article = re.sub(r'<(script|style|noscript|svg)\b[^>]*>.*?</\1>', ' ', raw_article, flags=re.I | re.S)
-                raw_article = re.sub(r'</?(p|div|br|li|h[1-6])\b[^>]*>', '\n', raw_article, flags=re.I)
+                    paragraphs = re.findall(r'<p\\b[^>]*>(.*?)</p>', page, re.I | re.S)
+                    raw_article = '\\n'.join(paragraphs[:20])
+                raw_article = re.sub(r'<(script|style|noscript|svg)\\b[^>]*>.*?</\\1>', ' ', raw_article, flags=re.I | re.S)
+                raw_article = re.sub(r'</?(p|div|br|li|h[1-6])\\b[^>]*>', '\\n', raw_article, flags=re.I)
                 raw_article = clean_multiline(raw_article)
                 if len(raw_article) > len(desc) + 100:
-                    translated_body = translate(raw_article)
+                    translated_body = translate(raw_article[:12000])
             except Exception as e:
-                print('Full article unavailable; relying on RSS description only:', e)
+                print('Full article unavailable; relying on RSS description only:', type(e).__name__)
 
-        body = remove_repeated_lead(headline, translated_body)
+        body = remove_repeated_lead(internal_title, translated_body)
+        body = clean_multiline(re.sub(r'https?://\\S+', '', body))
+        body = limit_news_body(body, max_chars=1450)
         if len(body) < 100 or len(body.split()) < 18:
-            print('Skipping thin or repetitive story:', headline)
+            print('Skipping thin or repetitive story:', internal_title)
             continue
-        urgent = is_urgent_news(title + ' ' + desc + ' ' + headline + ' ' + body)
+        urgent = is_urgent_news(title + ' ' + desc + ' ' + internal_title + ' ' + body)
 
-        # Do not republish an RSS publisher's image without knowing its licence.
-        # Prefer a Wikimedia Commons image and label it as an illustration with attribution.
-        image_url = commons_image(news_image_query(headline, body))
-        illustration = bool(image_url)
-        if not image_url and not urgent:
-            print('Skipping non-urgent news without a suitable licensed illustration:', headline)
-            continue
-
-        emoji = '⚠️' if urgent else '📰'
-        sections = [f'{emoji} <b>{html.escape(headline[:180])}</b>', html.escape(body)]
-        line = reaction_line(title + ' ' + headline + ' ' + body)
+        # No source URL, article title, or picture is attached to the public post.
+        news_text = (('⚠️ ' if urgent else '') + html.escape(body))
+        line = reaction_line(title + ' ' + internal_title + ' ' + body)
         if line:
-            sections.append(line)
-        sections.append(f'🔗 <a href="{html.escape(link, quote=True)}">Источник</a>' + footer())
-        news_text = '\n\n'.join(sections)
-        post_with_image(news_text, image_url, illustration=illustration)
+            news_text += '\\n\\n' + line
+        news_text += footer()
+        post_with_image(news_text)
+
         s['seen_links'] = (s.get('seen_links', []) + [link])[-1000:]
         s['seen_titles'] = (s.get('seen_titles', []) + [title])[-500:]
         s['seen_fingerprints'] = (s.get('seen_fingerprints', []) + [title_fingerprint(title)])[-1000:]
         s['published_news'] = (s.get('published_news', []) + [{
-            'title': headline, 'summary': body, 'link': link, 'published_at': iso(now()), 'source_published_at': iso(source_published_at), 'urgent': bool(urgent)
+            'title': internal_title, 'summary': body, 'link': link,
+            'published_at': iso(now()), 'source_published_at': iso(source_published_at),
+            'urgent': bool(urgent)
         }])[-100:]
         bump_today(s)
         s['last_news_hour'] = hour_key
-        print('Published news:', headline, 'urgent=', urgent)
+        print('Published news: text-only; urgent=', urgent)
         return
-
-
 
 def main():
     s = load_state()

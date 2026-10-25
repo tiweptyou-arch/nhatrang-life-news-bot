@@ -641,9 +641,9 @@ def capture_manual_post(msg, s, uid):
     s['pending_manual_post'] = {}
     send_dm(
         uid,
-        f'Материал добавлен в очередь проверки. ID: <code>{html.escape(item_id)}</code>.\\n'
-        'Посмотреть очередь: /newsqueue\\n'
-        'Опубликовать после проверки: /approve ID\\n'
+        f'Материал добавлен в очередь проверки. ID: <code>{html.escape(item_id)}</code>.\n'
+        'Посмотреть очередь: /newsqueue\n'
+        'Опубликовать после проверки: /approve ID\n'
         'Отклонить: /reject ID'
     )
 
@@ -651,7 +651,7 @@ def capture_manual_post(msg, s, uid):
 def split_manual_content(content):
     """Extract a separate first-line headline without repeating it in the body."""
     content = clean_multiline(content)
-    paragraphs = [p.strip() for p in content.split('\\n\\n') if p.strip()]
+    paragraphs = [p.strip() for p in content.split('\n\n') if p.strip()]
     if not paragraphs:
         return 'Предложенная новость', ''
     if len(paragraphs) > 1:
@@ -659,9 +659,9 @@ def split_manual_content(content):
         title = first[:180].strip() or 'Предложенная новость'
         overflow = first[180:].strip()
         body_parts = ([overflow] if overflow else []) + paragraphs[1:]
-        return title, '\\n\\n'.join(body_parts).strip()
+        return title, '\n\n'.join(body_parts).strip()
     only = paragraphs[0]
-    sentences = re.split(r'(?<=[.!?…])\\s+', only, maxsplit=1)
+    sentences = re.split(r'(?<=[.!?…])\s+', only, maxsplit=1)
     if len(sentences) > 1 and len(sentences[0]) <= 180:
         return sentences[0].strip(), only[len(sentences[0]):].strip()
     return 'Предложенная новость', only
@@ -696,7 +696,7 @@ def publish_manual_post(item, s, uid=None):
             body_excerpt, remainder = body, ''
         caption = lead
         if body_excerpt:
-            caption += '\\n\\n' + html.escape(body_excerpt)
+            caption += '\n\n' + html.escape(body_excerpt)
         caption += footer()
         method, field = ('sendPhoto', 'photo') if post_type == 'photo' else ('sendVideo', 'video')
         result = api(method, {
@@ -708,7 +708,7 @@ def publish_manual_post(item, s, uid=None):
                 post_text(part)
                 time.sleep(0.2)
     else:
-        full_text = lead + ('\\n\\n' + body_html if body_html else '') + footer()
+        full_text = lead + ('\n\n' + body_html if body_html else '') + footer()
         for part in split_html_text(full_text):
             result = post_text(part)
             time.sleep(0.2)
@@ -717,7 +717,7 @@ def publish_manual_post(item, s, uid=None):
     item['published_at'] = iso(now())
     item['published_message_id'] = (result or {}).get('message_id')
     item['title'] = title
-    link_match = re.search(r'https?://[^\\s<>]+', raw)
+    link_match = re.search(r'https?://[^\s<>]+', raw)
     source_link = link_match.group(0).rstrip('.,);]') if link_match else ''
     s['published_news'] = (s.get('published_news', []) + [{
         'title': title,
@@ -878,8 +878,11 @@ def handle_admin_message(msg,s):
         s['paused']=not s.get('paused',False); s['pause_until']=iso(now()+timedelta(days=3650)) if s['paused'] else ''
         send_dm(uid, 'Пауза включена: обычные посты остановлены.' if s['paused'] else 'Ручная пауза снята. Рекламная пауза, если действует, сохранится.', main_menu())
     elif cmd=='/suggest':
+        if (s.get('pending_ad') or {}).get('awaiting_content'):
+            send_dm(uid, 'Сначала закончи или отмени рекламный черновик командой /cancel, затем предложи новость.')
+            return
         s['pending_manual_post']={'user_id':uid,'awaiting_content':True}
-        send_dm(uid,'Пришли текст новости, ссылку и при необходимости фото/видео. Это пока только черновик; публикация появится после отдельного этапа проверки.', main_menu())
+        send_dm(uid,'Пришли следующим сообщением текст новости, ссылку или фото/видео с подписью.\nМатериал попадёт в очередь и не опубликуется без твоего подтверждения.\n/cancel — отмена.', main_menu())
     elif cmd=='/newsqueue':
         send_dm(uid,'Очередь проверки новостей пока будет добавлена следующим этапом. Сейчас можно управлять рекламой и статусом кнопками.', main_menu())
     elif cmd=='/ads':

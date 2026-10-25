@@ -169,7 +169,7 @@ def remove_repeated_lead(headline, body):
     body = clean(body)
     if not body:
         return ''
-    sentences = re.split(r'(?<=[.!?…])\\s+', body, maxsplit=1)
+    sentences = re.split(r'(?<=[.!?…])\s+', body, maxsplit=1)
     first = sentences[0].strip()
     h_words = set(normalized_title(headline).split())
     f_words = set(normalized_title(first).split())
@@ -259,7 +259,7 @@ def commons_image(query):
 
 def split_html_text(text, limit=3900):
     """Split HTML-mode Telegram messages by paragraph then words, never silently truncate."""
-    blocks = [p.strip() for p in re.split(r'\\n\\s*\\n', text.strip()) if p.strip()]
+    blocks = [p.strip() for p in re.split(r'\n\s*\n', text.strip()) if p.strip()]
     chunks, current = [], ''
     for block in blocks:
         pieces = [block]
@@ -276,7 +276,7 @@ def split_html_text(text, limit=3900):
             if piece:
                 pieces.append(piece)
         for piece in pieces:
-            candidate = piece if not current else current + '\\n\\n' + piece
+            candidate = piece if not current else current + '\n\n' + piece
             if len(candidate) > limit and current:
                 chunks.append(current)
                 current = piece
@@ -293,13 +293,13 @@ def post_with_image(text, image_url=None, illustration=False):
     if not text.strip():
         return None
 
-    paragraphs = [p.strip() for p in re.split(r'\\n\\s*\\n', text.strip()) if p.strip()]
+    paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text.strip()) if p.strip()]
     caption_parts = []
     remaining = []
     caption_limit = 850
 
     for index, paragraph in enumerate(paragraphs):
-        candidate = paragraph if not caption_parts else '\\n\\n'.join(caption_parts + [paragraph])
+        candidate = paragraph if not caption_parts else '\n\n'.join(caption_parts + [paragraph])
         if len(candidate) <= caption_limit:
             caption_parts.append(paragraph)
         else:
@@ -319,14 +319,14 @@ def post_with_image(text, image_url=None, illustration=False):
         caption_parts = [caption] if caption else []
         remaining = ([' '.join(tail)] if tail else []) + paragraphs[1:]
 
-    caption = '\\n\\n'.join(caption_parts)
-    full_body = '\\n\\n'.join(remaining)
+    caption = '\n\n'.join(caption_parts)
+    full_body = '\n\n'.join(remaining)
     if illustration:
         label = '📷 Изображение — иллюстрация'
         if len(caption) + len(label) + 2 <= 1024:
-            caption = (caption + '\\n\\n' + label).strip()
+            caption = (caption + '\n\n' + label).strip()
         else:
-            full_body = (label + ('\\n\\n' + full_body if full_body else '')).strip()
+            full_body = (label + ('\n\n' + full_body if full_body else '')).strip()
 
     result = None
     photo_sent = False
@@ -356,11 +356,11 @@ def translate(text):
         return ''
     # Keep requests modest; prefer paragraph/sentence boundaries and carry all chunks forward.
     chunks, current = [], ''
-    for paragraph in re.split(r'\\n+', text):
+    for paragraph in re.split(r'\n+', text):
         paragraph = paragraph.strip()
         if not paragraph:
             continue
-        sentences = re.split(r'(?<=[.!?。！？])\\s+', paragraph)
+        sentences = re.split(r'(?<=[.!?。！？])\s+', paragraph)
         for sentence in sentences:
             sentence = sentence.strip()
             if not sentence:
@@ -391,7 +391,7 @@ def translate(text):
             print('Translation error:', e)
             # Do not pretend that an untranslated source passage was successfully translated.
             return ''
-    return '\\n\\n'.join(part for part in translated if part).strip()
+    return '\n\n'.join(part for part in translated if part).strip()
 
 
 def footer(): return '\n\n' + FOOTER
@@ -492,9 +492,9 @@ def handle_admin_album(messages, s):
         'awaiting_content': False
     })
     s['pending_ad'] = pending
-    send_dm(uid, f'Черновик альбома готов: {len(media_items)} медиафайла.\\n'
-                 f'Проверь содержимое через /preview.\\nПубликуем: /publish\\n'
-                 f'Отложить: /schedule ГГГГ-ММ-ДД ЧЧ:ММ\\nОтменить: /cancel')
+    send_dm(uid, f'Черновик альбома готов: {len(media_items)} медиафайла.\n'
+                 f'Проверь содержимое через /preview.\nПубликуем: /publish\n'
+                 f'Отложить: /schedule ГГГГ-ММ-ДД ЧЧ:ММ\nОтменить: /cancel')
 
 
 def handle_admin_message(msg,s):
@@ -794,18 +794,18 @@ def routine_posts(s):
             summary = clean(item.get('summary', ''))
             if not title:
                 continue
-            sentences = re.split(r'(?<=[.!?])\\s+', summary)
+            sentences = re.split(r'(?<=[.!?])\s+', summary)
             brief = ' '.join(sentences[:2]).strip()
             if len(brief) > 320:
                 brief = brief[:317].rsplit(' ', 1)[0] + '…'
             lines.append('• <b>' + html.escape(title) + '</b>' +
-                         (('\\n' + html.escape(brief)) if brief else ''))
+                         (('\n' + html.escape(brief)) if brief else ''))
         if len(lines) > 1:
-            sections.append('\\n'.join(lines))
+            sections.append('\n'.join(lines))
     if tomorrow_warning:
-        sections.append('<b>На завтра</b>\\n' + html.escape(tomorrow_warning))
+        sections.append('<b>На завтра</b>\n' + html.escape(tomorrow_warning))
     sections.append('Источник прогноза: <a href="https://open-meteo.com/">Open-Meteo</a>' + footer())
-    text = '\\n\\n'.join(sections)
+    text = '\n\n'.join(sections)
     image = commons_image('Nha Trang Vietnam city at night street')
     post_with_image(text, image, illustration=bool(image))
     bump_today(s)
@@ -818,7 +818,7 @@ def weather_post(s, period):
     if slot_once(s, key) or count_today(s) >= 10 or is_paused(s):
         return
     n = now()
-    if period == 'morning' and not (n.hour == 8 and 0 <= n.minute < 10):
+    if period == 'morning' and not (n.hour == 6 and 30 <= n.minute < 40):
         return
     if period == 'evening' and not (n.hour == 18 and 0 <= n.minute < 10):
         return
@@ -842,11 +842,11 @@ def weather_post(s, period):
         if period == 'morning':
             title = 'Доброе утро, Нячанг! Погода на сегодня'
             extra = (f'Сейчас: {round(cur["temperature_2m"])}°C, {names.get(current_code, "переменная погода")} '
-                     f'{icons.get(current_code, "🌤️")} (ощущается как {round(cur["apparent_temperature"])}°C).\\n')
+                     f'{icons.get(current_code, "🌤️")} (ощущается как {round(cur["apparent_temperature"])}°C).\n')
         else:
             title = 'Погода в Нячанге: вечер и завтра'
             extra = (f'Сейчас: {round(cur["temperature_2m"])}°C. Завтра: '
-                     f'{names.get(code, "переменная погода")} {icons.get(code, "🌤️")}.\\n')
+                     f'{names.get(code, "переменная погода")} {icons.get(code, "🌤️")}.\n')
         if rain is not None and rain >= 60:
             advice = 'Вероятность осадков высокая — учитывай это при поездках и планах на улице.'
         elif rain is not None and rain >= 35:
@@ -856,10 +856,10 @@ def weather_post(s, period):
         else:
             advice = 'Проверь прогноз повторно, если собираешься надолго выходить на улицу.'
         text = (
-            ('☀️' if period == 'morning' else '🌆') + ' <b>' + title + '</b>\\n\\n' +
-            extra + f'Температура: {round(daily["temperature_2m_min"][i])}–{round(daily["temperature_2m_max"][i])}°C.\\n' +
-            'Вероятность осадков: ' + (f'{rain}%' if rain is not None else 'нет данных') + '.\\n\\n' +
-            advice + '\\n\\nИсточник прогноза: <a href="https://open-meteo.com/">Open-Meteo</a>' + footer()
+            ('☀️' if period == 'morning' else '🌆') + ' <b>' + title + '</b>\n\n' +
+            extra + f'Температура: {round(daily["temperature_2m_min"][i])}–{round(daily["temperature_2m_max"][i])}°C.\n' +
+            'Вероятность осадков: ' + (f'{rain}%' if rain is not None else 'нет данных') + '.\n\n' +
+            advice + '\n\nИсточник прогноза: <a href="https://open-meteo.com/">Open-Meteo</a>' + footer()
         )
         img = commons_image('Nha Trang Vietnam weather rainy season coastline' if (rain is not None and rain >= 35)
                             else 'Nha Trang Vietnam city coastal view')
@@ -895,7 +895,7 @@ def publish_news(s):
                         candidate = node.attrib.get('url') or node.attrib.get('href')
                         media_type = node.attrib.get('type', '')
                         if candidate and (media_type.startswith('image/') or
-                                          re.search(r'\\.(jpg|jpeg|png|webp)(\\?|$)', candidate, re.I)):
+                                          re.search(r'\.(jpg|jpeg|png|webp)(\?|$)', candidate, re.I)):
                             image_url = candidate
                             break
                 items.append((title, desc, link, image_url, is_urgent_news(title + ' ' + desc)))
@@ -915,7 +915,7 @@ def publish_news(s):
         if n.hour in (6, 7, 8, 11, 12, 17, 18, 22, 23) and not urgent:
             continue
 
-        translated_title = translate(re.split(r'\\s[-–|]\\s', title, maxsplit=1)[0])
+        translated_title = translate(re.split(r'\s[-–|]\s', title, maxsplit=1)[0])
         if not translated_title:
             continue
         headline = clean(translated_title)
@@ -925,14 +925,14 @@ def publish_news(s):
             # Only fetch a source page when RSS lacks usable detail; don't let one slow page stall a run.
             try:
                 page = get_url(link).decode('utf-8', 'ignore')
-                article_match = re.search(r'<article\\b[^>]*>(.*?)</article>', page, re.I | re.S)
+                article_match = re.search(r'<article\b[^>]*>(.*?)</article>', page, re.I | re.S)
                 if article_match:
                     raw_article = article_match.group(1)
                 else:
-                    paragraphs = re.findall(r'<p\\b[^>]*>(.*?)</p>', page, re.I | re.S)
-                    raw_article = '\\n'.join(paragraphs[:35])
-                raw_article = re.sub(r'<(script|style|noscript|svg)\\b[^>]*>.*?</\\1>', ' ', raw_article, flags=re.I | re.S)
-                raw_article = re.sub(r'</?(p|div|br|li|h[1-6])\\b[^>]*>', '\\n', raw_article, flags=re.I)
+                    paragraphs = re.findall(r'<p\b[^>]*>(.*?)</p>', page, re.I | re.S)
+                    raw_article = '\n'.join(paragraphs[:35])
+                raw_article = re.sub(r'<(script|style|noscript|svg)\b[^>]*>.*?</\1>', ' ', raw_article, flags=re.I | re.S)
+                raw_article = re.sub(r'</?(p|div|br|li|h[1-6])\b[^>]*>', '\n', raw_article, flags=re.I)
                 raw_article = clean(raw_article)
                 if len(raw_article) > len(desc) + 100:
                     translated_body = translate(raw_article)
@@ -959,7 +959,7 @@ def publish_news(s):
         if line:
             sections.append(line)
         sections.append(f'🔗 <a href="{html.escape(link, quote=True)}">Источник</a>' + footer())
-        news_text = '\\n\\n'.join(sections)
+        news_text = '\n\n'.join(sections)
         post_with_image(news_text, image_url, illustration=illustration)
         s['seen_links'] = (s.get('seen_links', []) + [link])[-1000:]
         s['seen_titles'] = (s.get('seen_titles', []) + [title])[-500:]

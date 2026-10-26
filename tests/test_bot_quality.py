@@ -446,6 +446,31 @@ class NewsQualityTests(unittest.TestCase):
         mark_mock.assert_called_once_with(state, "weather_morning")
 
 
+
+    def test_heavy_rain_forecast_selects_a_rainy_vietnam_photo_query(self):
+        current = datetime(2026, 10, 26, 8, 0, tzinfo=bot.TZ)
+        forecast = {
+            "current": {"temperature_2m": 28, "apparent_temperature": 32, "weather_code": 61},
+            "daily": {
+                "weather_code": [65, 82],
+                "temperature_2m_min": [25, 26],
+                "temperature_2m_max": [31, 30],
+                "precipitation_probability_max": [85, 90]
+            }
+        }
+        state = {"daily_counts": {}, "last_slots": {}, "published_news": []}
+        with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "slot_once", return_value=False), \
+             patch.object(bot, "count_today", return_value=0), \
+             patch.object(bot, "is_paused", return_value=False), \
+             patch.object(bot, "get_url", return_value=json.dumps(forecast).encode("utf-8")), \
+             patch.object(bot, "queue_review_item", return_value=True) as queue_mock, \
+             patch.object(bot, "mark_slot"):
+            bot.weather_post(state, "morning")
+        candidate = queue_mock.call_args.args[1]
+        self.assertIn("heavy rain", candidate["image_query"].casefold())
+        self.assertIn("Вероятность дождя высокая", candidate["body"])
+
     def test_google_hosted_thumbnails_are_rejected(self):
         self.assertIsNone(bot.normalize_image_url("https://encrypted-tbn0.gstatic.com/images?q=test"))
         self.assertIsNone(bot.normalize_image_url("https://news.google.com/images/photo.jpg"))
@@ -488,6 +513,27 @@ class NewsQualityTests(unittest.TestCase):
         publish_mock.assert_not_called()
         self.assertEqual(state["pending_news_review"]["id"], "rv-test")
 
+
+
+    def test_fixed_routine_publication_tolerates_subminute_scheduler_jitter(self):
+        planned = datetime(2026, 10, 26, 8, 0, 30, tzinfo=bot.TZ)
+        current = datetime(2026, 10, 26, 8, 0, 5, tzinfo=bot.TZ)
+        state = {
+            "pending_news_review": {
+                "id": "rv-weather",
+                "status": "pending_review",
+                "planned_at": planned.isoformat(),
+                "slot_key": "weather_morning"
+            },
+            "paused": False, "pause_until": "", "last_slots": {}
+        }
+        with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "is_paused", return_value=False), \
+             patch.object(bot, "publish_review_item", return_value={"message_id": 1}) as publish_mock, \
+             patch.object(bot, "mark_slot") as mark_mock:
+            bot.process_news_review(state)
+        publish_mock.assert_called_once_with(state, state["pending_news_review"])
+        mark_mock.assert_called_once_with(state, "weather_morning")
 
     def test_due_review_publishes_once_and_updates_published_news_history(self):
         uid = 1335496436

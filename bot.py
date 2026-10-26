@@ -626,24 +626,34 @@ def publish_review_item(s, item):
     return result
 
 
+
 def process_news_review(s):
-    """Publish a queued item only when its planned time arrives, unless an admin rejects it."""
+    """Publish a queued item at its planned time, tolerating sub-minute cron jitter for fixed rubrics."""
     item = s.get('pending_news_review') or {}
     if not item or item.get('status') != 'pending_review':
         return
     planned = parse_dt_strict(item.get('planned_at'))
     if not planned:
-        # Invalid queued timestamps are never interpreted as due.
         print('Review item has an invalid planned timestamp; leaving it for admin review:', item.get('id'))
         return
-    if now() < planned:
+
+    # Fixed daily rubrics are checked only every five minutes by GitHub Actions.
+    # Permit at most 60 seconds of schedule jitter so a :00 post does not slip to :05
+    # merely because the preview was created a few seconds after the previous cron tick.
+    scheduled_slots = {'review_morning', 'weather_morning', 'weather_evening', 'review_night'}
+    tolerance = timedelta(seconds=60) if item.get('slot_key') in scheduled_slots else timedelta(0)
+    if now() + tolerance < planned:
         return
+
     if is_paused(s):
         later = top_pause_until(s)
         planned = later if later > now() else now() + timedelta(minutes=5)
         item['planned_at'] = iso(planned)
         for admin_id in sorted(ADMIN_USER_IDS):
-            send_dm(admin_id, f'⏸ Материал <code>{html.escape(item.get("id", ""))}</code> сдвинут на {planned.strftime("%d.%m %H:%M")}: сейчас действует пауза.')
+            try:
+                send_dm(admin_id, f'⏸ Материал <code>{html.escape(item.get("id", ""))}</code> сдвинут на {planned.strftime("%d.%m %H:%M")}: сейчас действует пауза.')
+            except Exception as e:
+                print('Review pause notice failed:', type(e).__name__)
         return
     try:
         publish_review_item(s, item)
@@ -657,9 +667,10 @@ def process_news_review(s):
         if not item.get('publish_error_notified'):
             item['publish_error_notified'] = True
             for admin_id in sorted(ADMIN_USER_IDS):
-                send_dm(admin_id, f'⚠️ Не удалось опубликовать материал <code>{html.escape(item.get("id", ""))}</code>. Черновик сохранён, повторная попытка — через 5 минут.')
-
-
+                try:
+                    send_dm(admin_id, f'⚠️ Не удалось опубликовать материал <code>{html.escape(item.get("id", ""))}</code>. Черновик сохранён, повторная попытка — через 5 минут.')
+                except Exception as notice_error:
+                    print('Review error notice failed:', type(notice_error).__name__)
 
 def is_duplicate_news(s, title, link):
     norm = normalized_title(title)
@@ -2035,8 +2046,9 @@ def routine_posts(s):
         return
 
 
+
 def weather_post(s, period):
-    """Prepare the current or next-day forecast 15 minutes before its scheduled slot."""
+    """Prepare the current or next-day forecast for private review 15 minutes before the slot."""
     key = 'weather_' + period
     if slot_once(s, key) or count_today(s) >= 10 or is_paused(s) or s.get('pending_news_review'):
         return
@@ -2088,6 +2100,7 @@ def weather_post(s, period):
         rain_text = f'Вероятность осадков — {rain}%.' if rain is not None else 'Вероятность осадков сейчас недоступна.'
         if rain is not None and rain >= 60:
             advice = 'Вероятность дождя высокая — учитывай это при поездках и планах на улице.'
+            image_query = 'Nha Trang Vietnam heavy rain wet streets tropical downpour'
         elif rain is not None and rain >= 35:
             advice = 'Возможен дождь, поэтому проверь прогноз перед выходом.'
             image_query = 'Vietnam Nha Trang rainy weather wet street tropical rain'
@@ -2111,7 +2124,7 @@ def weather_post(s, period):
             snippets = []
             for entry in recent[-3:]:
                 summary = clean_multiline(entry.get('summary', ''))
-                first_sentence = re.split(r'(?<=[.!?])\\s+', summary.replace('\\n', ' '), maxsplit=1)[0]
+                first_sentence = re.split(r'(?<=[.!?])\s+', summary.replace('\n', ' '), maxsplit=1)[0]
                 if len(first_sentence) > 220:
                     first_sentence = first_sentence[:217].rsplit(' ', 1)[0] + '…'
                 if first_sentence and first_sentence not in snippets:
@@ -2119,7 +2132,7 @@ def weather_post(s, period):
             if snippets:
                 parts.append('За последние сутки: ' + ' '.join(snippets))
         parts.append('👍 — прогноз полезен; ❤️ — следим за погодой вместе.')
-        body = '\\n\\n'.join(parts)
+        body = '\n\n'.join(parts)
 
         queued = queue_review_item(s, {
             'kind': 'weather_' + period,
@@ -2134,7 +2147,6 @@ def weather_post(s, period):
             mark_slot(s, key)
     except Exception as e:
         print('Weather error; no unverified weather message was queued:', type(e).__name__)
-
 
 def publish_news(s):
     """Find the next useful local story and queue it for a 15-minute private review."""

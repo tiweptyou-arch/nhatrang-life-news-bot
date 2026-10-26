@@ -407,6 +407,7 @@ def news_image_query(title, body=''):
     return local + ' city street public services'
 
 
+
 def review_keyboard(item_id):
     """Inline controls for the private review preview."""
     return {'inline_keyboard': [
@@ -414,9 +415,11 @@ def review_keyboard(item_id):
             {'text': '✅ Опубликовать сейчас', 'callback_data': f'review:publish:{item_id}'},
             {'text': '✏️ Изменить текст', 'callback_data': f'review:edit:{item_id}'}
         ],
-        [{'text': '🗑 Отклонить', 'callback_data': f'review:reject:{item_id}'}]
+        [
+            {'text': '⏰ Изменить время', 'callback_data': f'review:time:{item_id}'},
+            {'text': '🗑 Отклонить', 'callback_data': f'review:reject:{item_id}'}
+        ]
     ]}
-
 
 def review_post_text(item):
     """Build the exact public post from plain text; keep article links out of the message."""
@@ -445,6 +448,19 @@ def delete_review_previews(item):
             print('Review preview cleanup skipped:', type(e).__name__)
 
 
+
+def review_status_text(item):
+    planned = parse_dt_strict(item.get('planned_at')) or (now() + timedelta(minutes=15))
+    return (
+        f'<b>Черновик: {html.escape(item.get("kind_label", "новость"))}</b>\n'
+        f'План публикации: <b>{planned.strftime("%d.%m.%Y в %H:%M")}</b> по времени Нячанга.\n\n'
+        'Если ничего не менять, бот опубликует материал в указанное время. '
+        'Можно изменить текст, изменить время, опубликовать сразу или отклонить. '
+        'Не удаляй предпросмотр вручную вместо отклонения: Telegram не сообщает боту об удалении сообщения.'
+    )
+
+
+
 def send_review_preview(item):
     """Send a private photo preview and review controls to every configured admin."""
     admins = sorted(ADMIN_USER_IDS)
@@ -453,16 +469,12 @@ def send_review_preview(item):
         return False
 
     item.setdefault('preview_messages', [])
+    item.setdefault('review_status_messages', [])
     item['image_file_id'] = item.get('image_file_id') or ''
     image_fallback_attempted = False
 
     for admin_id in admins:
-        if item.get('image_file_id'):
-            photo = item['image_file_id']
-        else:
-            photo = normalize_image_url(item.get('image_url') or '')
-            if not photo:
-                photo = ''
+        photo = item['image_file_id'] or normalize_image_url(item.get('image_url') or '') or ''
         while True:
             if not photo:
                 if image_fallback_attempted:
@@ -478,7 +490,7 @@ def send_review_preview(item):
                     item['image_url'] = fallback
                     item['image_credit_html'] = ''
                 item['image_file_id'] = ''
-                photo = normalize_image_url(item.get('image_url') or '')
+                photo = normalize_image_url(item.get('image_url') or '') or ''
                 continue
 
             full_text = review_post_text(item)
@@ -506,19 +518,11 @@ def send_review_preview(item):
                         item['preview_messages'].append({
                             'chat_id': admin_id, 'message_id': continued['message_id']
                         })
-                planned = parse_dt_strict(item.get('planned_at')) or (now() + timedelta(minutes=15))
-                status_text = (
-                    f'<b>Черновик: {html.escape(item.get("kind_label", "новость"))}</b>\n'
-                    f'План публикации: <b>{planned.strftime("%d.%m.%Y в %H:%M")}</b> по времени Нячанга.\n\n'
-                    'Если ничего не менять, бот опубликует этот материал в указанное время. '
-                    'Можно изменить текст, опубликовать сразу или отклонить. '
-                    'Не удаляй предпросмотр вручную вместо отклонения: Telegram не сообщает боту об удалении сообщения.'
-                )
-                status = send_dm(admin_id, status_text, review_keyboard(item['id']))
+                status = send_dm(admin_id, review_status_text(item), review_keyboard(item['id']))
                 if status and status.get('message_id'):
-                    item['preview_messages'].append({
-                        'chat_id': admin_id, 'message_id': status['message_id']
-                    })
+                    message_ref = {'chat_id': admin_id, 'message_id': status['message_id']}
+                    item['preview_messages'].append(message_ref)
+                    item['review_status_messages'].append(message_ref)
                 break
             except Exception as e:
                 print('Review photo preview failed:', type(e).__name__)
@@ -527,7 +531,6 @@ def send_review_preview(item):
                 continue
 
     return bool(item.get('preview_messages')) and bool(item.get('image_file_id'))
-
 
 def queue_review_item(s, item, planned_at=None, slot_key=None):
     """Persist one private review candidate; publication waits until its planned time."""
@@ -1337,6 +1340,55 @@ def handle_admin_message(msg, s):
     # Review editing is isolated from the existing advertising/manual-post draft flows.
     editing = s.get('review_editing') or {}
     if editing and editing.get('user_id') == uid:
+        if editing.get('mode') == 'time':
+            if text.casefold() in ('/cancelreview', '/cancel'):
+                s['review_editing'] = {}
+                send_dm(uid, 'Изменение времени отменено. Черновик остаётся в очереди без изменений.')
+                return
+            item = s.get('pending_news_review') or {}
+            if not item or str(item.get('id')) != str(editing.get('id')):
+                s['review_editing'] = {}
+                send_dm(uid, 'Этот черновик уже опубликован или отклонён.')
+                return
+            try:
+                if re.fullmatch(r'\d{1,2}:\d{2}', text):
+                    hh, mm = map(int, text.split(':'))
+                    planned = now().replace(hour=hh, minute=mm, second=0, microsecond=0)
+                    if planned <= now():
+                        planned += timedelta(days=1)
+                else:
+                    planned = datetime.strptime(text, '%Y-%m-%d %H:%M').replace(tzinfo=TZ)
+            except ValueError:
+                send_dm(uid, 'Формат времени: <code>HH:MM</code> или <code>YYYY-MM-DD HH:MM</code>. Для отмены: /cancelreview')
+                return
+            if planned < now() + timedelta(minutes=5):
+                send_dm(uid, 'Новое время должно быть минимум через 5 минут, чтобы бот успел подготовить публикацию.')
+                return
+            item['planned_at'] = iso(planned)
+            item['time_edited_at'] = iso(now())
+            item['time_edited_by'] = uid
+            s['review_editing'] = {}
+            updated = False
+            for ref in item.get('review_status_messages', []):
+                try:
+                    api('editMessageText', {
+                        'chat_id': ref['chat_id'],
+                        'message_id': ref['message_id'],
+                        'text': review_status_text(item),
+                        'parse_mode': 'HTML',
+                        'reply_markup': json.dumps(review_keyboard(item['id']), ensure_ascii=False)
+                    })
+                    updated = True
+                except Exception as e:
+                    print('Could not update review status message:', type(e).__name__)
+            if not updated:
+                status = send_dm(uid, review_status_text(item), review_keyboard(item['id']))
+                if status and status.get('message_id'):
+                    ref = {'chat_id': uid, 'message_id': status['message_id']}
+                    item.setdefault('preview_messages', []).append(ref)
+                    item.setdefault('review_status_messages', []).append(ref)
+            send_dm(uid, f'⏰ Время публикации изменено на <b>{planned.strftime("%d.%m.%Y %H:%M")}</b> (Нячанг).')
+            return
         if text.casefold() in ('/cancelreview', '/cancel'):
             s['review_editing'] = {}
             send_dm(uid, 'Редактирование отменено. Текущий черновик остаётся в очереди без изменений.')
@@ -1372,6 +1424,7 @@ def handle_admin_message(msg, s):
         item['planned_at'] = iso(now() + timedelta(minutes=15))
         delete_review_previews(item)
         item['preview_messages'] = []
+        item['review_status_messages'] = []
         s['review_editing'] = {}
         if send_review_preview(item):
             s['pending_news_review'] = item
@@ -1718,8 +1771,11 @@ def handle_callback(q, s):
             if not item or str(item.get('id')) != target:
                 send_dm(uid, 'Этот черновик уже опубликован, отклонён или заменён.')
             elif action == 'edit':
-                s['review_editing'] = {'id': target, 'user_id': uid, 'started_at': iso(now())}
-                send_dm(uid, 'Отправь следующим сообщением новый текст публикации. Если нужно заменить изображение — отправь фото с новой подписью.\\n\\nТаймер публикации перезапустится на 15 минут после изменения. Для отмены: /cancelreview')
+                s['review_editing'] = {'id': target, 'user_id': uid, 'started_at': iso(now()), 'mode': 'text'}
+                send_dm(uid, 'Отправь следующим сообщением новый текст публикации. Если нужно заменить изображение — отправь фото с новой подписью.\n\nТаймер публикации перезапустится на 15 минут после изменения. Для отмены: /cancelreview')
+            elif action == 'time':
+                s['review_editing'] = {'id': target, 'user_id': uid, 'started_at': iso(now()), 'mode': 'time'}
+                send_dm(uid, 'Отправь новое время в формате <code>HH:MM</code> или <code>YYYY-MM-DD HH:MM</code>. До публикации должно оставаться минимум 5 минут. Для отмены: /cancelreview')
             elif action == 'reject':
                 item['status'] = 'rejected'
                 item['rejected_at'] = iso(now())

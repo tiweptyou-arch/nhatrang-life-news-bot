@@ -645,6 +645,55 @@ class NewsQualityTests(unittest.TestCase):
         self.assertIn("11:45", api_mock.call_args.args[1]["text"])
         self.assertIn("изменено", dm_mock.call_args.args[1])
 
+
+    def test_morning_routine_catches_up_when_github_schedule_runs_late(self):
+        current = datetime(2026, 10, 26, 6, 42, tzinfo=bot.TZ)
+        state = {"published_news": [], "daily_counts": {}, "last_slots": {}, "pending_news_review": {}}
+        queued = {}
+        def fake_queue(s, item, planned_at=None, slot_key=None):
+            queued.update({"item": item, "planned_at": planned_at, "slot_key": slot_key})
+            return True
+        with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "is_paused", return_value=False), \
+             patch.object(bot, "count_today", return_value=0), \
+             patch.object(bot, "slot_once", return_value=False), \
+             patch.object(bot, "queue_review_item", side_effect=fake_queue), \
+             patch.object(bot, "mark_slot") as mark_mock:
+            bot.routine_posts(state)
+        self.assertEqual(queued["slot_key"], "review_morning")
+        self.assertIn("Доброе утро", queued["item"]["body"])
+        self.assertEqual(queued["planned_at"], current + timedelta(minutes=15))
+        mark_mock.assert_called_once_with(state, "review_morning")
+
+    def test_morning_weather_catches_up_after_a_delayed_workflow_run(self):
+        current = datetime(2026, 10, 26, 8, 42, tzinfo=bot.TZ)
+        state = {"published_news": [], "daily_counts": {}, "last_slots": {}, "pending_news_review": {}}
+        forecast = {
+            "current": {"temperature_2m": 28, "apparent_temperature": 32, "weather_code": 2},
+            "daily": {
+                "weather_code": [2, 3],
+                "temperature_2m_min": [25, 26],
+                "temperature_2m_max": [31, 30],
+                "precipitation_probability_max": [20, 55]
+            }
+        }
+        queued = {}
+        def fake_queue(s, item, planned_at=None, slot_key=None):
+            queued.update({"item": item, "planned_at": planned_at, "slot_key": slot_key})
+            return True
+        with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "slot_once", return_value=False), \
+             patch.object(bot, "count_today", return_value=0), \
+             patch.object(bot, "is_paused", return_value=False), \
+             patch.object(bot, "get_url", return_value=json.dumps(forecast).encode("utf-8")), \
+             patch.object(bot, "queue_review_item", side_effect=fake_queue), \
+             patch.object(bot, "mark_slot") as mark_mock:
+            bot.weather_post(state, "morning")
+        self.assertEqual(queued["slot_key"], "weather_morning")
+        self.assertIn("Сейчас в Нячанге", queued["item"]["body"])
+        self.assertEqual(queued["planned_at"], current + timedelta(minutes=15))
+        mark_mock.assert_called_once_with(state, "weather_morning")
+
     def test_limit_news_body_is_concise_and_removes_urls(self):
         source = ("Первая важная информация для жителей города. " * 30) + " https://publisher.example/story "
         result = bot.limit_news_body(source, max_chars=600)

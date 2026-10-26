@@ -87,7 +87,7 @@
     "Công an phường Đô Vinh nhận thư cảm ơn về công tác bảo đảm an ninh, trật tự Lễ hội Katê năm 2026 - Công An Tỉnh Khánh Hòa"
   ],
   "manual_posts": [],
-  "last_update_id": 420020173,
+  "last_update_id": 420020174,
   "last_weather_date": "2026-10-24",
   "last_weather_morning_date": "2026-10-24",
   "last_weather_evening_date": "2026-10-24",
@@ -99,8 +99,8 @@
     "text": "📊 Статус"
   },
   "ads": [],
-  "paused": false,
-  "pause_until": "",
+  "paused": true,
+  "pause_until": "2036-10-24T01:03:37.196440+07:00",
   "daily_counts": {
     "2026-10-24": 4,
     "2026-10-25": 10,

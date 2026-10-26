@@ -1973,7 +1973,7 @@ def routine_posts(s):
             continue
         target = n.replace(hour=slot['hour'], minute=slot['minute'], second=0, microsecond=0)
         start = target - timedelta(minutes=15)
-        end = target + timedelta(minutes=10)
+        end = target + timedelta(minutes=75)
         if not (start <= n <= end):
             continue
 
@@ -2032,6 +2032,7 @@ def routine_posts(s):
             parts.append('Перед сном выбери реакцию: ❤️ — день удался; 🙏 — завтра хочется спокойствия; 🤣 — сегодня было над чем посмеяться.')
             body = '\\n\\n'.join(parts)
 
+        planned_at = target if n < target else n + timedelta(minutes=15)
         queued = queue_review_item(s, {
             'kind': slot['kind'],
             'kind_label': slot['kind_label'],
@@ -2040,7 +2041,7 @@ def routine_posts(s):
             'reaction_line': '',
             'image_query': slot['image_query'],
             'urgent': False
-        }, planned_at=target, slot_key=key)
+        }, planned_at=planned_at, slot_key=key)
         if queued:
             mark_slot(s, key)
         return
@@ -2061,7 +2062,7 @@ def weather_post(s, period):
         image_query = 'Nha Trang Vietnam coastal city evening weather seaside'
     else:
         return
-    if not (target - timedelta(minutes=15) <= n <= target + timedelta(minutes=10)):
+    if not (target - timedelta(minutes=15) <= n <= target + timedelta(minutes=75)):
         return
 
     url = ('https://api.open-meteo.com/v1/forecast?latitude=12.2388&longitude=109.1967'
@@ -2134,6 +2135,7 @@ def weather_post(s, period):
         parts.append('👍 — прогноз полезен; ❤️ — следим за погодой вместе.')
         body = '\n\n'.join(parts)
 
+        planned_at = target if n < target else n + timedelta(minutes=15)
         queued = queue_review_item(s, {
             'kind': 'weather_' + period,
             'kind_label': 'Погода на сегодня' if period == 'morning' else 'Погода на завтра',
@@ -2142,7 +2144,7 @@ def weather_post(s, period):
             'reaction_line': '',
             'image_query': image_query,
             'urgent': False
-        }, planned_at=target, slot_key=key)
+        }, planned_at=planned_at, slot_key=key)
         if queued:
             mark_slot(s, key)
     except Exception as e:

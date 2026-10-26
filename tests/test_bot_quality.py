@@ -602,6 +602,53 @@ class NewsQualityTests(unittest.TestCase):
         self.assertEqual(bot.parse_dt_strict(item["planned_at"]), current + timedelta(minutes=15))
         self.assertEqual(state["review_editing"], {})
 
+
+    def test_review_time_button_sets_time_editing_mode(self):
+        uid = 1335496436
+        item = {
+            "id": "rv-time-1", "status": "pending_review",
+            "planned_at": bot.iso(datetime(2026, 10, 26, 11, 0, tzinfo=bot.TZ))
+        }
+        state = {"pending_news_review": item, "review_editing": {}}
+        callback = {
+            "id": "callback-time-1",
+            "from": {"id": uid},
+            "message": {"chat": {"id": uid}},
+            "data": "review:time:rv-time-1"
+        }
+        with patch.object(bot, "now", return_value=datetime(2026, 10, 26, 10, 0, tzinfo=bot.TZ)), \
+             patch.object(bot, "send_dm") as dm_mock, \
+             patch.object(bot, "api"):
+            bot.handle_callback(callback, state)
+        self.assertEqual(state["review_editing"]["mode"], "time")
+        self.assertEqual(state["review_editing"]["id"], "rv-time-1")
+        self.assertIn("HH:MM", dm_mock.call_args.args[1])
+
+    def test_review_time_edit_updates_saved_schedule_and_status_message(self):
+        uid = 1335496436
+        current = datetime(2026, 10, 26, 10, 0, tzinfo=bot.TZ)
+        item = {
+            "id": "rv-time-2", "kind": "news", "kind_label": "Новость Нячанга",
+            "body": "A useful article body.",
+            "planned_at": bot.iso(current + timedelta(minutes=15)),
+            "preview_messages": [{"chat_id": uid, "message_id": 222}],
+            "review_status_messages": [{"chat_id": uid, "message_id": 223}]
+        }
+        state = {"pending_news_review": item, "review_editing": {
+            "id": "rv-time-2", "user_id": str(uid), "mode": "time"
+        }}
+        message = {"from": {"id": uid}, "chat": {"id": uid}, "text": "11:45"}
+        with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "api") as api_mock, \
+             patch.object(bot, "send_dm") as dm_mock:
+            bot.handle_admin_message(message, state)
+        self.assertEqual(bot.parse_dt_strict(item["planned_at"]), current.replace(hour=11, minute=45))
+        self.assertEqual(state["review_editing"], {})
+        self.assertEqual(api_mock.call_args.args[0], "editMessageText")
+        self.assertEqual(api_mock.call_args.args[1]["message_id"], 223)
+        self.assertIn("11:45", api_mock.call_args.args[1]["text"])
+        self.assertIn("изменено", dm_mock.call_args.args[1])
+
     def test_limit_news_body_is_concise_and_removes_urls(self):
         source = ("Первая важная информация для жителей города. " * 30) + " https://publisher.example/story "
         result = bot.limit_news_body(source, max_chars=600)

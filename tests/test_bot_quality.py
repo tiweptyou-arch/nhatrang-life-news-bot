@@ -1424,5 +1424,67 @@ class NewsQualityTests(unittest.TestCase):
         delete_mock.assert_not_called()
 
 
+
+    def test_failed_news_preview_is_retried_before_any_timer_can_publish(self):
+        current = datetime(2026, 10, 27, 10, 30, tzinfo=bot.TZ)
+        item = {
+            "id": "rv-needs-preview", "kind": "news", "status": "needs_preview",
+            "headline": "Изменение движения в Нячанге",
+            "title": "Изменение движения в Нячанге",
+            "body": "Временное изменение движения затронет жителей города. Проверьте маршрут перед выездом.",
+            "image_url": "https://cdn.publisher.example/road.jpg",
+            "next_preview_retry_at": (current - timedelta(minutes=1)).isoformat(),
+            "planned_at": (current + timedelta(minutes=15)).isoformat(),
+            "preview_messages": [], "review_status_messages": [],
+        }
+        state = {"pending_news_review": item, "review_queue": [], "daily_counts": {}, "paused": False}
+        with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "send_review_preview", return_value=True) as preview_mock, \
+             patch.object(bot, "send_dm"):
+            bot.process_news_review(state)
+        preview_mock.assert_called_once_with(item)
+        self.assertEqual(item["status"], "pending_review")
+        self.assertEqual(item["planned_at"], (current + timedelta(minutes=15)).isoformat())
+        self.assertNotIn("next_preview_retry_at", item)
+
+    def test_ad_draft_gets_private_preview_and_fifteen_minute_timer_automatically(self):
+        current = datetime(2026, 10, 27, 10, 30, tzinfo=bot.TZ)
+        uid = "111111111"
+        draft = {
+            "format": "1/24", "top_hours": 1, "life_hours": 24,
+            "created_by": uid, "awaiting_content": False, "text": "A useful local service for Nha Trang residents."
+        }
+        state = {"pending_ad": draft, "ads": [], "daily_counts": {}}
+        sent = []
+        def fake_send(user_id, text, markup=None):
+            sent.append((user_id, text, markup))
+            return {"message_id": 100 + len(sent), "chat": {"id": user_id}}
+        with patch.object(bot, "now", return_value=current), patch.object(bot, "send_dm", side_effect=fake_send):
+            result = bot.show_ad_preview(state, uid)
+        self.assertTrue(result)
+        self.assertEqual(draft["review_status"], "pending_review")
+        self.assertEqual(draft["previewed_at"], current.isoformat())
+        self.assertEqual(draft["review_due_at"], (current + timedelta(minutes=15)).isoformat())
+        self.assertEqual(draft["review_version"], 1)
+        self.assertEqual(sent[-1][2]["inline_keyboard"][0][0]["callback_data"],
+                         f'adreview:publish:{draft["draft_id"]}:1')
+
+    def test_ad_preview_delivery_failure_does_not_start_publication_timer(self):
+        current = datetime(2026, 10, 27, 10, 30, tzinfo=bot.TZ)
+        uid = "111111111"
+        draft = {
+            "format": "1/24", "top_hours": 1, "life_hours": 24,
+            "created_by": uid, "awaiting_content": False, "text": "A useful local service for Nha Trang residents."
+        }
+        state = {"pending_ad": draft, "ads": [], "daily_counts": {}}
+        with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "send_dm", return_value=None):
+            result = bot.show_ad_preview(state, uid)
+        self.assertFalse(result)
+        self.assertNotIn("previewed_at", draft)
+        self.assertNotIn("review_due_at", draft)
+        self.assertNotIn("review_status", draft)
+
+
 if __name__ == "__main__":
     unittest.main()

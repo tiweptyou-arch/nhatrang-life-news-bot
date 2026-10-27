@@ -960,6 +960,7 @@ def publish_review_item(s, item):
             'urgent': bool(item.get('urgent'))
         }])[-100:]
         s['last_news_hour'] = now().strftime('%Y-%m-%d-%H')
+        s['last_news_published_at'] = timestamp
     bump_today(s)
     delete_review_previews(item)
     s['pending_news_review'] = {}
@@ -1408,7 +1409,8 @@ def editorial_score_parts(title, body, source_url, published_at, urgent=False, d
     now_dt = now_dt or now()
     text = clean((title or '') + ' ' + (body or '')).casefold()
     local_terms = ('nha trang', 'nhatrang', 'cam ranh', 'diên khánh', 'dien khanh', 'vạn ninh', 'van ninh', 'khánh hòa', 'khanh hoa', 'trường sa', 'truong sa')
-    local = 5 if any(term in text for term in local_terms) else 3
+    nationwide_life_terms = ('vietnam', 'visa', 'immigration', 'residence', 'resident', 'foreigner', 'banking', 'bank', 'tax', 'healthcare', 'flight', 'airport', 'internet', 'telecom', 'insurance', 'passport', 'work permit', 'temporary residence', 'e-visa', 'электронная виза', 'виза', 'миграц', 'пребыван', 'страхован', 'авиарейс', 'аэропорт', 'банк', 'мобильн', 'интернет', 'налог', 'медицин')
+    local = 5 if any(term in text for term in local_terms) else (4 if any(term in text for term in nationwide_life_terms) else 3)
     practical = 5 if urgent or is_urgent_news(text) else (
         4 if any(contains_term(text, term) for term in PRACTICAL_NEWS_TERMS) else 2
     )
@@ -2356,10 +2358,24 @@ def handle_admin_message(msg, s):
         send_dm(uid, '\n'.join(lines), main_menu())
 
     elif cmd=='/status':
-        until=top_pause_until(s)
+        until = top_pause_until(s)
         pending = s.get('pending_news_review') or {}
-        review_status = f'\nЧерновик новости: {pending.get("planned_at", "на проверке")}' if pending else '\nЧерновик новости: нет'
-        send_dm(uid, f'<b>Статус</b>\nВремя Нячанга: {now().strftime("%d.%m.%Y %H:%M:%S")}\nПостов сегодня: {count_today(s)}/10\nНовости: {"на паузе" if is_paused(s) else "разрешены"}\nОкно без новостей до: {until.strftime("%d.%m %H:%M") if until>now() else "нет"}\nАктивных реклам: {sum(1 for a in s["ads"] if not a.get("deleted") and a.get("message_id"))}{review_status}')
+        review_status = (
+            f'\nЧерновик: {html.escape(pending.get("headline") or pending.get("title") or "без заголовка")}'
+            f' · срок: {html.escape(str(pending.get("planned_at", "не задан")))}'
+        ) if pending else '\nАктивного предпросмотра нет'
+        send_dm(uid,
+            f'<b>Статус бота</b>\n'
+            f'Время Нячанга: {now().strftime("%d.%m.%Y %H:%M:%S")}\n'
+            f'Постов сегодня: {count_today(s)}/{MAX_DAILY_POSTS}\n'
+            f'Обычных новостей за день: {count_news_pipeline(s)}/{MAX_DAILY_NEWS}\n'
+            f'Материалов в очереди: {len(s.get("review_queue", []))}{review_status}\n'
+            f'Новости: {"на паузе" if is_paused(s) else "разрешены"}\n'
+            f'Окно рекламной паузы до: {until.strftime("%d.%m %H:%M") if until > now() else "нет"}\n'
+            f'Активных реклам: {sum(1 for a in s["ads"] if not a.get("deleted") and a.get("message_id"))}',
+            main_menu())
+
+
     else:
         if text.startswith('/'):
             send_dm(uid,'Неизвестная команда. Напиши /menu.')
@@ -3351,13 +3367,15 @@ def publish_news(s):
             score = score_parts['score']
             category = 'safety' if urgent_candidate else 'life'
             selected_query = news_image_query(headline, body)
-            reaction = reaction_line(title + ' ' + headline + ' ' + body)
+            reaction = '' if urgent_candidate else reaction_line(title + ' ' + headline + ' ' + body)
             why_it_matters = 'Локальная информация, которая может повлиять на повседневные планы.'
             uncertainties = []
 
-        if score < 75:
+        if (score < 75 or score_parts['local_relevance'] < 4 or score_parts['practical_usefulness'] < 3
+                or score_parts['source_confidence'] < 3 or score_parts['freshness_confidence'] < 2
+                or score_parts['novelty'] < 3):
             stats['low_score'] += 1
-            print('Skipping low-value candidate:', headline[:120], 'score=', score)
+            print('Skipping low-value candidate:', headline[:120], 'score=', score, 'parts=', score_parts)
             continue
         if len(body) < 100 or len(body.split()) < 18:
             stats['short_body'] += 1

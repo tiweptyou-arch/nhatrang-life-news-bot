@@ -2639,145 +2639,340 @@ def weather_post(s, period):
     except Exception as e:
         print('Weather error; no unverified weather message was queued:', type(e).__name__)
 
+def count_news_pipeline(s):
+    """Count today's published local-news posts plus active/queued news drafts."""
+    today = now().date().isoformat()
+    published = sum(
+        1 for item in s.get('published_news', [])
+        if str(item.get('published_at', '')).startswith(today)
+    )
+    pending = [s.get('pending_news_review') or {}] + list(s.get('review_queue') or [])
+    queued = sum(
+        1 for item in pending
+        if item and item.get('kind') == 'news' and item.get('status') not in ('rejected', 'published')
+    )
+    return published + queued
+
+
+def has_pending_regular_news(s):
+    pending = [s.get('pending_news_review') or {}] + list(s.get('review_queue') or [])
+    return any(item and item.get('kind') == 'news' and not item.get('urgent') for item in pending)
+
+
+def source_date_rejection_reason(published_at, current_time=None, urgent=False):
+    if published_at is None:
+        return 'missing'
+    current_time = current_time or now()
+    age = current_time - published_at
+    if age < -timedelta(minutes=15):
+        return 'future'
+    maximum_age = timedelta(hours=24 if urgent else 72)
+    if age > maximum_age:
+        return 'stale'
+    return ''
+
+
 def publish_news(s):
-    """Find the next useful local story and queue it for a 15-minute private review."""
-    if s.get('pending_news_review'):
-        return
+    """Find one high-value local story, verify the source date and queue it for private review."""
     n = now()
-    hour_key = n.strftime('%Y-%m-%d-%H')
-    if routine_target_within(25, n):
-        # Leave space for the fixed morning greeting, weather and night routines.
+    if routine_target_within(15, n):
         return
 
-    items, links = [], set()
+    stats = {
+        'feeds_ok': 0, 'feed_errors': 0, 'rss_items': 0, 'relevant': 0,
+        'stale': 0, 'missing_date': 0, 'future_date': 0, 'cached_date_skip': 0,
+        'date_fallback_checked': 0, 'date_fallback_deferred': 0,
+        'duplicate': 0, 'short_body': 0, 'low_score': 0, 'ai_rejected': 0,
+        'ai_failed': 0, 'image_missing': 0, 'queued': 0
+    }
+    items = []
+    links = set()
+    date_cache = s.setdefault('date_checked_links', {})
+
     for feed in FEEDS:
         try:
             root = ET.fromstring(get_url(feed))
-            for item in root.findall('.//item'):
-                title = clean(item.findtext('title'))
-                desc = clean(item.findtext('description'))
-                link = (item.findtext('link') or '').strip()
-                source_published_at = parse_source_date(item.findtext('pubDate'))
+            stats['feeds_ok'] += 1
+            for rss_item in root.findall('.//item'):
+                stats['rss_items'] += 1
+                title = clean(rss_item.findtext('title'))
+                desc = clean(rss_item.findtext('description'))
+                link = (rss_item.findtext('link') or '').strip()
+                raw_pub_date = (rss_item.findtext('pubDate') or '').strip()
+                source_published_at = parse_source_date(raw_pub_date)
                 if not title or not link or not re.match(r'^https?://', link, re.I) or link in links:
                     continue
                 links.add(link)
                 if not is_relevant_news(title, desc):
                     continue
+                stats['relevant'] += 1
                 urgent_candidate = is_urgent_news(title + ' ' + desc)
-                if not is_recent_source_date(source_published_at, n, urgent=urgent_candidate):
-                    print('Skipping missing, future-dated, or stale RSS story:', title)
-                    continue
-                items.append((
-                    title, desc, link, urgent_candidate, source_published_at,
-                    extract_rss_image(item, link)
-                ))
-        except Exception as e:
-            print('Feed error:', type(e).__name__)
 
-    items.sort(key=lambda item: not item[3])
-    for title, desc, link, urgent_candidate, source_published_at, rss_image in items:
+                # A previously checked, stale page is skipped for 12 hours only when RSS
+                # still cannot prove that the article itself has become current.
+                if not is_recent_source_date(source_published_at, n, urgent=urgent_candidate):
+                    cached = date_cache.get(link)
+                    if isinstance(cached, dict):
+                        checked_at = parse_dt_strict(cached.get('checked_at'))
+                        if checked_at and timedelta(0) <= n - checked_at < timedelta(hours=12):
+                            stats['cached_date_skip'] += 1
+                            continue
+
+                items.append({
+                    'title': title, 'desc': desc, 'link': link,
+                    'urgent': urgent_candidate, 'rss_date': source_published_at,
+                    'raw_pub_date': raw_pub_date,
+                    'rss_image': extract_rss_image(rss_item, link)
+                })
+        except Exception as exc:
+            stats['feed_errors'] += 1
+            print('Feed error:', type(exc).__name__)
+
+    items.sort(key=lambda item: (
+        not item['urgent'],
+        -(item['rss_date'].timestamp() if item['rss_date'] else 0)
+    ))
+    date_fallback_limit = 12
+
+    for candidate in items:
+        title = candidate['title']
+        desc = candidate['desc']
+        link = candidate['link']
+        urgent_candidate = candidate['urgent']
+        source_published_at = candidate['rss_date']
+        raw_pub_date = candidate['raw_pub_date']
+        rss_image = candidate['rss_image']
+
         if is_duplicate_news(s, title, link):
+            stats['duplicate'] += 1
             continue
         if is_paused(s) and not urgent_candidate:
             continue
-        if count_today(s) >= 10 and not urgent_candidate:
-            return
-        if s.get('last_news_hour') == hour_key and not urgent_candidate:
-            return
-        if n.hour in (6, 7, 8, 11, 12, 17, 18, 22, 23) and not urgent_candidate:
-            continue
-        if routine_target_within(25, n) and not urgent_candidate:
-            continue
-
-        translated_title = translate(re.split(r'\s[-–|]\s', title, maxsplit=1)[0])
-        if not translated_title:
-            continue
-        internal_title = clean(translated_title)
-        translated_body = translate(desc) if desc else ''
+        if not urgent_candidate:
+            if count_today(s) >= MAX_DAILY_POSTS:
+                break
+            if count_news_pipeline(s) >= MAX_DAILY_NEWS:
+                break
+            # Do not build up a backlog of routine news. Weather/safety items still join the queue.
+            if has_pending_regular_news(s):
+                break
+            if s.get('last_news_hour') == n.strftime('%Y-%m-%d-%H'):
+                continue
+            last_news_at = parse_dt_strict(s.get('last_news_published_at'))
+            if last_news_at and timedelta(0) <= n - last_news_at < timedelta(hours=2):
+                continue
+            if n.hour in (6, 7, 8, 11, 12, 17, 18, 22, 23):
+                continue
+            if routine_target_within(25, n):
+                continue
 
         article_page = ''
         article_page_url = link
+        article_text = ''
         article_image = None
-        try:
-            # Google News links often wrap a publisher URL. Follow redirects and inspect the final article page.
-            article_page_url, page_bytes = get_url_with_final_url(link)
-            article_page = page_bytes.decode('utf-8', 'ignore')
-            article_image = extract_article_image(article_page, article_page_url)
-        except Exception as e:
-            print('Source page unavailable; try RSS image/fallback:', type(e).__name__)
+        date_basis = 'rss_pubDate' if source_published_at else ''
 
-        # Never use Google-hosted search/result thumbnails as the public news photo.
-        image_url = normalize_image_url(article_image or rss_image or '', article_page_url) or ''
-
-        if len(translated_body) < 180 or len(translated_body.split()) < 24:
+        if not is_recent_source_date(source_published_at, n, urgent=urgent_candidate):
+            reason = source_date_rejection_reason(source_published_at, n, urgent_candidate)
+            stats[{'stale': 'stale', 'missing': 'missing_date', 'future': 'future_date'}.get(reason, 'stale')] += 1
+            if stats['date_fallback_checked'] >= date_fallback_limit:
+                stats['date_fallback_deferred'] += 1
+                print('Date fallback limit reached; candidate deferred:', title[:120])
+                continue
+            stats['date_fallback_checked'] += 1
             try:
-                article_match = re.search(r'<article\b[^>]*>(.*?)</article>', article_page, re.I | re.S) if article_page else None
-                if article_match:
-                    raw_article = article_match.group(1)
+                article_page_url, page_bytes = get_url_with_final_url(link)
+                article_page = page_bytes.decode('utf-8', 'ignore')
+                candidate_date = extract_recent_article_date(article_page, n, urgent=urgent_candidate)
+                if candidate_date:
+                    source_published_at = candidate_date
+                    date_basis = 'article_metadata'
+                    date_cache.pop(link, None)
                 else:
-                    paragraphs = re.findall(r'<p\b[^>]*>(.*?)</p>', article_page, re.I | re.S) if article_page else []
-                    raw_article = '\n'.join(paragraphs[:20])
-                raw_article = re.sub(r'<(script|style|noscript|svg)\b[^>]*>.*?</\1>', ' ', raw_article, flags=re.I | re.S)
-                raw_article = re.sub(r'</?(p|div|br|li|h[1-6])\b[^>]*>', '\n', raw_article, flags=re.I)
-                raw_article = clean_multiline(raw_article)
-                if len(raw_article) > len(desc) + 100:
-                    translated_body = translate(raw_article[:12000])
-            except Exception as e:
-                print('Full article unavailable; relying on RSS description only:', type(e).__name__)
+                    date_cache[link] = {
+                        'checked_at': iso(n),
+                        'reason': reason,
+                        'rss_date': source_published_at.isoformat() if source_published_at else '',
+                        'raw_pub_date': raw_pub_date[:100]
+                    }
+                    print(
+                        'Skipping source after date verification:',
+                        title[:120],
+                        'reason=', reason,
+                        'rss_pubDate=', raw_pub_date[:80] or '(missing)',
+                        'parsed=', source_published_at.isoformat() if source_published_at else '(missing)',
+                        'article_metadata=not-current'
+                    )
+                    continue
+            except Exception as exc:
+                date_cache[link] = {
+                    'checked_at': iso(n), 'reason': 'article_date_fetch_error',
+                    'rss_date': source_published_at.isoformat() if source_published_at else '',
+                    'raw_pub_date': raw_pub_date[:100]
+                }
+                print('Could not verify missing/stale source date:', type(exc).__name__, title[:100])
+                continue
+        else:
+            # RSS date is fresh enough; page can be inspected for the article photo and fuller text.
+            try:
+                article_page_url, page_bytes = get_url_with_final_url(link)
+                article_page = page_bytes.decode('utf-8', 'ignore')
+            except Exception as exc:
+                print('Source page unavailable; using RSS fields only:', type(exc).__name__)
 
-        body = remove_repeated_lead(internal_title, translated_body)
-        body = clean_multiline(re.sub(r'https?://\S+', '', body))
-        body = limit_news_body(body, max_chars=1450)
-        if len(body) < 100 or len(body.split()) < 18:
-            print('Skipping thin or repetitive story:', internal_title)
+        if article_page:
+            article_image = extract_article_image(article_page, article_page_url)
+            article_text = extract_article_text(article_page)
+        source_text = article_text if len(article_text) > len(desc) + 100 else desc
+        if not source_text and article_text:
+            source_text = article_text
+        if not source_text or len(source_text.strip()) < 50:
+            stats['short_body'] += 1
+            print('Skipping source with insufficient article text:', title[:120])
             continue
 
-        urgent = is_urgent_news(title + ' ' + desc + ' ' + internal_title + ' ' + body)
-        selected_query = news_image_query(internal_title, body)
+        final_source_url = article_page_url or link
+        final_source_url = normalize_image_url(final_source_url) or final_source_url
+        if not source_published_at:
+            stats['missing_date'] += 1
+            continue
+
+        # AI is a constrained editor, not a source of facts. If configured but unavailable,
+        # stay in safe mode and skip this candidate instead of silently pretending AI ran.
+        if GEMINI_API_KEY:
+            ai_result = ai_editorial_review(
+                s, title, source_text, final_source_url, source_published_at, urgent=urgent_candidate
+            )
+            if not ai_result:
+                stats['ai_failed'] += 1
+                continue
+            if ai_result.get('decision') != 'draft':
+                stats['ai_rejected'] += 1
+                print('AI editorial decision:', ai_result.get('decision'), title[:120])
+                continue
+            headline = ai_result.get('headline_ru', '')
+            body = limit_news_body(ai_result.get('body_ru', ''), max_chars=1350)
+            if has_unsupported_numeric_facts(headline + ' ' + body, source_text):
+                stats['ai_rejected'] += 1
+                print('AI draft held because it introduced numeric facts:', headline[:120])
+                continue
+            rule_scores = editorial_score_parts(
+                title, source_text, final_source_url, source_published_at,
+                urgent=urgent_candidate, duplicate=False, now_dt=n
+            )
+            score_parts = {
+                'local_relevance': min(rule_scores['local_relevance'], ai_result['local_relevance']),
+                'practical_usefulness': min(rule_scores['practical_usefulness'], ai_result['practical_usefulness']),
+                'source_confidence': min(rule_scores['source_confidence'], ai_result['source_confidence']),
+                'freshness_confidence': min(rule_scores['freshness_confidence'], ai_result['freshness_confidence']),
+                'novelty': min(rule_scores['novelty'], ai_result['novelty'])
+            }
+            score = (6 * score_parts['local_relevance'] + 5 * score_parts['practical_usefulness']
+                     + 4 * score_parts['source_confidence'] + 3 * score_parts['freshness_confidence']
+                     + 2 * score_parts['novelty'])
+            category = ai_result.get('category', 'life')
+            selected_query = ai_result.get('image_query_en') or news_image_query(headline, body)
+            reaction = '' if urgent_candidate else ai_result.get('reaction_line', '')
+            why_it_matters = clean(ai_result.get('why_it_matters') or '')
+            uncertainties = ai_result.get('uncertainties') if isinstance(ai_result.get('uncertainties'), list) else []
+        else:
+            # Deterministic fallback remains useful before a key is configured.
+            translated_title = translate(re.split(r'\s[-–|]\s', title, maxsplit=1)[0])
+            translated_body = translate(source_text[:8000])
+            if not translated_title or not translated_body:
+                stats['short_body'] += 1
+                print('Translation unavailable; candidate withheld:', title[:120])
+                continue
+            headline = clean_multiline(translated_title)
+            body = remove_repeated_lead(headline, translated_body)
+            body = clean_multiline(re.sub(r'https?://\S+', '', body))
+            body = limit_news_body(body, max_chars=1350)
+            if len(body) < 100 or len(body.split()) < 18:
+                stats['short_body'] += 1
+                print('Skipping thin/repetitive story:', headline[:120])
+                continue
+            score_parts = editorial_score_parts(
+                title, source_text, final_source_url, source_published_at,
+                urgent=urgent_candidate, duplicate=False, now_dt=n
+            )
+            score = score_parts['score']
+            category = 'safety' if urgent_candidate else 'life'
+            selected_query = news_image_query(headline, body)
+            reaction = reaction_line(title + ' ' + headline + ' ' + body)
+            why_it_matters = 'Локальная информация, которая может повлиять на повседневные планы.'
+            uncertainties = []
+
+        if score < 75:
+            stats['low_score'] += 1
+            print('Skipping low-value candidate:', headline[:120], 'score=', score)
+            continue
+        if len(body) < 100 or len(body.split()) < 18:
+            stats['short_body'] += 1
+            print('Skipping thin editorial draft:', headline[:120])
+            continue
+
+        image_url = normalize_image_url(article_image or rss_image or '', article_page_url) or ''
+        if not image_url:
+            stats['image_missing'] += 1
         item = {
             'kind': 'news',
-            'kind_label': 'Важная новость' if urgent else 'Новость Нячанга',
-            'title': internal_title,
+            'kind_label': 'Экстренная информация' if urgent_candidate else 'Полезная новость',
+            'headline': headline,
+            'title': headline,
             'source_title': title,
             'body': body,
-            'reaction_line': reaction_line(title + ' ' + internal_title + ' ' + body),
+            'reaction_line': sanitize_reaction_line(reaction),
             'link': link,
+            'source_url': final_source_url,
+            'source_name': source_name_from_url(final_source_url),
             'source_published_at': iso(source_published_at),
-            'urgent': bool(urgent),
+            'source_date_basis': date_basis,
+            'category': category,
+            'why_it_matters': why_it_matters,
+            'score': score,
+            'score_parts': score_parts,
+            'uncertainties': uncertainties,
+            'urgent': bool(urgent_candidate),
             'image_url': image_url,
-            'image_query': selected_query
+            'image_query': selected_query,
+            'idempotency_key': link
         }
-
-        if urgent:
-            # Do not delay immediate safety warnings behind an editorial timer.
-            try:
-                result = post_with_image(
-                    review_post_text(item),
-                    image_url=item.get('image_url') or None,
-                    image_query=selected_query
-                )
-                if not result:
-                    raise RuntimeError('Telegram did not confirm the safety alert post')
-                s['seen_links'] = (s.get('seen_links', []) + [link])[-1000:]
-                s['seen_titles'] = (s.get('seen_titles', []) + [title])[-500:]
-                s['seen_fingerprints'] = (s.get('seen_fingerprints', []) + [title_fingerprint(title)])[-1000:]
-                s['published_news'] = (s.get('published_news', []) + [{
-                    'title': internal_title, 'summary': body, 'link': link,
-                    'published_at': iso(now()), 'source_published_at': iso(source_published_at),
-                    'urgent': True
-                }])[-100:]
-                bump_today(s)
-                s['last_news_hour'] = hour_key
-                print('Published urgent safety news immediately with image.')
-                return
-            except Exception as e:
-                print('Urgent safety news failed; keep candidate available for retry:', type(e).__name__)
-                continue
 
         queued = queue_review_item(s, item)
         if queued:
-            return
-        # No preview/photo means this item is not treated as reviewed or published. Try the next source story.
+            stats['queued'] += 1
+            break
+
+    # Keep date-check history bounded. Current RSS dates always take precedence over cache.
+    if len(date_cache) > 1500:
+        ordered = sorted(
+            date_cache.items(),
+            key=lambda pair: parse_dt_strict((pair[1] or {}).get('checked_at')) or (n - timedelta(days=3650))
+        )
+        for key, _value in ordered[:len(date_cache) - 1000]:
+            date_cache.pop(key, None)
+
+    print('News selection summary:', json.dumps(stats, ensure_ascii=False, sort_keys=True))
+    if stats['queued'] == 0 and (stats['feed_errors'] >= max(1, len(FEEDS) // 2) or stats['stale'] + stats['missing_date'] + stats['future_date'] >= 8):
+        diagnostics = s.setdefault('diagnostics', {})
+        last_notice = parse_dt_strict(diagnostics.get('news_pipeline_notice_at'))
+        if not last_notice or n - last_notice >= timedelta(hours=6):
+            message = (
+                '⚠️ <b>Диагностика новостей</b>\n'
+                f'RSS-источники доступны: {stats["feeds_ok"]}/{len(FEEDS)}; ошибок источников: {stats["feed_errors"]}.\n'
+                f'Локально релевантных кандидатов: {stats["relevant"]}; даты отклонены — старые: {stats["stale"]}, '
+                f'без даты: {stats["missing_date"]}, из будущего: {stats["future_date"]}; '
+                f'проверок метаданных статьи: {stats["date_fallback_checked"]}; отложено для проверки: {stats["date_fallback_deferred"]}.\n'
+                'Слабые материалы и старые новости не опубликованы. Бот продолжит проверку в следующем цикле.'
+            )
+            for admin_id in sorted(ADMIN_USER_IDS):
+                try:
+                    send_dm(admin_id, message)
+                except Exception:
+                    pass
+            diagnostics['news_pipeline_notice_at'] = iso(n)
+
+
 
 
 def main():

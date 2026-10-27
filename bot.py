@@ -1648,35 +1648,80 @@ def is_paused(s): return top_pause_until(s) > now()
 
 
 def capture_manual_post(msg, s, uid):
-    """Save an admin-submitted news tip for review; never publish it automatically."""
-    content = (msg.get('text') or msg.get('caption') or '').strip()
+    """Convert a manual tip into the same private image-first review queue as automated news."""
+    raw = clean_multiline((msg.get('text') or msg.get('caption') or '').strip())
     post_type, file_id = 'text', None
     if msg.get('photo'):
         post_type, file_id = 'photo', msg['photo'][-1]['file_id']
     elif msg.get('video'):
         post_type, file_id = 'video', msg['video']['file_id']
-    if not content:
-        send_dm(uid, 'Добавь заголовок или короткое описание и по возможности ссылку. Фото/видео без пояснения не попадёт в очередь. Для отмены: /cancel')
+    if not raw:
+        send_dm(uid, 'Добавь короткое описание или контекст. Фото без пояснения не попадёт в очередь. Для отмены: /cancel')
         return
-    message_id = str((msg.get('message_id') or int(time.time() * 1000)))
-    item_id = f'{uid}-{message_id}'
+
+    source_match = re.search(r'https?://[^\s<>]+', raw)
+    source_url = source_match.group(0).rstrip('.,);]') if source_match else ''
+    text_only = clean_multiline(re.sub(r'https?://\S+', '', raw))
+    headline, body = split_manual_content(text_only)
+    body = clean_multiline(re.sub(r'(?i)(?:источник|source|ссылка на источник)\s*:\s*https?://\S+', '', body))
+    if not body:
+        # For a one-sentence tip, keep it as the body but shorten its lead as a distinct headline.
+        candidate = text_only.strip()
+        if len(candidate) >= 120:
+            headline = candidate[:95].rsplit(' ', 1)[0].rstrip(' .,:;') + '…'
+            body = candidate
+        else:
+            send_dm(uid, 'Не хватает текста для отдельного заголовка и короткого пересказа. Добавь пару предложений и попробуй снова.')
+            return
+    if normalized_title(headline) == normalized_title(body[:len(headline)]):
+        body = body[len(headline):].lstrip(' .,:;—-\n')
+    if len(body) < 40:
+        send_dm(uid, 'Материал слишком короткий. Добавь фактуру, чтобы заголовок не дублировал текст.')
+        return
+
+    image_query = news_image_query(headline, body)
+    reaction = reaction_line(headline + ' ' + body)
+    if GEMINI_API_KEY:
+        try:
+            ai_result = ai_editorial_review(s, headline, text_only, source_url, now(), urgent=False)
+            if not ai_result or ai_result.get('decision') != 'draft':
+                send_dm(uid, 'ИИ-редактор не подтвердил достаточную пользу или качество материала. Он не будет поставлен на автопубликацию. Добавь факты/источник и отправь повторно.')
+                return
+            headline = ai_result['headline_ru']
+            body = ai_result['body_ru']
+            image_query = ai_result.get('image_query_en') or image_query
+            reaction = ai_result.get('reaction_line') or ''
+        except Exception as exc:
+            print('Manual AI editorial review failed safely:', type(exc).__name__)
+            send_dm(uid, 'Не получилось проверить материал через ИИ. Черновик не поставлен на автопубликацию; попробуй позже.')
+            return
+
+    item_id = f'{uid}-{msg.get("message_id") or int(time.time()*1000)}'
+    queued = queue_review_item(s, {
+        'kind': 'news' if source_url else 'manual_tip',
+        'kind_label': 'Предложенная новость' if source_url else 'Материал редактора',
+        'headline': headline, 'title': headline, 'source_title': headline,
+        'body': body, 'link': source_url, 'source_url': source_url,
+        'source_name': source_name_from_url(source_url) if source_url else '',
+        'source_published_at': '',
+        'image_file_id': file_id if post_type == 'photo' else '',
+        'image_url': '', 'image_query': image_query,
+        'reaction_line': sanitize_reaction_line(reaction),
+        'urgent': False, 'idempotency_key': source_url or 'manual:' + item_id
+    })
     s.setdefault('manual_posts', []).append({
-        'id': item_id,
-        'status': 'pending',
-        'content': content,
-        'type': post_type,
-        'file_id': file_id,
-        'submitted_by': uid,
-        'created_at': iso(now())
+        'id': item_id, 'review_id': (s.get('pending_news_review') or {}).get('id', ''),
+        'status': 'queued_for_review' if queued else 'not_queued',
+        'content': raw, 'type': post_type, 'file_id': file_id,
+        'submitted_by': uid, 'created_at': iso(now())
     })
     s['pending_manual_post'] = {}
-    send_dm(
-        uid,
-        f'Материал добавлен в очередь проверки. ID: <code>{html.escape(item_id)}</code>.\n'
-        'Посмотреть очередь: /newsqueue\n'
-        'Опубликовать после проверки: /approve ID\n'
-        'Отклонить: /reject ID'
-    )
+    if queued:
+        send_dm(uid, f'✅ Материал добавлен в очередь предпросмотра. ID: <code>{html.escape(item_id)}</code>. Заголовок, текст, фото и таймер управляются кнопками. Если фото не найдено, материал останется в очереди без публикации.', main_menu())
+    else:
+        send_dm(uid, 'Материал не добавлен: он уже находится в очереди или не прошёл проверку. Посмотри /reviewqueue.', main_menu())
+
+
 
 
 def split_manual_content(content):

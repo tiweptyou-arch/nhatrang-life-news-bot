@@ -205,6 +205,15 @@ def ad_actions(ad_id):
         {'text': '🗑 Удалить сейчас', 'callback_data': f'ad_delete:{ad_id}'}
     ]]}
 
+
+def ad_review_keyboard():
+    return {'inline_keyboard': [
+        [{'text': '✅ Опубликовать сейчас', 'callback_data': 'adreview:publish'}],
+        [{'text': '✏️ Изменить черновик', 'callback_data': 'adreview:edit'},
+         {'text': '🕒 Ещё 15 минут', 'callback_data': 'adreview:delay15'}],
+        [{'text': '🗑 Отменить рекламу', 'callback_data': 'adreview:reject'}]
+    ]}
+
 def send_dm(user_id, text, markup=None):
     data = {'chat_id': user_id, 'text': text, 'parse_mode':'HTML', 'disable_web_page_preview':'true'}
     if markup: data['reply_markup'] = json.dumps(markup, ensure_ascii=False)
@@ -2104,19 +2113,37 @@ def handle_admin_message(msg, s):
                 send_dm(uid, part)
                 time.sleep(0.2)
 
+        ad['previewed_at'] = iso(now())
+        ad['review_due_at'] = iso(now() + timedelta(minutes=15))
+        ad['created_by'] = uid
+        ad['review_status'] = 'pending_review'
+        s['pending_ad'] = ad
+        send_dm(uid,
+            f'<b>Предпросмотр рекламы готов</b>\n'
+            f'Формат: {html.escape(str(ad.get("format", "1/24")))}\n'
+            f'Если ничего не менять, реклама выйдет через 15 минут — при наличии коммерчески разрешённого погодного API. '
+            f'Можно опубликовать сразу, отредактировать черновик или отменить.',
+            ad_review_keyboard())
+
     elif cmd=='/publish':
         ad=s.get('pending_ad') or {}
         if not ad or ad.get('awaiting_content') or not (ad.get('text') or ad.get('file_id') or ad.get('media_items')):
             send_dm(uid,'Сначала создай черновик: /ad 1/24, затем пришли содержимое.'); return
+        if not ad.get('previewed_at'):
+            send_dm(uid, 'Сначала открой приватный предпросмотр командой /preview. Реклама не публикуется без проверки.')
+            return
         try:
             publish_ad(ad, s, uid)
         except Exception as e:
-            print('Manual ad publication failed:', type(e).__name__, e)
-            send_dm(uid, f'Не удалось опубликовать рекламу: {html.escape(str(e)[:400])}. Черновик сохранён; исправь текст или попробуй ещё раз.')
+            print('Manual ad publication failed:', type(e).__name__)
+            send_dm(uid, f'Не удалось опубликовать рекламу: {html.escape(str(e)[:250])}. Черновик сохранён; проверь /settings.')
     elif cmd=='/schedule':
         ad=s.get('pending_ad') or {}
         if not ad or ad.get('awaiting_content') or not (ad.get('text') or ad.get('file_id') or ad.get('media_items')):
             send_dm(uid,'Сначала подготовь черновик через /ad 1/24.'); return
+        if not ad.get('previewed_at'):
+            send_dm(uid, 'Перед расписанием сначала посмотри рекламу через /preview. Это нужно, чтобы случайно не поставить неверный материал.')
+            return
         try:
             validate_ad_draft(ad)
         except ValueError as e:
@@ -2128,7 +2155,7 @@ def handle_admin_message(msg, s):
             send_dm(uid,'Формат: /schedule 2026-10-25 14:30'); return
         if when<=now():
             send_dm(uid,'Время должно быть в будущем.'); return
-        ad['scheduled_at']=iso(when); ad['awaiting_content']=False; ad['created_by']=uid; ad['id']=str(int(time.time()))
+        ad['scheduled_at']=iso(when); ad['awaiting_content']=False; ad['created_by']=uid; ad['id']=str(int(time.time())); ad.pop('review_due_at',None); ad['review_status']='scheduled'
         s['ads'].append(ad); s['pending_ad']={}
         send_dm(uid,f'Реклама запланирована на {when.strftime("%d.%m.%Y %H:%M")} по времени Нячанга. ID: <code>{ad["id"]}</code>.')
     elif cmd=='/togglepause':
@@ -2240,6 +2267,54 @@ def handle_admin_message(msg, s):
         s['pending_ad']={}
         s['pending_manual_post']={}
         send_dm(uid,'Текущий черновик отменён.')
+    elif cmd == '/reviewqueue':
+        active = s.get('pending_news_review') or {}
+        queued = s.get('review_queue') or []
+        parts = [f'<b>Редакционная очередь</b>\nАктивный предпросмотр: {"есть" if active else "нет"}\nВ очереди: {len(queued)}']
+        if active:
+            planned = parse_dt_strict(active.get('planned_at'))
+            parts.append(f'\nСейчас: <b>{html.escape(active.get("headline") or active.get("title") or "без заголовка")}</b>\nТаймер: {planned.strftime("%d.%m %H:%M") if planned else "не задан"}')
+        if queued:
+            parts.append('\nМатериалы в очереди:')
+            for item in queued[:12]:
+                item_title = html.escape(item.get('headline') or item.get('title') or 'без заголовка')
+                parts.append(f'• {html.escape(str(item.get("kind_label", item.get("kind", "материал"))))}: {item_title} · {html.escape(str(item.get("status", "ожидает")))}')
+        parts.append('\nТекущие кнопки предпросмотра действуют только для последней версии материала.')
+        send_dm(uid, '\n'.join(parts), main_menu())
+    elif cmd == '/weatherstatus':
+        state = s.get('weather_alert_state') or {}
+        diagnostics = s.get('diagnostics') or {}
+        checked = _weather_time(state.get('last_checked_at'))
+        alerted = _weather_time(state.get('last_alert_at'))
+        provider = state.get('provider') or ('WeatherAPI.com' if WEATHERAPI_KEY else 'Open-Meteo (тестовый некоммерческий режим)')
+        current_rain = _numeric((state.get('next_six_hours') or {}).get('rain_max'))
+        lines = [
+            '<b>Погодный контур</b>',
+            f'Источник: {html.escape(provider)}',
+            'Координаты: 12.2388, 109.1967 · Asia/Ho_Chi_Minh (UTC+7)',
+            f'Последняя проверка изменений: {checked.strftime("%d.%m.%Y %H:%M") if checked else "ещё не проверялось"}',
+            f'Последнее предупреждение: {alerted.strftime("%d.%m.%Y %H:%M") if alerted else "нет"}',
+            f'Вероятность дождя на ближайшие 6 часов: {round(current_rain)}%' if current_rain is not None else 'Вероятность дождя в диагностике: нет данных',
+        ]
+        if diagnostics.get('last_weather_error'):
+            lines.append(f'Последняя ошибка: {html.escape(str(diagnostics.get("last_weather_error")))}')
+        lines.append('Плановые прогнозы: 08:00 на сегодня и 18:00 на завтра. Проверка существенных изменений — каждые 30 минут.')
+        if not WEATHERAPI_KEY:
+            lines.append('Для размещения рекламы подключи бесплатный WEATHERAPI_KEY; ключ добавляется только в GitHub Secrets.')
+        send_dm(uid, '\n'.join(lines), main_menu())
+    elif cmd == '/settings':
+        lines = [
+            '<b>Настройки бота</b>',
+            f'Максимум публикаций в день: {MAX_DAILY_POSTS}',
+            f'Максимум обычных новостей в день: {MAX_DAILY_NEWS}',
+            'Разрешённые реакции: ❤️ 🙏 😱 👍 🤣',
+            f'ИИ-редактор: {"подключён" if GEMINI_API_KEY else "не подключён (правиловый резервный режим)"}',
+            f'Приватное хранилище: {"Supabase настроен" if supabase_state_configured() else "не настроено"}',
+            f'Погодный API для коммерческого режима: {"WeatherAPI.com подключён" if WEATHERAPI_KEY else "не подключён"}',
+            'Часовой пояс: Asia/Ho_Chi_Minh (UTC+7)',
+        ]
+        send_dm(uid, '\n'.join(lines), main_menu())
+
     elif cmd=='/status':
         until=top_pause_until(s)
         pending = s.get('pending_news_review') or {}

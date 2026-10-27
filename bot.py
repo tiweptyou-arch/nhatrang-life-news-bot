@@ -17,6 +17,7 @@ MAX_DAILY_NEWS = int(os.environ.get('MAX_DAILY_NEWS', '3'))
 MAX_AI_CALLS_PER_DAY = int(os.environ.get('MAX_AI_CALLS_PER_DAY', '40'))
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '').strip()
 GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-3.8-flash').strip()
+WEATHERAPI_KEY = os.environ.get('WEATHERAPI_KEY', '').strip()
 SUPABASE_URL = os.environ.get('SUPABASE_URL', '').strip().rstrip('/')
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '').strip()
 SUBSCRIBE_URL = 'https://t.me/NhaTrangLifeNews'
@@ -640,6 +641,9 @@ def review_post_text(item):
     reaction = sanitize_reaction_line(item.get('reaction_line', ''))
     if reaction:
         parts.append(html.escape(reaction))
+    source_attribution = item.get('source_attribution_html') or ''
+    if source_attribution:
+        parts.append(source_attribution)
     credit = item.get('image_credit_html') or ''
     if credit:
         parts.append(credit)
@@ -1686,8 +1690,8 @@ def publish_manual_post(item, s, uid=None):
     """Publish an explicitly approved tip without generated headline or source URL."""
     if is_paused(s):
         raise ValueError('Публикации на паузе из-за ручной или рекламной паузы.')
-    if count_today(s) >= 10:
-        raise ValueError('Достигнут дневной лимит в 10 публикаций.')
+    if count_today(s) >= MAX_DAILY_POSTS:
+        raise ValueError(f'Достигнут дневной лимит в {MAX_DAILY_POSTS} публикаций.')
 
     raw = clean_multiline((item.get('content') or '').strip())
     title, body = split_manual_content(raw)
@@ -2187,6 +2191,8 @@ def handle_admin_message(msg, s):
             send_dm(uid,'Неизвестная команда. Напиши /menu.')
 
 def publish_ad(ad,s,uid=None):
+    if not WEATHERAPI_KEY:
+        raise ValueError('Перед размещением рекламы настрой secret WEATHERAPI_KEY: бесплатный Open-Meteo endpoint предназначен для некоммерческого режима. WeatherAPI.com предлагает бесплатный тариф с коммерческим использованием.')
     top=int(ad['top_hours']); life=int(ad['life_hours']); t=now()
     result=send_ad_content(ad)
     ad['id']=ad.get('id') or str(result['message_id'])
@@ -2484,7 +2490,7 @@ def mark_slot(s,key): s['last_slots'][key]=now().date().isoformat()
 def next_routine_target(current_time=None):
     """Return the next fixed daily rubric time in Nha Trang timezone."""
     current_time = current_time or now()
-    targets = [(6, 0), (8, 0), (18, 0), (22, 30)]
+    targets = [(8, 0), (18, 0), (22, 30)]
     candidates = []
     for day_offset in (0, 1):
         day = current_time.date() + timedelta(days=day_offset)
@@ -2504,210 +2510,323 @@ def routine_target_within(minutes=25, current_time=None):
 
 
 def routine_posts(s):
-    """Queue the 06:00 greeting and the 22:30 recap for private review on the same day."""
-    if is_paused(s) or count_today(s) >= 10 or s.get('pending_news_review'):
+    """Queue a low-frequency night name game. Morning engagement is integrated into weather."""
+    if is_paused(s) or count_today(s) >= MAX_DAILY_POSTS:
         return
     n = now()
-    slots = [
-        {
-            'key': 'review_morning',
-            'hour': 6,
-            'minute': 0,
-            'kind': 'morning',
-            'kind_label': 'Доброе утро',
-            'image_query': 'Nha Trang Vietnam sunrise beach promenade morning light'
-        },
-        {
-            'key': 'review_night',
-            'hour': 22,
-            'minute': 30,
-            'kind': 'night',
-            'kind_label': 'Доброй ночи',
-            'image_query': 'Nha Trang Vietnam night city lights beach coastline'
-        }
-    ]
-    for slot in slots:
-        key = slot['key']
-        if slot_once(s, key):
-            continue
-        target = n.replace(hour=slot['hour'], minute=slot['minute'], second=0, microsecond=0)
-        start = target - timedelta(minutes=15)
-        end = target + timedelta(minutes=75)
-        if not (start <= n <= end):
-            continue
-
-        if slot['kind'] == 'morning':
-            messages = [
-                '☀️ Доброе утро, Нячанг! Уже проснулись?\\n\\n👍 — уже на ногах\\n❤️ — проснулся, но ещё не включился\\n🙏 — пусть день будет хорошим.',
-                '☀️ Доброе утро! Какой план на сегодня?\\n\\n👍 — работа и дела\\n❤️ — море и прогулка\\n🙏 — пока хочу ещё немного поспать.',
-                '☀️ Доброе утро, Нячанг! Как настроение?\\n\\n❤️ — всё отлично\\n👍 — постепенно просыпаюсь\\n🙏 — нужен спокойный день.'
-            ]
-            body = messages[int(n.strftime('%j')) % len(messages)]
-        else:
-            stories = []
-            today_items = [
-                item for item in s.get('published_news', [])
-                if str(item.get('published_at', '')).startswith(n.date().isoformat())
-                and item.get('summary')
-            ]
-            for entry in today_items[-3:]:
-                summary = clean_multiline(entry.get('summary', ''))
-                if not summary:
-                    continue
-                sentence = re.split(r'(?<=[.!?])\\s+', summary.replace('\\n', ' '), maxsplit=1)[0]
-                if len(sentence) > 240:
-                    sentence = sentence[:237].rsplit(' ', 1)[0] + '…'
-                if sentence and sentence not in stories:
-                    stories.append(sentence)
-            parts = ['🌙 Доброй ночи, Нячанг!']
-            if stories:
-                parts.append('Что важного произошло сегодня: ' + ' '.join(stories))
-            tomorrow_warning = ''
-            try:
-                url = ('https://api.open-meteo.com/v1/forecast?latitude=12.2388&longitude=109.1967'
-                       '&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code'
-                       '&timezone=Asia%2FHo_Chi_Minh&forecast_days=2')
-                forecast = json.loads(get_url(url).decode('utf-8'))
-                daily = forecast['daily']
-                code = int(daily['weather_code'][1])
-                rain_values = daily.get('precipitation_probability_max', [None, None])
-                rain = rain_values[1] if len(rain_values) > 1 else None
-                names = {
-                    0:'ясно',1:'преимущественно ясно',2:'переменная облачность',3:'облачно',
-                    45:'туман',48:'туман',51:'морось',53:'морось',55:'сильная морось',
-                    61:'небольшой дождь',63:'дождь',65:'сильный дождь',80:'кратковременный дождь',
-                    81:'ливни',82:'сильные ливни',95:'гроза',96:'гроза с градом',99:'сильная гроза с градом'
-                }
-                if (rain is not None and rain >= 60) or code in (65, 81, 82, 95, 96, 99):
-                    rain_text = f'вероятность осадков — {rain}%' if rain is not None else 'вероятность осадков не указана'
-                    tomorrow_warning = (
-                        f'На завтра прогнозируют {names.get(code, "переменную погоду")}; {rain_text}. '
-                        'Учитывай это при планировании поездок.'
-                    )
-            except Exception as e:
-                print('Night forecast unavailable; no warning inferred:', type(e).__name__)
-            if tomorrow_warning:
-                parts.append(tomorrow_warning)
-            parts.append('Перед сном выбери реакцию: ❤️ — день удался; 🙏 — завтра хочется спокойствия; 🤣 — сегодня было над чем посмеяться.')
-            body = '\\n\\n'.join(parts)
-
-        planned_at = target if n < target else n + timedelta(minutes=15)
-        queued = queue_review_item(s, {
-            'kind': slot['kind'],
-            'kind_label': slot['kind_label'],
-            'title': slot['kind_label'],
-            'body': body,
-            'reaction_line': '',
-            'image_query': slot['image_query'],
-            'urgent': False
-        }, planned_at=planned_at, slot_key=key)
-        if queued:
-            mark_slot(s, key)
+    if n.isoweekday() not in (2, 4, 6):  # at most three chat games per week
         return
+    key = 'review_night'
+    if slot_once(s, key):
+        return
+    target = n.replace(hour=22, minute=30, second=0, microsecond=0)
+    if not (target - timedelta(minutes=15) <= n <= target + timedelta(minutes=75)):
+        return
+    starts = [('Михаил','л'),('Екатерина','а'),('Дмитрий','й'),('Мария','я'),
+              ('Александр','р'),('Анна','а'),('Никита','а'),('Илья','я'),('Ольга','а')]
+    name, letter = starts[int(n.strftime('%j')) % len(starts)]
+    headline = 'Открываем ночной чат!'
+    body = (
+        'Сегодня играем в слова, но называть можно только имена.\n\n'
+        f'Начинаем: <b>{html.escape(name)}, вам на «{html.escape(letter)}»!</b>\n\n'
+        'Пишите имя на последнюю букву предыдущего имени. Города, предметы и фамилии сегодня не принимаются.'
+    )
+    queued = queue_review_item(s, {
+        'kind': 'night', 'kind_label': 'Открываем ночной чат',
+        'headline': headline, 'title': headline, 'body': body, 'reaction_line': '',
+        'image_query': 'Nha Trang Vietnam night city lights beach promenade real photograph',
+        'urgent': False, 'idempotency_key': f'night-game:{n.date().isoformat()}'
+    }, planned_at=target if n < target else n + timedelta(minutes=15), slot_key=key)
+    if queued:
+        mark_slot(s, key)
 
+
+def map_weatherapi_code(code):
+    """Map provider condition codes to WMO-like categories for consistent summaries/alerts."""
+    try:
+        code = int(code)
+    except (TypeError, ValueError):
+        return None
+    groups = {
+        0:(1000,), 2:(1003,), 3:(1006,1009),
+        45:(1030,1135), 48:(1147,), 51:(1072,1150,1153,1168), 55:(1171,),
+        61:(1063,1180,1183), 63:(1186,1189), 65:(1192,1195,1198,1201),
+        80:(1240,), 81:(1243,), 82:(1246,), 95:(1087,1273,1276,1279,1282),
+        71:(1066,1069,1210,1213,1255,1261), 73:(1075,1216,1219,1258,1264),
+        75:(1114,1117,1222,1225), 77:(1237,), 66:(1249,), 67:(1252,)
+    }
+    return next((category for category, provider_codes in groups.items() if code in provider_codes), 3)
+
+
+def fetch_weather_data():
+    """Fetch a common hourly weather shape from the commercial-free API when keyed; otherwise test mode."""
+    retrieved = iso(now())
+    if WEATHERAPI_KEY:
+        params = urllib.parse.urlencode({'key': WEATHERAPI_KEY, 'q': '12.2388,109.1967', 'days': 3, 'aqi': 'no', 'alerts': 'yes'})
+        try:
+            raw = json.loads(get_url('https://api.weatherapi.com/v1/forecast.json?' + params).decode('utf-8'))
+            days = raw['forecast']['forecastday']
+            rows = [h for day in days for h in (day.get('hour') or [])]
+            current = raw['current']
+            return {
+                'provider': 'WeatherAPI.com', 'provider_url': 'https://www.weatherapi.com/',
+                'retrieved_at': retrieved,
+                'current': {
+                    'temperature_2m': current.get('temp_c'), 'apparent_temperature': current.get('feelslike_c'),
+                    'weather_code': map_weatherapi_code((current.get('condition') or {}).get('code')),
+                    'wind_speed_10m': current.get('wind_kph')
+                },
+                'hourly': {
+                    'time': [h.get('time') for h in rows],
+                    'temperature_2m': [h.get('temp_c') for h in rows],
+                    'apparent_temperature': [h.get('feelslike_c') for h in rows],
+                    'precipitation_probability': [h.get('chance_of_rain') for h in rows],
+                    'precipitation': [h.get('precip_mm') for h in rows],
+                    'weather_code': [map_weatherapi_code((h.get('condition') or {}).get('code')) for h in rows],
+                    'wind_speed_10m': [h.get('wind_kph') for h in rows],
+                    'wind_gusts_10m': [h.get('gust_kph') for h in rows]
+                },
+                'daily': {
+                    'time': [d.get('date') for d in days],
+                    'temperature_2m_min': [(d.get('day') or {}).get('mintemp_c') for d in days],
+                    'temperature_2m_max': [(d.get('day') or {}).get('maxtemp_c') for d in days],
+                    'precipitation_probability_max': [(d.get('day') or {}).get('daily_chance_of_rain') for d in days],
+                    'precipitation_sum': [(d.get('day') or {}).get('totalprecip_mm') for d in days],
+                    'weather_code': [map_weatherapi_code(((d.get('day') or {}).get('condition') or {}).get('code')) for d in days],
+                    'wind_gusts_10m_max': [(d.get('day') or {}).get('maxwind_kph') for d in days]
+                },
+                'official_alerts': (raw.get('alerts') or {}).get('alert') or []
+            }
+        except Exception as exc:
+            # Never silently switch a commercial service to a non-commercial API.
+            raise RuntimeError(f'WeatherAPI.com error ({type(exc).__name__}).') from None
+    url = (
+        'https://api.open-meteo.com/v1/forecast?latitude=12.2388&longitude=109.1967'
+        '&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m,wind_gusts_10m'
+        '&hourly=temperature_2m,apparent_temperature,precipitation_probability,precipitation,weather_code,wind_speed_10m,wind_gusts_10m'
+        '&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum,weather_code,wind_gusts_10m_max'
+        '&timezone=Asia%2FHo_Chi_Minh&forecast_days=3'
+    )
+    try:
+        raw = json.loads(get_url(url).decode('utf-8'))
+    except Exception as exc:
+        raise RuntimeError(f'Open-Meteo error ({type(exc).__name__}).') from None
+    return {'provider':'Open-Meteo','provider_url':'https://open-meteo.com/','retrieved_at':retrieved,
+            'current':raw.get('current') or {},'hourly':raw.get('hourly') or {},
+            'daily':raw.get('daily') or {},'official_alerts':[]}
+
+
+def weather_condition_name(code):
+    names = {
+        0:'ясно',1:'преимущественно ясно',2:'переменная облачность',3:'облачно',45:'туман',48:'плотный туман',
+        51:'морось',53:'морось',55:'сильная морось',56:'ледяная морось',57:'сильная ледяная морось',
+        61:'небольшой дождь',63:'дождь',65:'сильный дождь',66:'ледяной дождь',67:'сильный ледяной дождь',
+        71:'снег',73:'снегопад',75:'сильный снегопад',77:'снежная крупа',80:'кратковременный дождь',
+        81:'ливни',82:'сильные ливни',85:'снегопад',86:'сильный снегопад',95:'гроза',96:'гроза с градом',99:'сильная гроза с градом'
+    }
+    try:
+        return names.get(int(code), 'переменная облачность') if code is not None else 'нет данных'
+    except (TypeError, ValueError):
+        return 'нет данных'
+
+
+def _weather_time(value):
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=TZ).astimezone(TZ) if dt.tzinfo is None else dt.astimezone(TZ)
+
+
+def _numeric(value):
+    return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def weather_daily_index(data, target_date):
+    for i, d in enumerate((data.get('daily') or {}).get('time') or []):
+        if d == target_date.isoformat():
+            return i
+    return None
+
+
+def _weather_daily(data, key, idx):
+    values = (data.get('daily') or {}).get(key) or []
+    return _numeric(values[idx]) if idx is not None and idx < len(values) else None
+
+
+def weather_period_summary(data, target_date, start_hour, end_hour):
+    hourly = data.get('hourly') or {}
+    selected = []
+    for i, raw_time in enumerate(hourly.get('time') or []):
+        dt = _weather_time(str(raw_time))
+        if not dt or dt.date() != target_date or not start_hour <= dt.hour < end_hour:
+            continue
+        def val(key):
+            values = hourly.get(key) or []
+            return _numeric(values[i]) if i < len(values) else None
+        selected.append({'time':dt,'temp':val('temperature_2m'),'rain':val('precipitation_probability'),
+                         'precip':val('precipitation'),'wind':val('wind_speed_10m'),
+                         'gust':val('wind_gusts_10m'),'code':val('weather_code')})
+    if not selected:
+        return {'text':f'{start_hour:02d}:00–{end_hour:02d}:00 — нет почасовых данных','rain_max':None,'severe_code':None,'wind_max':None}
+    temps=[x['temp'] for x in selected if x['temp'] is not None]
+    rain=[x for x in selected if x['rain'] is not None]
+    wind=[x['gust'] if x['gust'] is not None else x['wind'] for x in selected]
+    wind=[x for x in wind if x is not None]
+    precip=[x['precip'] for x in selected if x['precip'] is not None]
+    codes=[int(x['code']) for x in selected if x['code'] is not None]
+    maxrain=max((x['rain'] for x in rain),default=None)
+    peak=next((x['time'] for x in rain if x['rain']==maxrain),None) if rain else None
+    parts=[f'{start_hour:02d}:00–{end_hour:02d}:00']
+    if temps: parts.append(f'{round(min(temps))}–{round(max(temps))}°C')
+    parts.append('вероятность дождя: нет данных' if maxrain is None else f'дождь до {round(maxrain)}%'+(f' около {peak:%H:%M}' if peak else ''))
+    if wind: parts.append(f'порывы до {round(max(wind))} км/ч')
+    if precip and sum(precip)>0: parts.append(f'осадки до {sum(precip):.1f} мм')
+    severe=max((c for c in codes if c in (65,67,82,95,96,99)),default=None)
+    return {'text':' · '.join(parts),'rain_max':maxrain,'severe_code':severe,'wind_max':max(wind) if wind else None}
+
+
+def format_weather_forecast(data, period, current_time):
+    target = current_time.date() if period == 'morning' else current_time.date()+timedelta(days=1)
+    idx=weather_daily_index(data,target)
+    cur=data.get('current') or {}
+    icons={0:'☀️',1:'🌤️',2:'⛅',3:'☁️',45:'🌫️',48:'🌫️',51:'🌦️',53:'🌦️',55:'🌧️',61:'🌦️',63:'🌧️',65:'⛈️',80:'🌦️',81:'🌧️',82:'⛈️',95:'⛈️',96:'⛈️',99:'⛈️'}
+    parts=[]
+    if period=='morning':
+        temp=_numeric(cur.get('temperature_2m')); feels=_numeric(cur.get('apparent_temperature')); wind=_numeric(cur.get('wind_speed_10m'))
+        if temp is None: parts.append('Сейчас не удалось получить подтверждённую температуру.')
+        else:
+            now_text=f'Сейчас в Нячанге {round(temp)}°C'
+            if feels is not None: now_text+=f', по ощущениям {round(feels)}°C'
+            now_text+=f', {weather_condition_name(cur.get("weather_code"))} {icons.get(cur.get("weather_code"),"🌤️")}.'
+            if wind is not None: now_text+=f' Ветер {round(wind)} км/ч.'
+            parts.append(now_text)
+    lo=_weather_daily(data,'temperature_2m_min',idx); hi=_weather_daily(data,'temperature_2m_max',idx)
+    code=_weather_daily(data,'weather_code',idx); rain=_weather_daily(data,'precipitation_probability_max',idx)
+    label='Сегодня' if period=='morning' else 'Завтра'
+    if lo is not None and hi is not None: parts.append(f'{label} ({target:%d.%m}): {round(lo)}–{round(hi)}°C, {weather_condition_name(code)} {icons.get(code,"🌤️")}.')
+    elif code is not None: parts.append(f'{label} ({target:%d.%m}): {weather_condition_name(code)}.')
+    else: parts.append(f'{label} ({target:%d.%m}): дневной прогноз частично недоступен.')
+    parts.append('Максимальная вероятность дождя за день: нет данных.' if rain is None else f'Максимальная вероятность дождя за день: {round(rain)}%.')
+    parts.append('Почасовой прогноз:')
+    for start,end in ((6,12),(12,18),(18,24)): parts.append('• '+weather_period_summary(data,target,start,end)['text'])
+    updated=_weather_time(data.get('retrieved_at')) or current_time
+    parts.append(f'Обновлено: {updated:%d.%m.%Y %H:%M} по времени Нячанга (UTC+7).')
+    parts.append('Прогноз может меняться; при опасной погоде проверяйте официальные предупреждения.')
+    if period=='morning':
+        questions=('Как началось утро? ❤️ — отлично; 🙏 — хочу спокойный день; 😱 — планы уже меняет погода.',
+                   'Вы сегодня за прогулку? 👍 — гулять; ❤️ — к морю; 🙏 — лучше спокойно.')
+        parts.append(questions[int(current_time.strftime('%j'))%len(questions)])
+    headline='Погода в Нячанге: прогноз на сегодня' if period=='morning' else 'Погода в Нячанге: прогноз на завтра'
+    return headline,'\n\n'.join(parts),target
+
+
+def _weather_next_window(data, now_dt, hours=6):
+    hourly=data.get('hourly') or {}; rows=[]
+    for i,raw_time in enumerate(hourly.get('time') or []):
+        dt=_weather_time(str(raw_time))
+        if not dt or not now_dt<=dt<now_dt+timedelta(hours=hours): continue
+        def val(key):
+            seq=hourly.get(key) or []
+            return _numeric(seq[i]) if i<len(seq) else None
+        rows.append({'rain':val('precipitation_probability'),'precip':val('precipitation'),'code':val('weather_code'),
+                     'wind':val('wind_gusts_10m') if val('wind_gusts_10m') is not None else val('wind_speed_10m')})
+    rain=[x['rain'] for x in rows if x['rain'] is not None]
+    severe=[int(x['code']) for x in rows if x['code'] is not None and int(x['code']) in (65,67,82,95,96,99)]
+    wind=[x['wind'] for x in rows if x['wind'] is not None]
+    return {'rain_max':max(rain) if rain else None,'severe_code':max(severe,default=None),
+            'wind_max':max(wind) if wind else None}
+
+
+def weather_change_decision(previous, current):
+    """Recognize significant rain/wind escalation; unknown values never count as zero."""
+    if not isinstance(previous,dict) or not isinstance(current,dict): return False,''
+    old=_numeric(previous.get('rain_max')); new=_numeric(current.get('rain_max'))
+    if old is not None and new is not None:
+        if new>=80 and old<60: return True,f'вероятность дождя выросла с {round(old)}% до {round(new)}%'
+        if new-old>=30 and new>=70: return True,f'вероятность дождя выросла с {round(old)}% до {round(new)}%'
+    if current.get('severe_code') is not None and previous.get('severe_code') is None:
+        return True,f'появился прогноз: {weather_condition_name(current["severe_code"])}'
+    oldwind=_numeric(previous.get('wind_max')); newwind=_numeric(current.get('wind_max'))
+    if newwind is not None and newwind>=55 and (oldwind is None or oldwind<45):
+        return True,f'прогноз порывов ветра вырос до {round(newwind)} км/ч'
+    return False,''
+
+
+def check_weather_changes(s):
+    """Check forecasts every 30 minutes; queue a priority private review when conditions materially worsen."""
+    state=s.setdefault('weather_alert_state',{}); n=now()
+    checked=_weather_time(state.get('last_checked_at'))
+    if checked and timedelta(0)<=n-checked<timedelta(minutes=30): return
+    try: data=fetch_weather_data()
+    except Exception as exc:
+        print('Weather change check unavailable:',type(exc).__name__); return
+    current=_weather_next_window(data,n); previous=state.get('next_six_hours') or {}
+    state['last_checked_at']=iso(n); state['next_six_hours']=current; state['provider']=data.get('provider','')
+    should,reason=weather_change_decision(previous,current)
+    if not should: return
+    last=_weather_time(state.get('last_alert_at'))
+    escalation=current.get('severe_code') is not None and previous.get('severe_code') is None
+    if last and timedelta(0)<=n-last<timedelta(hours=2) and not escalation: return
+    old=_numeric(previous.get('rain_max')); new=_numeric(current.get('rain_max'))
+    details=[f'Прогноз на ближайшие 6 часов заметно ухудшился: {reason}.',
+             f'Период: {n:%H:%M}–{(n+timedelta(hours=6)):%H:%M} по времени Нячанга.']
+    if old is not None and new is not None: details.append(f'Вероятность дождя: было {round(old)}%, стало {round(new)}%.')
+    elif new is not None: details.append(f'Максимальная вероятность дождя в новом прогнозе: {round(new)}%.')
+    if current.get('wind_max') is not None: details.append(f'Порывы ветра по прогнозу — до {round(current["wind_max"])} км/ч.')
+    details.append(f'Данные получены {n:%d.%m.%Y %H:%M}; источник: {data.get("provider","погодный API")}.')
+    details.append('При опасных условиях проверьте официальные предупреждения перед поездками.')
+    headline='Погода в Нячанге резко меняется'
+    attribution='Источник прогноза: <a href="'+html.escape(data.get('provider_url') or 'https://open-meteo.com/',quote=True)+'">'+html.escape(data.get('provider') or 'погодный API')+'</a> · данные получены '+html.escape(data.get('retrieved_at') or iso(n))
+    item={'kind':'weather_update','kind_label':'Изменение прогноза погоды','headline':headline,'title':headline,
+          'body':'\n\n'.join(details),'source_attribution_html':attribution,'reaction_line':'','urgent':True,
+          'image_query':'Nha Trang Vietnam storm clouds heavy rain flooded city street real photograph',
+          'idempotency_key':'weather_update:'+n.strftime('%Y-%m-%d-%H')}
+    if queue_review_item(s,item):
+        state['last_alert_at']=iso(n);state['last_alert_reason']=reason;state['last_alert_window']=current
+        for uid in sorted(ADMIN_USER_IDS):
+            try: send_dm(uid,f'🌧 <b>Изменение погоды обнаружено</b>\n{html.escape(reason)}\nМатериал добавлен в приоритетную очередь предпросмотра.')
+            except Exception: pass
 
 
 def weather_post(s, period):
-    """Prepare the current or next-day forecast for private review 15 minutes before the slot."""
-    key = 'weather_' + period
-    if slot_once(s, key) or count_today(s) >= 10 or is_paused(s) or s.get('pending_news_review'):
-        return
-    n = now()
-    if period == 'morning':
-        target = n.replace(hour=8, minute=0, second=0, microsecond=0)
-        image_query = 'Nha Trang Vietnam morning weather coastal city daylight'
-    elif period == 'evening':
-        target = n.replace(hour=18, minute=0, second=0, microsecond=0)
-        image_query = 'Nha Trang Vietnam coastal city evening weather seaside'
-    else:
-        return
-    if not (target - timedelta(minutes=15) <= n <= target + timedelta(minutes=75)):
-        return
-
-    url = ('https://api.open-meteo.com/v1/forecast?latitude=12.2388&longitude=109.1967'
-           '&current=temperature_2m,apparent_temperature,weather_code'
-           '&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max,weather_code'
-           '&timezone=Asia%2FHo_Chi_Minh&forecast_days=2')
+    """Queue a dated forecast with hourly probabilities, observed retrieval time and image."""
+    key='weather_'+period
+    if slot_once(s,key) or is_paused(s): return
+    n=now()
+    if period=='morning':
+        target=n.replace(hour=8,minute=0,second=0,microsecond=0); image='Nha Trang Vietnam sunny morning coast real photograph'
+    elif period=='evening':
+        target=n.replace(hour=18,minute=0,second=0,microsecond=0); image='Nha Trang Vietnam coastal city evening clouds real photograph'
+    else: return
+    if not target-timedelta(minutes=15)<=n<=target+timedelta(hours=5): return
     try:
-        data = json.loads(get_url(url).decode('utf-8'))
-        cur, daily = data['current'], data['daily']
-        index = 0 if period == 'morning' else 1
-        icons = {0:'☀️',1:'🌤️',2:'⛅',3:'☁️',45:'🌫️',48:'🌫️',51:'🌦️',53:'🌦️',55:'🌧️',
-                 61:'🌧️',63:'🌧️',65:'🌧️',80:'🌦️',81:'🌧️',82:'⛈️',95:'⛈️',96:'⛈️',99:'⛈️'}
-        names = {0:'ясно',1:'преимущественно ясно',2:'переменная облачность',3:'облачно',
-                 45:'туман',48:'туман',51:'морось',53:'морось',55:'сильная морось',
-                 61:'небольшой дождь',63:'дождь',65:'сильный дождь',80:'кратковременный дождь',
-                 81:'ливни',82:'сильные ливни',95:'гроза',96:'гроза с градом',99:'сильная гроза с градом'}
-        code, current_code = int(daily['weather_code'][index]), int(cur['weather_code'])
-        rain_values = daily.get('precipitation_probability_max', [None, None])
-        rain = rain_values[index] if len(rain_values) > index else None
+        data=fetch_weather_data(); headline,body,target_date=format_weather_forecast(data,period,n)
+        attribution='Источник прогноза: <a href="'+html.escape(data.get('provider_url') or 'https://open-meteo.com/',quote=True)+'">'+html.escape(data.get('provider') or 'погодный API')+'</a> · данные получены '+html.escape(data.get('retrieved_at') or iso(n))
+        if data.get('provider')=='Open-Meteo' and not WEATHERAPI_KEY:
+            attribution+=' · бесплатный тестовый режим; перед размещением рекламы настрой коммерческий источник'
+        queued=queue_review_item(s,{
+            'kind':'weather_'+period,'kind_label':'Погода на сегодня' if period=='morning' else 'Погода на завтра',
+            'headline':headline,'title':headline,'body':body,'source_attribution_html':attribution,
+            'reaction_line':'','image_query':image,'urgent':False,'forecast_date':target_date.isoformat(),
+            'forecast_retrieved_at':data.get('retrieved_at'),'forecast_provider':data.get('provider'),
+            'forecast_latitude':12.2388,'forecast_longitude':109.1967,'idempotency_key':key+':'+target_date.isoformat()
+        },planned_at=target if n<target else n+timedelta(minutes=15),slot_key=key)
+        if queued: mark_slot(s,key)
+    except Exception as exc:
+        d=s.setdefault('diagnostics',{}); d['last_weather_error_at']=iso(n);d['last_weather_error']=type(exc).__name__
+        print('Weather error; no unverified forecast was queued:',type(exc).__name__)
+        last=_weather_time(d.get('last_weather_notice_at'))
+        if not last or n-last>=timedelta(hours=6):
+            for uid in sorted(ADMIN_USER_IDS):
+                try: send_dm(uid,f'⚠️ <b>Погодный прогноз не обновлён</b>\nОшибка источника: {html.escape(type(exc).__name__)}. Ложные проценты не публиковались.')
+                except Exception: pass
+            d['last_weather_notice_at']=iso(n)
 
-        current_text = (
-            f'Сейчас в Нячанге {round(cur["temperature_2m"])}°C, '
-            f'{names.get(current_code, "переменная погода")} {icons.get(current_code, "🌤️")}; '
-            f'по ощущениям {round(cur["apparent_temperature"])}°C.'
-        )
-        if period == 'morning':
-            forecast_text = (
-                f'Сегодня ожидается {names.get(code, "переменная погода")} {icons.get(code, "🌤️")}; '
-                f'температура {round(daily["temperature_2m_min"][index])}–{round(daily["temperature_2m_max"][index])}°C.'
-            )
-        else:
-            forecast_text = (
-                f'Завтра ожидается {names.get(code, "переменная погода")} {icons.get(code, "🌤️")}; '
-                f'температура {round(daily["temperature_2m_min"][index])}–{round(daily["temperature_2m_max"][index])}°C.'
-            )
-        rain_text = f'Вероятность осадков — {rain}%.' if rain is not None else 'Вероятность осадков сейчас недоступна.'
-        if rain is not None and rain >= 60:
-            advice = 'Вероятность дождя высокая — учитывай это при поездках и планах на улице.'
-            image_query = 'Nha Trang Vietnam heavy rain wet streets tropical downpour'
-        elif rain is not None and rain >= 35:
-            advice = 'Возможен дождь, поэтому проверь прогноз перед выходом.'
-            image_query = 'Vietnam Nha Trang rainy weather wet street tropical rain'
-        elif code in (82, 95, 96, 99):
-            advice = 'В прогнозе есть гроза. Следи за обновлениями погоды перед выходом.'
-            image_query = 'Vietnam Nha Trang dark storm clouds coastal city rain'
-        else:
-            advice = 'Перед длительной поездкой проверь прогноз ещё раз.'
 
-        parts = [current_text, forecast_text, rain_text, advice]
-        if period == 'morning':
-            cutoff = n - timedelta(hours=24)
-            recent = []
-            for entry in s.get('published_news', []):
-                try:
-                    published_at = datetime.fromisoformat(entry.get('published_at', '')).astimezone(TZ)
-                except (TypeError, ValueError):
-                    continue
-                if cutoff <= published_at <= n and entry.get('summary'):
-                    recent.append(entry)
-            snippets = []
-            for entry in recent[-3:]:
-                summary = clean_multiline(entry.get('summary', ''))
-                first_sentence = re.split(r'(?<=[.!?])\s+', summary.replace('\n', ' '), maxsplit=1)[0]
-                if len(first_sentence) > 220:
-                    first_sentence = first_sentence[:217].rsplit(' ', 1)[0] + '…'
-                if first_sentence and first_sentence not in snippets:
-                    snippets.append(first_sentence)
-            if snippets:
-                parts.append('За последние сутки: ' + ' '.join(snippets))
-        parts.append('👍 — прогноз полезен; ❤️ — следим за погодой вместе.')
-        body = '\n\n'.join(parts)
 
-        planned_at = target if n < target else n + timedelta(minutes=15)
-        queued = queue_review_item(s, {
-            'kind': 'weather_' + period,
-            'kind_label': 'Погода на сегодня' if period == 'morning' else 'Погода на завтра',
-            'title': 'Погода в Нячанге',
-            'body': body,
-            'reaction_line': '',
-            'image_query': image_query,
-            'urgent': False
-        }, planned_at=planned_at, slot_key=key)
-        if queued:
-            mark_slot(s, key)
-    except Exception as e:
-        print('Weather error; no unverified weather message was queued:', type(e).__name__)
 
 def count_news_pipeline(s):
     """Count today's published local-news posts plus active/queued news drafts."""

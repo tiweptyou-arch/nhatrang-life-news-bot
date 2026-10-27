@@ -875,15 +875,17 @@ def queue_photo_keyboard(item_id):
 
 
 def review_priority(item):
-    """Lower number means earlier review; weather and confirmed safety updates take priority."""
+    """Weather/safety first, then fixed engagement rubrics, then routine news and manual tips."""
     kind = str(item.get('kind') or '')
     if kind.startswith('weather'):
         return 0
     if item.get('urgent'):
         return 1
-    if kind == 'news':
+    if item.get('slot_key') in {'review_morning', 'weather_morning', 'weather_evening', 'review_night'}:
         return 2
-    return 3
+    if kind == 'news':
+        return 3
+    return 4
 
 
 def promote_next_review_item(s):
@@ -3091,7 +3093,7 @@ def mark_slot(s,key): s['last_slots'][key]=now().date().isoformat()
 def next_routine_target(current_time=None):
     """Return the next fixed daily rubric time in Nha Trang timezone."""
     current_time = current_time or now()
-    targets = [(8, 0), (18, 0), (22, 30)]
+    targets = [(6, 30), (8, 0), (18, 0), (22, 30)]
     candidates = []
     for day_offset in (0, 1):
         day = current_time.date() + timedelta(days=day_offset)
@@ -3111,36 +3113,72 @@ def routine_target_within(minutes=25, current_time=None):
 
 
 def routine_posts(s):
-    """Queue a low-frequency night name game. Morning engagement is integrated into weather."""
+    """Queue the saved daily 06:30 greeting and 22:30 name-only night game."""
     if is_paused(s) or count_today(s) >= MAX_DAILY_POSTS:
         return
     n = now()
-    if n.isoweekday() not in (2, 4, 6):  # at most three chat games per week
+
+    # Exact morning-engagement slot from the channel brief; don't emit it outside its catch-up window.
+    morning_key = 'review_morning'
+    morning_target = n.replace(hour=6, minute=30, second=0, microsecond=0)
+    if (
+        morning_target - timedelta(minutes=15) <= n <= morning_target + timedelta(minutes=75)
+        and not slot_once(s, morning_key)
+    ):
+        morning_item = {
+            'kind': 'morning_greeting',
+            'kind_label': 'Доброе утро',
+            'headline': '☀️ Доброе утро!',
+            'title': '☀️ Доброе утро!',
+            'body': (
+                'Желаем вам хорошего дня!\n\n'
+                'Выспались?\n'
+                '👍 — да!\n'
+                '😴 — ещё сплю\n'
+                '😭 — нет, совсем не выспался'
+            ),
+            'reaction_line': '',
+            'image_query': 'Nha Trang Vietnam sunrise morning coast palm trees real photograph',
+            'urgent': False,
+            'idempotency_key': 'morning-greeting:' + n.date().isoformat()
+        }
+        planned = morning_target if n < morning_target else n + timedelta(minutes=15)
+        if queue_review_item(s, morning_item, planned_at=planned, slot_key=morning_key):
+            mark_slot(s, morning_key)
+
+    # The night-game starting name varies by date; no additional reaction-bait block is added.
+    night_key = 'review_night'
+    night_target = n.replace(hour=22, minute=30, second=0, microsecond=0)
+    if not (
+        night_target - timedelta(minutes=15) <= n <= night_target + timedelta(minutes=75)
+        and not slot_once(s, night_key)
+    ):
         return
-    key = 'review_night'
-    if slot_once(s, key):
-        return
-    target = n.replace(hour=22, minute=30, second=0, microsecond=0)
-    if not (target - timedelta(minutes=15) <= n <= target + timedelta(minutes=75)):
-        return
-    starts = [('Михаил','л'),('Екатерина','а'),('Дмитрий','й'),('Мария','я'),
-              ('Александр','р'),('Анна','а'),('Никита','а'),('Илья','я'),('Ольга','а')]
+    starts = [
+        ('Михаил', 'л'), ('Екатерина', 'а'), ('Дмитрий', 'й'),
+        ('Мария', 'я'), ('Александр', 'р'), ('Анна', 'а'),
+        ('Никита', 'а'), ('Илья', 'я'), ('Ольга', 'а')
+    ]
     name, letter = starts[int(n.strftime('%j')) % len(starts)]
-    headline = 'Открываем ночной чат!'
+    headline = '🌙 Доброй ночи!'
     body = (
-        'Сегодня играем в слова, но называть можно только имена.\n\n'
+        'Перед сном сыграем в слова. Называем только имена.\n\n'
         f'Начинаем: {html.escape(name)}, вам на «{html.escape(letter)}»!\n\n'
         'Пишите имя на последнюю букву предыдущего имени. Города, предметы и фамилии сегодня не принимаются.'
     )
     queued = queue_review_item(s, {
-        'kind': 'night', 'kind_label': 'Открываем ночной чат',
-        'headline': headline, 'title': headline, 'body': body, 'reaction_line': '',
+        'kind': 'night',
+        'kind_label': 'Доброй ночи',
+        'headline': headline,
+        'title': headline,
+        'body': body,
+        'reaction_line': '',
         'image_query': 'Nha Trang Vietnam night city lights beach promenade real photograph',
-        'urgent': False, 'idempotency_key': f'night-game:{n.date().isoformat()}'
-    }, planned_at=target if n < target else n + timedelta(minutes=15), slot_key=key)
+        'urgent': False,
+        'idempotency_key': f'night-game:{n.date().isoformat()}'
+    }, planned_at=night_target if n < night_target else n + timedelta(minutes=15), slot_key=night_key)
     if queued:
-        mark_slot(s, key)
-
+        mark_slot(s, night_key)
 
 def map_weatherapi_code(code):
     """Map provider condition codes to WMO-like categories for consistent summaries/alerts."""

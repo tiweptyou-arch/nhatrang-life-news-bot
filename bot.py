@@ -87,6 +87,72 @@ def is_recent_source_date(published_at, current_time=None, urgent=False):
     return age <= maximum_age
 
 
+
+
+def extract_article_date_candidates(page_html):
+    """Extract trustworthy-looking publication/update dates from common article metadata."""
+    source = html.unescape(page_html or '')
+    values = []
+    date_keys = {
+        'article:published_time', 'og:published_time', 'datepublished', 'datepublished',
+        'pubdate', 'publishdate', 'date', 'dc.date', 'dc.date.issued',
+        'article:modified_time', 'og:updated_time', 'datemodified', 'lastmod'
+    }
+    for tag in re.findall(r'<meta\b[^>]*>', source, flags=re.I | re.S):
+        attrs = {
+            key.casefold(): html.unescape(value).strip()
+            for key, _, value in re.findall(
+                r'([:\w-]+)\s*=\s*(["\'])(.*?)\2', tag, flags=re.I | re.S
+            )
+        }
+        key = (attrs.get('property') or attrs.get('name') or attrs.get('itemprop') or '').casefold()
+        value = attrs.get('content') or attrs.get('datetime') or ''
+        if key in date_keys and value:
+            parsed = parse_source_date(value)
+            if parsed:
+                values.append(parsed)
+    for match in re.finditer(
+        r'["\'](?:datePublished|dateModified|dateCreated|uploadDate)["\']\s*:\s*["\']([^"\']{8,40})["\']',
+        source, flags=re.I
+    ):
+        parsed = parse_source_date(match.group(1))
+        if parsed:
+            values.append(parsed)
+    for match in re.finditer(r'<time\b[^>]*datetime\s*=\s*["\']([^"\']+)["\']', source, flags=re.I):
+        parsed = parse_source_date(match.group(1))
+        if parsed:
+            values.append(parsed)
+    unique = {value.isoformat(): value for value in values}
+    return sorted(unique.values(), reverse=True)
+
+
+def extract_recent_article_date(page_html, current_time=None, urgent=False):
+    """Use an article's own metadata only when it proves the story is still current."""
+    current_time = current_time or now()
+    for published_at in extract_article_date_candidates(page_html):
+        if is_recent_source_date(published_at, current_time, urgent=urgent):
+            return published_at
+    return None
+
+
+def extract_article_text(page_html):
+    """Extract readable article paragraphs without scripts, styles, captions, or navigation."""
+    if not page_html:
+        return ''
+    article_match = re.search(r'<article\b[^>]*>(.*?)</article>', page_html, re.I | re.S)
+    if article_match:
+        raw = article_match.group(1)
+    else:
+        paragraphs = re.findall(r'<p\b[^>]*>(.*?)</p>', page_html, re.I | re.S)
+        raw = '\n'.join(paragraphs[:24])
+    raw = re.sub(r'<(script|style|noscript|svg|iframe)\b[^>]*>.*?</\1>', ' ', raw, flags=re.I | re.S)
+    raw = re.sub(r'<!--.*?-->', ' ', raw, flags=re.S)
+    raw = re.sub(r'</?(p|div|br|li|h[1-6]|section)\b[^>]*>', '\n', raw, flags=re.I)
+    raw = re.sub(r'<[^>]+>', ' ', raw)
+    raw = html.unescape(raw)
+    return clean_multiline(raw)
+
+
 def get_url(url):
     req = urllib.request.Request(url, headers={'User-Agent':'Mozilla/5.0 NhaTrangLifeNewsBot/2.0'})
     with urllib.request.urlopen(req, timeout=12) as r: return r.read()

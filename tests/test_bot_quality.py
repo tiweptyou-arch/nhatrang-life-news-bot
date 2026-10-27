@@ -378,17 +378,15 @@ class NewsQualityTests(unittest.TestCase):
         text_mock.assert_not_called()
         self.assertNotIn("publisher.example/story", api_mock.call_args.args[1]["caption"])
 
-    def test_long_photo_caption_preserves_continuation(self):
+    def test_long_photo_caption_is_blocked_without_text_only_continuation(self):
         post = ("Полезная информация для жителей Нячанга. " * 45) + "\n\nUNIQUE_END_MARKER"
-        response = {"message_id": 100, "chat": {"id": -1001}}
         with patch.object(bot, "commons_image") as commons_mock, \
-             patch.object(bot, "api", return_value=response) as api_mock, \
-             patch.object(bot, "post_text", return_value={"message_id": 101}) as text_mock:
-            bot.post_with_image(post, "https://cdn.publisher.example/road-photo.jpg")
-        caption = api_mock.call_args.args[1]["caption"]
-        self.assertLessEqual(len(caption), 950)
-        self.assertGreaterEqual(text_mock.call_count, 1)
-        self.assertIn("UNIQUE_END_MARKER", "\n".join(c.args[0] for c in text_mock.call_args_list))
+             patch.object(bot, "api") as api_mock, \
+             patch.object(bot, "post_text") as text_mock:
+            with self.assertRaises(bot.MediaCaptionTooLongError):
+                bot.post_with_image(post, "https://cdn.publisher.example/road-photo.jpg")
+        api_mock.assert_not_called()
+        text_mock.assert_not_called()
         commons_mock.assert_not_called()
 
     def test_extract_article_image_prefers_open_graph_image(self):
@@ -1352,6 +1350,78 @@ class NewsQualityTests(unittest.TestCase):
             "source_attribution_html": 'Источник прогноза: <a href="https://www.weatherapi.com/">WeatherAPI.com</a>',
         }
         self.assertIn("WeatherAPI.com", bot.review_post_text(weather))
+
+
+
+    def test_oversized_review_stops_autopublish_and_keeps_editor_slot_open(self):
+        current = datetime(2026, 10, 27, 10, 30, tzinfo=bot.TZ)
+        planned = current - timedelta(minutes=1)
+        item = {
+            "id": "rv-long-caption", "kind": "news", "kind_label": "Полезная новость",
+            "headline": "Длительное обновление для жителей Нячанга",
+            "title": "Длительное обновление для жителей Нячанга",
+            "body": "Проверенная информация для жителей и приезжих в Нячанге. " * 45,
+            "status": "pending_review", "planned_at": planned.isoformat(),
+            "slot_key": "weather_morning", "preview_messages": [],
+            "review_status_messages": [],
+        }
+        state = {
+            "pending_news_review": item, "review_queue": [], "daily_counts": {},
+            "published_news": [], "paused": False, "pause_until": "", "ads": [],
+        }
+        with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "is_paused", return_value=False), \
+             patch.object(bot, "send_dm") as dm_mock, \
+             patch.object(bot, "mark_slot") as mark_mock, \
+             patch.object(bot, "post_with_image") as post_mock:
+            bot.process_news_review(state)
+        self.assertEqual(item["status"], "needs_edit")
+        self.assertEqual(item["needs_edit_reason"], "caption_too_long")
+        self.assertEqual(item["planned_at"], planned.isoformat())
+        self.assertEqual(state["pending_news_review"]["id"], "rv-long-caption")
+        mark_mock.assert_not_called()
+        post_mock.assert_not_called()
+        self.assertTrue(dm_mock.called)
+
+    def test_verified_urgent_publish_can_preserve_existing_editor_draft(self):
+        current = datetime(2026, 10, 27, 10, 30, tzinfo=bot.TZ)
+        active = {
+            "id": "rv-editor-active", "kind": "news", "status": "pending_review",
+            "headline": "Текущий черновик", "title": "Текущий черновик",
+            "body": "Проверенный текст для отдельной редакторской публикации.",
+            "planned_at": (current + timedelta(minutes=15)).isoformat(),
+        }
+        urgent = {
+            "id": "rv-urgent", "kind": "news", "status": "pending_review", "urgent": True,
+            "headline": "Официальное предупреждение о наводнении",
+            "title": "Официальное предупреждение о наводнении",
+            "source_title": "Cảnh báo ngập lụt",
+            "body": "Местные службы предупредили об угрозе наводнения. Следуйте официальным указаниям и избегайте затопленных дорог.",
+            "link": "https://khanhhoa.gov.vn/emergency-flood",
+            "source_url": "https://khanhhoa.gov.vn/emergency-flood",
+            "source_published_at": current.isoformat(),
+            "image_url": "https://cdn.khanhhoa.gov.vn/flood.jpg",
+            "image_query": "Nha Trang Vietnam flood warning",
+            "idempotency_key": "https://khanhhoa.gov.vn/emergency-flood",
+            "preview_messages": [],
+        }
+        queued = {"id": "rv-queued", "kind": "news", "status": "pending_review", "link": "https://news.example/queued"}
+        state = {
+            "pending_news_review": active, "review_queue": [queued], "daily_counts": {},
+            "published_news": [], "seen_links": [], "seen_titles": [],
+            "seen_fingerprints": [], "ads": [],
+        }
+        with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "post_with_image", return_value={"message_id": 987, "chat": {"id": -1001}}), \
+             patch.object(bot, "send_dm"), \
+             patch.object(bot, "delete_review_previews") as delete_mock:
+            result = bot.publish_review_item(state, urgent, preserve_pending=True)
+        self.assertEqual(result["message_id"], 987)
+        self.assertEqual(state["pending_news_review"], active)
+        self.assertEqual(state["review_queue"], [queued])
+        self.assertEqual(active["status"], "pending_review")
+        self.assertEqual(urgent["status"], "published")
+        delete_mock.assert_not_called()
 
 
 if __name__ == "__main__":

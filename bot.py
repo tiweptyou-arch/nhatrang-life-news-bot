@@ -2263,7 +2263,7 @@ def show_ad_preview(s, uid):
     ad['created_by'] = uid
     ad['review_status'] = 'pending_review'
     s['pending_ad'] = ad
-    send_dm(
+    controls = send_dm(
         uid,
         f'<b>Предпросмотр рекламы готов</b>\n'
         f'Формат: {html.escape(str(ad.get("format", "1/24")))}\n'
@@ -2271,6 +2271,16 @@ def show_ad_preview(s, uid):
         'Можно опубликовать сразу, отредактировать черновик или отменить.',
         ad_review_keyboard(ad)
     )
+    if not controls or not controls.get('message_id'):
+        ad.pop('previewed_at', None)
+        ad.pop('review_due_at', None)
+        ad.pop('review_status', None)
+        s['pending_ad'] = ad
+        try:
+            send_dm(uid, '⚠️ Не удалось доставить кнопки управления рекламой. Таймер не запущен и публикации не будет. Попробуй снова через /preview.')
+        except Exception:
+            pass
+        return False
     return True
 
 

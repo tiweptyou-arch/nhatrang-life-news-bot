@@ -2208,7 +2208,14 @@ def handle_admin_message(msg, s):
         for a in s['ads'][-30:]:
             status='удалена' if a.get('deleted') else ('запланирована на '+parse_dt(a['scheduled_at']).strftime('%d.%m %H:%M') if a.get('scheduled_at') and not a.get('message_id') else 'активна')
             rows.append(f'ID <code>{a.get("id","?")}</code> · {a.get("format","?")} · {status}')
-        send_dm(uid,'<b>Реклама</b>\\n'+'\\n'.join(rows) if rows else 'Реклам пока нет.', main_menu())
+        add_markup = {'inline_keyboard': [
+            [{'text': '➕ Добавить рекламу · 1/24', 'callback_data': 'ad_new:1:24'},
+             {'text': '➕ Добавить рекламу · 2/48', 'callback_data': 'ad_new:2:48'}]
+        ]}
+        if not WEATHERAPI_KEY:
+            send_dm(uid, '<b>Реклама</b>\nПубликация рекламы временно заблокирована до настройки коммерчески разрешённого погодного API. Открой ⚙️ Настройки.', main_menu())
+        else:
+            send_dm(uid, '<b>Реклама</b>\n' + ('\n'.join(rows) if rows else 'Активных реклам пока нет.') + '\nВыбери формат кнопкой ниже.', add_markup)
         for a in s['ads'][-10:]:
             if a.get('message_id') and not a.get('deleted'):
                 send_dm(uid, f'Реклама ID <code>{a.get("id","?")}</code> · удаление: {parse_dt(a["expires_at"]).strftime("%d.%m %H:%M") if a.get("expires_at") else "не задано"} · закрепление можно проверить кнопкой ниже.', ad_actions(a.get('id','?')))
@@ -2366,6 +2373,32 @@ def delete_ad_message(ad):
         raise RuntimeError('; '.join(errors))
 
 def process_ad_timers(s):
+    # The pending ad is a private draft. It is auto-published only after an explicit preview
+    # and a complete 15-minute review window; no preview, no automatic publication.
+    pending = s.get('pending_ad') or {}
+    due_at = parse_dt_strict(pending.get('review_due_at'))
+    if (
+        pending and not pending.get('awaiting_content')
+        and pending.get('previewed_at')
+        and pending.get('review_status') == 'pending_review'
+        and due_at is not None and due_at <= now()
+        and not pending.get('scheduled_at')
+    ):
+        creator = pending.get('created_by') or next(iter(sorted(ADMIN_USER_IDS)), '')
+        try:
+            publish_ad(pending, s, creator or None)
+        except Exception as exc:
+            print('Pending ad auto-publication failed:', type(exc).__name__)
+            pending['review_due_at'] = iso(now() + timedelta(minutes=5))
+            if not pending.get('_publish_error_notified'):
+                pending['_publish_error_notified'] = True
+                if creator:
+                    try:
+                        send_dm(creator,
+                            f'⚠️ Не удалось автоматически опубликовать рекламу: {html.escape(str(exc)[:220])}. '
+                            'Черновик сохранён, повторная попытка — через 5 минут. Исправь настройки или отмени черновик.')
+                    except Exception:
+                        pass
     for ad in s['ads']:
         if ad.get('deleted'):
             continue
@@ -2513,6 +2546,63 @@ def handle_callback(q, s):
                 send_dm(uid, 'Неизвестное действие. Открой /menu и используй последние кнопки.')
 
 
+        elif data.startswith('adreview:'):
+            action = data.split(':', 1)[1]
+            pending = s.get('pending_ad') or {}
+            if not pending or not pending.get('previewed_at'):
+                send_dm(uid, 'Черновик рекламы уже завершён или ещё не прошёл предпросмотр.', main_menu())
+            elif action == 'publish':
+                try:
+                    publish_ad(pending, s, uid)
+                except Exception as exc:
+                    pending['review_due_at'] = iso(now() + timedelta(minutes=5))
+                    send_dm(uid, f'⚠️ Реклама пока не опубликована: {html.escape(str(exc)[:220])}. Черновик сохранён. Проверь /settings.', main_menu())
+            elif action == 'edit':
+                pending['awaiting_content'] = True
+                pending.pop('previewed_at', None)
+                pending.pop('review_due_at', None)
+                pending.pop('review_status', None)
+                for field in ('type', 'file_id', 'media_items', 'text'):
+                    pending.pop(field, None)
+                send_dm(uid, 'Пришли заново текст, фото или видео рекламы. Старый материал будет заменён. Затем бот снова покажет предпросмотр и запустит таймер 15 минут.', main_menu())
+            elif action == 'delay15':
+                pending['review_due_at'] = iso(now() + timedelta(minutes=15))
+                send_dm(uid, f'🕒 Таймер рекламы продлён до {(now()+timedelta(minutes=15)).strftime("%d.%m %H:%M")} по времени Нячанга.', main_menu())
+            elif action == 'reject':
+                s['pending_ad'] = {}
+                send_dm(uid, '🗑 Черновик рекламы отменён. Он не будет опубликован.', main_menu())
+            else:
+                send_dm(uid, 'Неизвестное действие рекламы. Открой /ads и попробуй ещё раз.', main_menu())
+        elif data.startswith('ad_new:'):
+            try:
+                _, top_text, life_text = data.split(':', 2)
+                top_hours, life_hours = int(top_text), int(life_text)
+            except (ValueError, TypeError):
+                send_dm(uid, 'Не удалось распознать формат рекламы. Открой /ads ещё раз.', main_menu())
+                return
+            if not WEATHERAPI_KEY:
+                send_dm(uid, 'Публикация рекламы пока заблокирована: сначала добавь секрет WEATHERAPI_KEY в GitHub Actions Secrets. Это нужно, чтобы использовать погодный источник, допускающий коммерческий канал.', main_menu())
+            elif s.get('pending_ad') and s['pending_ad'].get('awaiting_content'):
+                send_dm(uid, 'Сначала закончи текущий рекламный черновик или отмени его командой /cancel.', main_menu())
+            elif not (1 <= top_hours <= 72 and top_hours <= life_hours <= 720):
+                send_dm(uid, 'Недопустимая длительность рекламы. Используй предложенные кнопки.', main_menu())
+            else:
+                s['pending_ad'] = {
+                    'format': f'{top_hours}/{life_hours}', 'top_hours': top_hours, 'life_hours': life_hours,
+                    'created_by': uid, 'awaiting_content': True
+                }
+                send_dm(uid, f'Пришли следующим сообщением рекламный текст, фото или видео.\nФормат: {top_hours}/{life_hours} (часов в топе / часов до удаления).\nПосле получения содержимого бот покажет предпросмотр, и только через 15 минут без ответа сможет опубликовать рекламу.', main_menu())
+        elif data.startswith('queuephoto:'):
+            target = data.split(':', 1)[1]
+            item = next((entry for entry in s.get('review_queue', []) if str(entry.get('id')) == target), None)
+            if not item:
+                send_dm(uid, 'Материал больше не находится в очереди. Открой /reviewqueue.', main_menu())
+            else:
+                s['review_editing'] = {
+                    'id': target, 'user_id': uid, 'started_at': iso(now()),
+                    'mode': 'queued_photo', 'version': int(item.get('version', 1))
+                }
+                send_dm(uid, f'🖼 Пришли фото для материала «{html.escape((item.get("headline") or item.get("title") or "")[:120])}». После загрузки оно попадёт в предпросмотр. Для отмены — /cancelreview.', main_menu())
         elif data.startswith('ad_delete:'):
             target=data.split(':',1)[1]
             ad=next((a for a in s['ads'] if str(a.get('id'))==target and not a.get('deleted')),None)

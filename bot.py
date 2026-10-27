@@ -2238,6 +2238,9 @@ def handle_admin_message(msg, s):
     if cmd in ('/start','/menu','/help'):
         send_dm(uid, '<b>Панель Нячанг Лайф</b>\\nВыбери действие кнопками ниже.\\n\\nРеклама: /ad 1/24 → отправь содержимое → /preview → /publish.\\nДругие команды: /ads, /status, /pause, /resume, /cancel.', main_menu())
     elif cmd=='/ad':
+        if not WEATHERAPI_KEY:
+            send_dm(uid, 'Создание/публикация рекламы заблокированы, пока не настроен WEATHERAPI_KEY. Добавь его в GitHub Actions Secrets и повтори /ads.')
+            return
         if (s.get('pending_manual_post') or {}).get('awaiting_content'):
             send_dm(uid, 'Сначала отправь материал для очереди новостей или отмени этот черновик командой /cancel.')
             return

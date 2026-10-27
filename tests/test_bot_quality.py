@@ -114,7 +114,7 @@ class NewsQualityTests(unittest.TestCase):
             }
             bot.handle_admin_message(submission, state)
         self.assertEqual(len(state["manual_posts"]), 1)
-        self.assertEqual(state["manual_posts"][0]["status"], "pending")
+        self.assertEqual(state["manual_posts"][0]["status"], "queued_for_review")
         self.assertFalse(state["pending_manual_post"].get("awaiting_content", False))
 
     def test_newsqueue_lists_pending_item_id(self):
@@ -599,7 +599,8 @@ class NewsQualityTests(unittest.TestCase):
         posted_text = post_mock.call_args.args[0]
         self.assertIn("Местные власти объявили", posted_text)
         self.assertNotIn("Nha Trang announces road repairs", posted_text)
-        self.assertNotIn("publisher.example/road-repair", posted_text)
+        self.assertIn('Источник: <a href="https://publisher.example/road-repair">publisher.example</a>', posted_text)
+        self.assertNotIn("publisher.example/road-repair", posted_text.split("Источник:", 1)[0])
         self.assertEqual(post_mock.call_args.kwargs["image_file_id"], "reviewed-photo-file")
         self.assertEqual(state["pending_news_review"], {})
         self.assertEqual(state["published_news"][0]["link"], "https://publisher.example/road-repair")

@@ -705,7 +705,7 @@ def review_status_text(item):
 
 
 def send_review_preview(item):
-    """Send a private photo preview and review controls to every configured admin."""
+    """Send the complete image/video/album preview and inline controls to every editor."""
     admins = sorted(ADMIN_USER_IDS)
     if not admins:
         print('No configured admins; review item was not queued.')
@@ -714,73 +714,115 @@ def send_review_preview(item):
     item.setdefault('preview_messages', [])
     item.setdefault('review_status_messages', [])
     item['image_file_id'] = item.get('image_file_id') or ''
-    image_fallback_attempted = False
-    photo_delivered_admins = set()
+    delivered = set()
+    full_text = review_post_text(item)
+    media_items = [
+        entry for entry in (item.get('media_items') or [])
+        if entry.get('type') in ('photo', 'video') and entry.get('file_id')
+    ]
 
     for admin_id in admins:
-        if item.get('image_file_id'):
-            photo = item['image_file_id']
-        else:
-            photo = normalize_image_url(item.get('image_url') or '')
-            if not photo:
-                photo = ''
-        while True:
-            if not photo:
-                if image_fallback_attempted:
-                    break
-                image_fallback_attempted = True
-                fallback = commons_image(item.get('image_query') or news_image_query(item.get('title', ''), item.get('body', '')))
-                if not fallback:
-                    break
-                if isinstance(fallback, dict):
-                    item['image_url'] = fallback.get('url') or ''
-                    item['image_credit_html'] = fallback.get('credit_html') or ''
-                else:
-                    item['image_url'] = fallback
-                    item['image_credit_html'] = ''
-                item['image_file_id'] = ''
-                photo = normalize_image_url(item.get('image_url') or '')
-                continue
-
-            full_text = review_post_text(item)
-            caption_limit = 800 if item.get('image_credit_html') else 950
-            caption, continuation = split_photo_caption(full_text, limit=caption_limit)
-            if not caption:
-                caption = '🇻🇳 Новости Нячанга'
-            try:
-                sent_photo = api('sendPhoto', {
+        try:
+            if len(media_items) >= 2:
+                caption, continuation = split_photo_caption(full_text, limit=950)
+                media = []
+                for index, entry in enumerate(media_items[:10]):
+                    element = {'type': entry['type'], 'media': entry['file_id']}
+                    if index == 0:
+                        element['caption'] = caption
+                        element['parse_mode'] = 'HTML'
+                    media.append(element)
+                sent_group = api('sendMediaGroup', {
                     'chat_id': admin_id,
-                    'photo': photo,
-                    'caption': caption,
-                    'parse_mode': 'HTML'
+                    'media': json.dumps(media, ensure_ascii=False)
                 })
-                item['image_file_id'] = (
-                    ((sent_photo.get('photo') or [])[-1]).get('file_id', '')
-                    if isinstance(sent_photo, dict) else ''
-                )
-                item['preview_messages'].append({
-                    'chat_id': admin_id, 'message_id': sent_photo.get('message_id')
-                })
-                photo_delivered_admins.add(admin_id)
+                if not isinstance(sent_group, list) or len(sent_group) < 2:
+                    raise RuntimeError('Telegram did not return the preview album messages.')
+                for message in sent_group:
+                    if message.get('message_id'):
+                        item['preview_messages'].append({
+                            'chat_id': admin_id, 'message_id': message['message_id']
+                        })
                 if continuation:
                     continued = send_dm(admin_id, 'Продолжение текста публикации:\n\n' + continuation)
                     if continued and continued.get('message_id'):
                         item['preview_messages'].append({
                             'chat_id': admin_id, 'message_id': continued['message_id']
                         })
-                status = send_dm(admin_id, review_status_text(item), review_keyboard(item['id'], item.get('version', 1)))
-                if status and status.get('message_id'):
-                    message_ref = {'chat_id': admin_id, 'message_id': status['message_id']}
-                    item['preview_messages'].append(message_ref)
-                    item['review_status_messages'].append(message_ref)
-                break
-            except Exception as e:
-                print('Review photo preview failed:', type(e).__name__)
-                item['image_file_id'] = ''
-                photo = ''
-                continue
+            else:
+                # Single photo/video submissions are valid media; do not send a video file_id as a photo.
+                media_type = item.get('media_type') or 'photo'
+                media_id = item.get('image_file_id') or ''
+                media_url = normalize_image_url(item.get('image_url') or '')
+                if media_type not in ('photo', 'video') or not media_id:
+                    media_type = 'photo'
+                    if not media_id:
+                        media_id = media_url
+                image_fallback_attempted = False
+                while True:
+                    if not media_id:
+                        if image_fallback_attempted:
+                            raise RuntimeError('No usable photo or video available for preview.')
+                        image_fallback_attempted = True
+                        fallback = commons_image(item.get('image_query') or news_image_query(item.get('headline') or item.get('title', ''), item.get('body', '')))
+                        if not fallback:
+                            raise RuntimeError('No suitable image could be found.')
+                        if isinstance(fallback, dict):
+                            item['image_url'] = fallback.get('url') or ''
+                            item['image_credit_html'] = fallback.get('credit_html') or ''
+                        else:
+                            item['image_url'] = fallback
+                            item['image_credit_html'] = ''
+                        media_id = normalize_image_url(item.get('image_url') or '')
+                        media_type = 'photo'
+                        continue
 
-    return bool(admins) and photo_delivered_admins == set(admins) and bool(item.get('image_file_id'))
+                    full_text = review_post_text(item)
+                    caption_limit = 800 if item.get('image_credit_html') else 950
+                    caption, continuation = split_photo_caption(full_text, limit=caption_limit)
+                    if not caption:
+                        caption = '🇻🇳 Новости Нячанга'
+                    method = 'sendVideo' if media_type == 'video' else 'sendPhoto'
+                    field = 'video' if media_type == 'video' else 'photo'
+                    sent = api(method, {
+                        'chat_id': admin_id, field: media_id,
+                        'caption': caption, 'parse_mode': 'HTML'
+                    })
+                    if not isinstance(sent, dict) or not sent.get('message_id'):
+                        raise RuntimeError('Telegram did not confirm the preview media.')
+                    item['image_file_id'] = (
+                        ((sent.get('video') or {}).get('file_id') if media_type == 'video'
+                         else ((sent.get('photo') or [])[-1]).get('file_id', ''))
+                        or item.get('image_file_id') or ''
+                    )
+                    item['media_type'] = media_type
+                    item['preview_messages'].append({
+                        'chat_id': admin_id, 'message_id': sent['message_id']
+                    })
+                    if continuation:
+                        continued = send_dm(admin_id, 'Продолжение текста публикации:\n\n' + continuation)
+                        if continued and continued.get('message_id'):
+                            item['preview_messages'].append({
+                                'chat_id': admin_id, 'message_id': continued['message_id']
+                            })
+                    break
+
+            status = send_dm(
+                admin_id, review_status_text(item),
+                review_keyboard(item['id'], item.get('version', 1))
+            )
+            if status and status.get('message_id'):
+                ref = {'chat_id': admin_id, 'message_id': status['message_id']}
+                item['preview_messages'].append(ref)
+                item['review_status_messages'].append(ref)
+            delivered.add(admin_id)
+        except Exception as exc:
+            print('Review preview failed for one editor:', type(exc).__name__)
+
+    return delivered == set(admins) and bool(item.get('preview_messages'))
+
+
+
 
 def queue_photo_keyboard(item_id):
     return {'inline_keyboard': [[{'text': '📷 Добавить фото вручную', 'callback_data': f'queuephoto:{item_id}'}]]}
@@ -939,14 +981,55 @@ def queue_review_item(s, item, planned_at=None, slot_key=None):
 
 
 def publish_review_item(s, item):
-    """Publish an approved/due candidate once, then persist it to the normal deduplication history."""
-    text = review_post_text(item)
-    result = post_with_image(
-        text,
-        image_url=item.get('image_url') or None,
-        image_file_id=item.get('image_file_id') or None,
-        image_query=item.get('image_query') or None
-    )
+    """Publish an approved/due candidate once, preserving supported media and state history."""
+    post_text_value = review_post_text(item)
+    media_items = [
+        entry for entry in (item.get('media_items') or [])
+        if entry.get('type') in ('photo', 'video') and entry.get('file_id')
+    ]
+    if len(media_items) >= 2:
+        caption, continuation = split_photo_caption(post_text_value, limit=950)
+        media = []
+        for index, entry in enumerate(media_items[:10]):
+            element = {'type': entry['type'], 'media': entry['file_id']}
+            if index == 0:
+                element['caption'] = caption
+                element['parse_mode'] = 'HTML'
+            media.append(element)
+        result_messages = api('sendMediaGroup', {
+            'chat_id': CHANNEL,
+            'media': json.dumps(media, ensure_ascii=False)
+        })
+        if not isinstance(result_messages, list) or len(result_messages) < 2:
+            raise RuntimeError('Telegram did not confirm the news album.')
+        result = {
+            'message_id': result_messages[0].get('message_id'),
+            '_message_ids': [message.get('message_id') for message in result_messages if message.get('message_id')]
+        }
+        if continuation:
+            time.sleep(0.2)
+            post_text(html.escape(continuation))
+    elif item.get('media_type') in ('photo', 'video') and item.get('image_file_id'):
+        caption, continuation = split_photo_caption(post_text_value, limit=950)
+        media_type = item['media_type']
+        method = 'sendVideo' if media_type == 'video' else 'sendPhoto'
+        field = 'video' if media_type == 'video' else 'photo'
+        result = api(method, {
+            'chat_id': CHANNEL, field: item['image_file_id'],
+            'caption': caption, 'parse_mode': 'HTML'
+        })
+        if not isinstance(result, dict) or not result.get('message_id'):
+            raise RuntimeError('Telegram did not confirm the news media.')
+        if continuation:
+            time.sleep(0.2)
+            post_text(html.escape(continuation))
+    else:
+        result = post_with_image(
+            post_text_value,
+            image_url=item.get('image_url') or None,
+            image_file_id=item.get('image_file_id') or None,
+            image_query=item.get('image_query') or None
+        )
     if not result:
         raise RuntimeError('Публикация не вернула подтверждение Telegram.')
     timestamp = iso(now())
@@ -958,7 +1041,7 @@ def publish_review_item(s, item):
         s['seen_titles'] = (s.get('seen_titles', []) + [original_title])[-500:]
         s['seen_fingerprints'] = (s.get('seen_fingerprints', []) + [title_fingerprint(original_title)])[-1000:]
         s['published_news'] = (s.get('published_news', []) + [{
-            'title': item.get('title') or original_title,
+            'title': item.get('headline') or item.get('title') or original_title,
             'summary': clean_multiline(item.get('body', '')),
             'link': source_link,
             'published_at': timestamp,
@@ -974,9 +1057,10 @@ def publish_review_item(s, item):
     for admin_id in sorted(ADMIN_USER_IDS):
         try:
             send_dm(admin_id, f'✅ Материал <code>{html.escape(item.get("id", ""))}</code> опубликован в канале.')
-        except Exception as e:
-            print('Review publication notice failed:', type(e).__name__)
+        except Exception as exc:
+            print('Review publication notice failed:', type(exc).__name__)
     return result
+
 
 
 
@@ -1731,7 +1815,8 @@ def capture_manual_post(msg, s, uid):
         'body': body, 'link': source_url, 'source_url': source_url,
         'source_name': source_name_from_url(source_url) if source_url else '',
         'source_published_at': '',
-        'image_file_id': file_id if post_type == 'photo' else '',
+        'image_file_id': file_id if post_type in ('photo', 'video') else '',
+        'media_type': post_type if post_type in ('photo', 'video') else '',
         'image_url': '', 'image_query': image_query,
         'reaction_line': sanitize_reaction_line(reaction),
         'urgent': False, 'idempotency_key': source_url or 'manual:' + item_id
@@ -1861,7 +1946,7 @@ def publish_manual_post(item, s, uid=None):
     return result
 
 def handle_admin_album(messages, s):
-    """Capture a Telegram media group as one manual tip or one ad draft."""
+    """Queue a manual media album through the same private editorial flow as every other post."""
     if not messages:
         return
     messages = sorted(messages, key=lambda m: int(m.get('message_id', 0)))
@@ -1873,53 +1958,92 @@ def handle_admin_album(messages, s):
     manual_pending = s.get('pending_manual_post') or {}
     if manual_pending.get('awaiting_content'):
         media_items = []
-        for msg in messages:
-            if msg.get('photo'):
-                media_items.append({'type': 'photo', 'file_id': msg['photo'][-1]['file_id']})
-            elif msg.get('video'):
-                media_items.append({'type': 'video', 'file_id': msg['video']['file_id']})
+        for message in messages:
+            if message.get('photo'):
+                media_items.append({'type': 'photo', 'file_id': message['photo'][-1]['file_id']})
+            elif message.get('video'):
+                media_items.append({'type': 'video', 'file_id': message['video']['file_id']})
+        if not media_items:
+            send_dm(uid, 'В альбоме не найдено фото или видео. Пришли альбом ещё раз или /cancel.')
+            return
+        if len(media_items) > 10:
+            media_items = media_items[:10]
         content = (first.get('caption') or '').strip()
         if not content:
             content = next(((m.get('caption') or '').strip() for m in messages if (m.get('caption') or '').strip()), '')
         if not content:
-            send_dm(uid, 'Добавь заголовок или описание к альбому и отправь его снова. Для отмены: /cancel')
+            send_dm(uid, 'Добавь короткое описание к альбому. Без текста материал не попадёт в очередь. Для отмены: /cancel')
             return
+
+        source_match = re.search(r'https?://[^\s<>]+', content)
+        source_url = source_match.group(0).rstrip('.,);]') if source_match else ''
+        clean_content = clean_multiline(re.sub(r'https?://\S+', '', content))
+        headline, body = split_manual_content(clean_content)
+        if not body:
+            body = clean_content
+            headline = clean_content.split('\n', 1)[0][:120].strip()
+        if not headline:
+            headline = 'Материал редактора'
+        if normalized_title(headline) == normalized_title(body[:len(headline)]):
+            body = body[len(headline):].lstrip(' .,:;—-\n')
+        if not body:
+            body = clean_content
+        if not body:
+            send_dm(uid, 'В подписи альбома не осталось описания. Добавь пару предложений и пришли снова.')
+            return
+
         item_id = f'{uid}-{first.get("message_id") or int(time.time() * 1000)}'
+        first_media = media_items[0]
+        queued = queue_review_item(s, {
+            'kind': 'news' if source_url else 'manual_tip',
+            'kind_label': 'Предложенная новость с альбомом' if source_url else 'Материал редактора с альбомом',
+            'headline': headline, 'title': headline, 'source_title': headline,
+            'body': body, 'link': source_url, 'source_url': source_url,
+            'source_name': source_name_from_url(source_url) if source_url else '',
+            'source_published_at': iso(now()),
+            'image_file_id': first_media['file_id'],
+            'media_type': first_media['type'],
+            'media_items': media_items,
+            'image_url': '', 'image_query': news_image_query(headline, body),
+            'reaction_line': sanitize_reaction_line(reaction_line(headline + ' ' + body)),
+            'urgent': False, 'idempotency_key': source_url or 'manual-album:' + item_id
+        })
         s.setdefault('manual_posts', []).append({
-            'id': item_id, 'status': 'pending', 'content': content,
-            'type': 'album', 'media_items': media_items,
+            'id': item_id, 'status': 'queued_for_review' if queued else 'not_queued',
+            'content': content, 'type': 'album', 'media_items': media_items,
+            'review_id': (s.get('pending_news_review') or {}).get('id', ''),
             'submitted_by': uid, 'created_at': iso(now())
         })
         s['pending_manual_post'] = {}
-        send_dm(uid, f'Альбом добавлен в очередь проверки. ID: <code>{html.escape(item_id)}</code>.\n'
-                     'Посмотреть очередь: /newsqueue\nОпубликовать: /approve ID\nОтклонить: /reject ID')
+        if queued:
+            send_dm(uid, f'✅ Альбом добавлен в редакторскую очередь. ID: <code>{html.escape(item_id)}</code>. Проверь фото/текст в предпросмотре; публикация не начнётся без подтверждённого предпросмотра.', main_menu())
+        else:
+            send_dm(uid, 'Альбом не добавлен: материал уже в очереди или не прошёл проверку. Открой /reviewqueue.', main_menu())
         return
 
     pending = s.get('pending_ad') or {}
     if not pending.get('awaiting_content'):
         return
     media_items = []
-    for msg in messages:
-        if msg.get('photo'):
-            media_items.append({'type': 'photo', 'file_id': msg['photo'][-1]['file_id'],
-                                'caption': (msg.get('caption') or '').strip()})
-        elif msg.get('video'):
-            media_items.append({'type': 'video', 'file_id': msg['video']['file_id'],
-                                'caption': html.escape((msg.get('caption') or '').strip())})
-    if len(media_items) < 2:
-        handle_admin_message(first, s)
+    for message in messages:
+        if message.get('photo'):
+            media_items.append({'type': 'photo', 'file_id': message['photo'][-1]['file_id'],
+                                'caption': (message.get('caption') or '').strip()})
+        elif message.get('video'):
+            media_items.append({'type': 'video', 'file_id': message['video']['file_id'],
+                                'caption': html.escape((message.get('caption') or '').strip())})
+    if not 2 <= len(media_items) <= 10:
+        send_dm(uid, 'Для рекламного альбома требуется от 2 до 10 фото/видео.')
         return
     first_caption = (first.get('caption') or '').strip()
     pending.update({
-        'type': 'album',
-        'media_items': media_items,
+        'type': 'album', 'media_items': media_items,
         'text': html.escape(first_caption),
         'awaiting_content': False
     })
     s['pending_ad'] = pending
-    send_dm(uid, f'Черновик альбома готов: {len(media_items)} медиафайла.\n'
-                 f'Проверь содержимое через /preview.\nПубликуем: /publish\n'
-                 f'Отложить: /schedule ГГГГ-ММ-ДД ЧЧ:ММ\nОтменить: /cancel')
+    send_dm(uid, f'Черновик альбома готов: {len(media_items)} медиафайла.\nПроверь содержимое через /preview.\nПосле предпросмотра запустится таймер 15 минут.', main_menu())
+
 
 
 

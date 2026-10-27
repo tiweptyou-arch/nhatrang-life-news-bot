@@ -2176,7 +2176,7 @@ def handle_admin_album(messages, s):
         'awaiting_content': False
     })
     s['pending_ad'] = pending
-    send_dm(uid, f'Черновик альбома готов: {len(media_items)} медиафайла.\nПроверь содержимое через /preview.\nПосле предпросмотра запустится таймер 15 минут.', main_menu())
+    show_ad_preview(s, uid)
 
 
 

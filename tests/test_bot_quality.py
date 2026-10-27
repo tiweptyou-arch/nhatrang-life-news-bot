@@ -1325,7 +1325,7 @@ class NewsQualityTests(unittest.TestCase):
 
     def test_production_weather_refuses_open_meteo_fallback_without_commercial_key(self):
         env = {"GITHUB_ACTIONS": "true", "BOT_TEST_MODE": "", "WEATHERAPI_KEY": ""}
-        with patch.dict(os.environ, env), patch.object(bot, "get_url") as url_mock:
+        with patch.dict(os.environ, env), patch.object(bot, "WEATHERAPI_KEY", ""), patch.object(bot, "get_url") as url_mock:
             with self.assertRaisesRegex(RuntimeError, "WEATHERAPI_KEY"):
                 bot.fetch_weather_data()
         url_mock.assert_not_called()

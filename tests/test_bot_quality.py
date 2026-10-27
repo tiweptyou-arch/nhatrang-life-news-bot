@@ -159,26 +159,38 @@ class NewsQualityTests(unittest.TestCase):
         self.assertNotIn("example.com/road", posted_text)
         self.assertNotIn("<b>", posted_text)
 
-    def test_manual_album_is_queued_and_not_published_until_approved(self):
+    def test_manual_album_is_queued_through_editorial_preview(self):
         uid = 111111111
         state = {"pending_manual_post": {"user_id": str(uid), "awaiting_content": True},
                  "pending_ad": {}, "manual_posts": [], "ads": [], "paused": False,
-                 "pause_until": "", "daily_counts": {}}
+                 "pause_until": "", "daily_counts": {}, "review_queue": [],
+                 "pending_news_review": {}}
         messages = [
             {"message_id": 501, "media_group_id": "album-1", "from": {"id": uid},
-             "chat": {"id": uid}, "caption": "Road closure update",
+             "chat": {"id": uid},
+             "caption": "Закрытие дороги в центре Нячанга\nСегодня утром движение перекрыли для ремонта, водителям стоит использовать соседнюю улицу.",
              "photo": [{"file_id": "photo-1"}]},
             {"message_id": 502, "media_group_id": "album-1", "from": {"id": uid},
              "chat": {"id": uid}, "video": {"file_id": "video-1"}}
         ]
-        with patch.object(bot, "send_dm"):
-            with patch.object(bot, "api") as api_mock:
-                bot.handle_admin_album(messages, state)
+        with patch.object(bot, "send_dm") as dm_mock, \
+             patch.object(bot, "queue_review_item", return_value=True) as queue_mock, \
+             patch.object(bot, "api") as api_mock:
+            bot.handle_admin_album(messages, state)
         self.assertEqual(len(state["manual_posts"]), 1)
         self.assertEqual(state["manual_posts"][0]["type"], "album")
         self.assertEqual(len(state["manual_posts"][0]["media_items"]), 2)
-        self.assertEqual(state["manual_posts"][0]["status"], "pending")
+        self.assertEqual(state["manual_posts"][0]["status"], "queued_for_review")
+        self.assertFalse(state["pending_manual_post"].get("awaiting_content", False))
+        candidate = queue_mock.call_args.args[1]
+        self.assertEqual(candidate["headline"], "Закрытие дороги в центре Нячанга")
+        self.assertIn("Сегодня утром", candidate["body"])
+        self.assertEqual(candidate["media_items"][0]["type"], "photo")
+        self.assertEqual(candidate["media_items"][1]["type"], "video")
         api_mock.assert_not_called()
+        self.assertTrue(any("редакторскую очередь" in str(call.args) for call in dm_mock.call_args_list))
+
+
 
     def test_approved_manual_album_publishes_all_media_items(self):
         uid = 111111111
@@ -1162,6 +1174,107 @@ class NewsQualityTests(unittest.TestCase):
         callbacks = [button["callback_data"] for row in markup["inline_keyboard"] for button in row]
         self.assertIn("review:publish:rv0123456789abcdefab:3", callbacks)
         self.assertTrue(all(len(value.encode("utf-8")) <= 64 for value in callbacks))
+
+
+
+    def test_review_preview_and_publish_support_album_media(self):
+        uid = "111111111"
+        item = {
+            "id": "rv-album-1", "version": 1, "status": "pending_review",
+            "kind": "manual_tip", "kind_label": "Материал редактора с альбомом",
+            "headline": "Закрытие дороги в центре Нячанга",
+            "title": "Закрытие дороги в центре Нячанга",
+            "body": "Сегодня утром движение перекрыли для ремонта. Водителям стоит использовать соседнюю улицу.",
+            "media_items": [
+                {"type": "photo", "file_id": "photo-1"},
+                {"type": "video", "file_id": "video-1"},
+            ],
+            "image_file_id": "photo-1", "media_type": "photo",
+            "image_url": "", "image_query": "",
+            "preview_messages": [], "review_status_messages": [],
+            "planned_at": "2026-10-27T09:15:00+07:00",
+        }
+        def fake_api(method, payload):
+            if method == "sendMediaGroup":
+                return [
+                    {"message_id": 901, "chat": {"id": int(uid)}},
+                    {"message_id": 902, "chat": {"id": int(uid)}},
+                ]
+            raise AssertionError(f"unexpected Telegram method {method}")
+        state = {"pending_news_review": item, "review_queue": [], "review_editing": {},
+                 "daily_counts": {}, "ads": []}
+        with patch.object(bot, "ADMIN_USER_IDS", {uid}), \
+             patch.object(bot, "api", side_effect=fake_api) as api_mock, \
+             patch.object(bot, "send_dm", return_value={"message_id": 903, "chat": {"id": int(uid)}}):
+            self.assertTrue(bot.send_review_preview(item))
+            preview_media = json.loads(api_mock.call_args.args[1]["media"])
+            self.assertEqual([part["media"] for part in preview_media], ["photo-1", "video-1"])
+            self.assertIn("<b>Закрытие дороги в центре Нячанга</b>", preview_media[0]["caption"])
+
+        state["pending_news_review"] = item
+        with patch.object(bot, "api", side_effect=fake_api) as api_mock, \
+             patch.object(bot, "bump_today"), \
+             patch.object(bot, "delete_review_previews"), \
+             patch.object(bot, "send_dm"):
+            result = bot.publish_review_item(state, item)
+        self.assertEqual(result["message_id"], 901)
+        self.assertEqual(api_mock.call_args.args[0], "sendMediaGroup")
+        self.assertEqual(state["pending_news_review"], {})
+
+    def test_ad_review_keyboard_has_versioned_callbacks(self):
+        markup = bot.ad_review_keyboard({"draft_id": "ad123456789abc", "review_version": 4})
+        callbacks = [button["callback_data"] for row in markup["inline_keyboard"] for button in row]
+        self.assertIn("adreview:publish:ad123456789abc:4", callbacks)
+        self.assertIn("adreview:reject:ad123456789abc:4", callbacks)
+        self.assertTrue(all(len(value.encode("utf-8")) <= 64 for value in callbacks))
+
+    def test_stale_ad_review_button_cannot_publish_current_draft(self):
+        uid = 111111111
+        state = {
+            "pending_ad": {
+                "draft_id": "ad123456789abc", "review_version": 4,
+                "previewed_at": "2026-10-27T08:00:00+07:00",
+                "review_due_at": "2026-10-27T08:15:00+07:00",
+                "review_status": "pending_review", "created_by": uid,
+            },
+            "pending_news_review": {}, "review_queue": [], "review_editing": {},
+            "ads": [], "daily_counts": {},
+        }
+        callback = {
+            "from": {"id": uid}, "data": "adreview:publish:ad123456789abc:3",
+            "message": {"chat": {"id": uid}, "message_id": 999}
+        }
+        with patch.object(bot, "ADMIN_USER_IDS", {str(uid)}), \
+             patch.object(bot, "send_dm") as dm_mock, \
+             patch.object(bot, "publish_ad") as publish_mock:
+            bot.handle_callback(callback, state)
+        publish_mock.assert_not_called()
+        dm_mock.assert_called_once()
+        self.assertIn("старого", str(dm_mock.call_args.args[1]))
+
+    def test_pending_ad_auto_publish_requires_confirmed_preview_and_due_time(self):
+        uid = "111111111"
+        current = datetime(2026, 10, 27, 8, 20, tzinfo=bot.TZ)
+        pending = {
+            "draft_id": "ad123456789abc", "review_version": 1,
+            "previewed_at": "2026-10-27T08:00:00+07:00",
+            "review_due_at": "2026-10-27T08:15:00+07:00",
+            "review_status": "pending_review", "created_by": uid,
+            "text": "A valid advertisement body", "top_hours": 1, "life_hours": 24,
+        }
+        state = {"pending_ad": pending, "ads": [], "daily_counts": {}}
+        with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "publish_ad") as publish_mock:
+            bot.process_ad_timers(state)
+        publish_mock.assert_called_once_with(pending, state, uid)
+
+        no_preview = {"pending_ad": {"text": "draft", "review_due_at": "2026-10-27T08:10:00+07:00",
+                                     "review_status": "pending_review"},
+                      "ads": [], "daily_counts": {}}
+        with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "publish_ad") as never_publish:
+            bot.process_ad_timers(no_preview)
+        never_publish.assert_not_called()
 
 
 if __name__ == "__main__":

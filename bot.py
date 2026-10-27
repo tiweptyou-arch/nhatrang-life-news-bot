@@ -709,16 +709,46 @@ def review_status_text(item):
             f'\nИсточник для проверки: <a href="{safe_url}">{source_name}</a>'
             f'\nДата источника: {date_text} · проверка: {basis}{score_text}'
         )
+    if item.get('status') == 'needs_edit' and item.get('needs_edit_reason') == 'caption_too_long':
+        timing = '⚠️ Автопубликация остановлена: текст не помещается в подпись к фото/видео. Нажми «Текст», сократи его и сохрани новую версию.'
+    else:
+        timing = (
+            f'План публикации: <b>{planned.strftime("%d.%m.%Y в %H:%M")}</b> по времени Нячанга. '
+            'Если ничего не менять, материал выйдет по таймеру.'
+        )
     return (
         f'<b>Черновик: {html.escape(item.get("kind_label", "новость"))}</b>\n'
         f'<b>{headline}</b>\n\n'
-        f'План публикации: <b>{planned.strftime("%d.%m.%Y в %H:%M")}</b> по времени Нячанга.\n'
+        f'{timing}\n'
         f'Версия: <code>{int(item.get("version", 1))}</code> · ID: <code>{html.escape(str(item.get("id", "")))}</code>'
         f'{source_block}\n\n'
-        'Если ничего не менять, бот опубликует материал по таймеру. Можно поменять заголовок, текст, фото или время; '
-        'любая правка обновляет предпросмотр и запускает 15 минут заново. '
+        'Можно поменять заголовок, текст, фото или время; любая правка обновляет предпросмотр и запускает 15 минут заново. '
         '«Отклонить» гарантирует, что материал не выйдет.'
     )
+
+
+def review_caption_too_long(item, limit=950):
+    """True when the fully rendered public post would require a text-only continuation."""
+    rendered = review_post_text(item)
+    if not rendered:
+        return True
+    _caption, continuation = split_photo_caption(rendered, limit=limit)
+    return bool(continuation)
+
+
+def hold_item_for_text_edit(item):
+    """Stop the publication timer when the complete post cannot fit one photo/video caption."""
+    item['status'] = 'needs_edit'
+    item['needs_edit_reason'] = 'caption_too_long'
+    for admin_id in sorted(ADMIN_USER_IDS):
+        try:
+            send_dm(
+                admin_id,
+                f'⚠️ Материал «{html.escape((item.get("headline") or item.get("title") or "без заголовка")[:140])}» не помещается в подпись к фото/видео. Автопубликация остановлена. Нажми «Текст», сократи текст и сохрани новую версию; ничего не опубликовано.'
+            )
+        except Exception:
+            pass
+    return None
 
 def send_review_preview(item):
     """Send the complete image/video/album preview and inline controls to every editor."""
@@ -794,7 +824,7 @@ def send_review_preview(item):
                         continue
 
                     full_text = review_post_text(item)
-                    caption_limit = 800 if item.get('image_credit_html') else 950
+                    caption_limit = 950
                     caption, continuation = split_photo_caption(full_text, limit=caption_limit)
                     if not caption:
                         caption = '🇻🇳 Новости Нячанга'
@@ -877,6 +907,9 @@ def promote_next_review_item(s):
         item['preview_messages'] = []
         item['review_status_messages'] = []
         item['image_file_id'] = item.get('image_file_id') or ''
+        if review_caption_too_long(item):
+            item['status'] = 'needs_edit'
+            item['needs_edit_reason'] = 'caption_too_long'
         if send_review_preview(item):
             queue.remove(item)
             s['pending_news_review'] = item
@@ -969,6 +1002,10 @@ def queue_review_item(s, item, planned_at=None, slot_key=None):
             s.setdefault('review_queue', []).append(item)
             return True
 
+    if review_caption_too_long(item):
+        item['status'] = 'needs_edit'
+        item['needs_edit_reason'] = 'caption_too_long'
+
     if s.get('pending_news_review') or s.get('review_queue'):
         s.setdefault('review_queue', []).append(item)
         print('Queued for later review:', item_id, 'kind=', item.get('kind'))
@@ -996,15 +1033,24 @@ def queue_review_item(s, item, planned_at=None, slot_key=None):
 
 
 
-def publish_review_item(s, item):
-    """Publish an approved/due candidate once, preserving supported media and state history."""
+def publish_review_item(s, item, preserve_pending=False):
+    """Publish one image-led item after verifying that its full caption fits one media message."""
     post_text_value = review_post_text(item)
+    if review_caption_too_long(item):
+        return hold_item_for_text_edit(item)
     media_items = [
         entry for entry in (item.get('media_items') or [])
         if entry.get('type') in ('photo', 'video') and entry.get('file_id')
     ]
+    if not item.get('id'):
+        item['id'] = 'auto-' + hashlib.sha256(
+            ((item.get('link') or '') + (item.get('headline') or '')).encode('utf-8')
+        ).hexdigest()[:12]
+
     if len(media_items) >= 2:
         caption, continuation = split_photo_caption(post_text_value, limit=950)
+        if continuation:
+            return hold_item_for_text_edit(item)
         media = []
         for index, entry in enumerate(media_items[:10]):
             element = {'type': entry['type'], 'media': entry['file_id']}
@@ -1022,11 +1068,10 @@ def publish_review_item(s, item):
             'message_id': result_messages[0].get('message_id'),
             '_message_ids': [message.get('message_id') for message in result_messages if message.get('message_id')]
         }
-        if continuation:
-            time.sleep(0.2)
-            post_text(html.escape(continuation))
     elif item.get('media_type') in ('photo', 'video') and item.get('image_file_id'):
         caption, continuation = split_photo_caption(post_text_value, limit=950)
+        if continuation:
+            return hold_item_for_text_edit(item)
         media_type = item['media_type']
         method = 'sendVideo' if media_type == 'video' else 'sendPhoto'
         field = 'video' if media_type == 'video' else 'photo'
@@ -1036,9 +1081,6 @@ def publish_review_item(s, item):
         })
         if not isinstance(result, dict) or not result.get('message_id'):
             raise RuntimeError('Telegram did not confirm the news media.')
-        if continuation:
-            time.sleep(0.2)
-            post_text(html.escape(continuation))
     else:
         result = post_with_image(
             post_text_value,
@@ -1046,9 +1088,15 @@ def publish_review_item(s, item):
             image_file_id=item.get('image_file_id') or None,
             image_query=item.get('image_query') or None
         )
+        if not result and review_caption_too_long(item):
+            return hold_item_for_text_edit(item)
+
     if not result:
         raise RuntimeError('Публикация не вернула подтверждение Telegram.')
+
     timestamp = iso(now())
+    item['status'] = 'published'
+    item['published_at'] = timestamp
     if item.get('kind') == 'news':
         source_link = item.get('link') or ''
         original_title = item.get('source_title') or item.get('title') or ''
@@ -1067,18 +1115,16 @@ def publish_review_item(s, item):
         s['last_news_hour'] = now().strftime('%Y-%m-%d-%H')
         s['last_news_published_at'] = timestamp
     bump_today(s)
-    delete_review_previews(item)
-    s['pending_news_review'] = {}
-    s['review_editing'] = {}
+    if not preserve_pending:
+        delete_review_previews(item)
+        s['pending_news_review'] = {}
+        s['review_editing'] = {}
     for admin_id in sorted(ADMIN_USER_IDS):
         try:
             send_dm(admin_id, f'✅ Материал <code>{html.escape(item.get("id", ""))}</code> опубликован в канале.')
         except Exception as exc:
             print('Review publication notice failed:', type(exc).__name__)
     return result
-
-
-
 
 def process_news_review(s):
     """Publish the active review item at its due time and promote the next queued item."""
@@ -1388,28 +1434,24 @@ def split_html_text(text, limit=3900):
 
 
 def post_with_image(text, image_url=None, illustration=False, image_query=None, image_file_id=None):
-    """Publish a photo-led post, preferring the reviewed photo before trying a topical Vietnam image."""
+    """Publish a single photo-led post. Never split overflow into a text-only follow-up."""
     if not text or not text.strip():
         return None
-
     query = image_query or news_image_query('', clean(text))
-    # Reuse the exact image file reviewed by an admin when possible.
+
     if image_file_id:
-        caption_limit = 800 if 'Wikimedia Commons' in text else 950
-        caption, continuation = split_photo_caption(text, limit=caption_limit)
+        caption, continuation = split_photo_caption(text, limit=950)
+        if continuation:
+            print('Reviewed media caption is too long; publication paused for editorial shortening.')
+            return None
         try:
-            result = api('sendPhoto', {
+            return api('sendPhoto', {
                 'chat_id': CHANNEL, 'photo': image_file_id,
                 'caption': caption or '🇻🇳 Новости Нячанга',
                 'parse_mode': 'HTML'
             })
-            if continuation:
-                for part in split_html_text(continuation, limit=3900):
-                    post_text(part)
-                    time.sleep(0.2)
-            return result
-        except Exception as e:
-            print('Reviewed image could not be reused; trying article image/fallback:', type(e).__name__)
+        except Exception as exc:
+            print('Reviewed image could not be reused; trying article image/fallback:', type(exc).__name__)
 
     candidates = []
     normalized = normalize_image_url(image_url or '')
@@ -1439,28 +1481,25 @@ def post_with_image(text, image_url=None, illustration=False, image_query=None, 
                 content = content.replace(FOOTER, '\n\n' + credit + FOOTER, 1)
             else:
                 content = content.rstrip() + '\n\n' + credit
-        caption, continuation = split_photo_caption(content, limit=800 if credit else 950)
+        caption, continuation = split_photo_caption(content, limit=950)
+        if continuation:
+            print('Photo caption plus attribution is too long; publication paused for editorial shortening.')
+            return None
         if not caption:
             caption = '🇻🇳 Новости Нячанга'
         try:
-            result = api('sendPhoto', {
+            return api('sendPhoto', {
                 'chat_id': CHANNEL, 'photo': photo_url,
                 'caption': caption, 'parse_mode': 'HTML'
             })
-            if continuation:
-                for part in split_html_text(continuation, limit=3900):
-                    post_text(part)
-                    time.sleep(0.2)
-            return result
-        except Exception as e:
-            print('Photo send failed; trying topical fallback:', type(e).__name__)
+        except Exception as exc:
+            print('Photo send failed; trying topical fallback:', type(exc).__name__)
             if not fallback_loaded:
                 fallback_loaded = True
                 fallback = commons_image(query)
                 if fallback:
                     candidates.append(fallback)
 
-    # Mandatory photo policy: never publish a text-only fallback.
     print('No usable image could be sent; publication blocked until a photo is available.')
     return None
 
@@ -3612,7 +3651,7 @@ def publish_news(s):
                 print('AI editorial decision:', ai_result.get('decision'), title[:120])
                 continue
             headline = ai_result.get('headline_ru', '')
-            body = limit_news_body(ai_result.get('body_ru', ''), max_chars=1350)
+            body = limit_news_body(ai_result.get('body_ru', ''), max_chars=520)
             if has_unsupported_numeric_facts(headline + ' ' + body, source_text):
                 stats['ai_rejected'] += 1
                 print('AI draft held because it introduced numeric facts:', headline[:120])
@@ -3647,7 +3686,7 @@ def publish_news(s):
             headline = clean_multiline(translated_title)
             body = remove_repeated_lead(headline, translated_body)
             body = clean_multiline(re.sub(r'https?://\S+', '', body))
-            body = limit_news_body(body, max_chars=1350)
+            body = limit_news_body(body, max_chars=520)
             if len(body) < 100 or len(body.split()) < 18:
                 stats['short_body'] += 1
                 print('Skipping thin/repetitive story:', headline[:120])

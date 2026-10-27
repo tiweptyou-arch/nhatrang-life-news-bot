@@ -12,8 +12,9 @@ ADMIN_USER_IDS = {x.strip() for x in os.environ.get('ADMIN_USER_IDS', '').split(
 if ADMIN_USER_ID: ADMIN_USER_IDS.add(ADMIN_USER_ID)
 TZ = ZoneInfo('Asia/Ho_Chi_Minh')
 STATE_FILE = os.environ.get('BOT_STATE_FILE', 'bot_state.json')
-MAX_DAILY_POSTS = int(os.environ.get('MAX_DAILY_POSTS', '6'))
-MAX_DAILY_NEWS = int(os.environ.get('MAX_DAILY_NEWS', '3'))
+MAX_DAILY_POSTS = int(os.environ.get('MAX_DAILY_POSTS', '10'))
+MAX_DAILY_NEWS = int(os.environ.get('MAX_DAILY_NEWS', '6'))
+URGENT_AUTO_PUBLISH = os.environ.get('URGENT_AUTO_PUBLISH', 'true').strip().casefold() in ('1', 'true', 'yes', 'on')
 MAX_AI_CALLS_PER_DAY = int(os.environ.get('MAX_AI_CALLS_PER_DAY', '40'))
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '').strip()
 GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-3.8-flash').strip()
@@ -648,7 +649,7 @@ def source_name_from_url(url):
 
 
 def review_post_text(item):
-    """Render the exact public post with a bold headline and no quote/repost formatting."""
+    """Render the exact public post; keep news source links in the private editor status, not in channel text."""
     headline = clean_multiline(item.get('headline') or item.get('title') or '')
     body = clean_multiline(item.get('body', ''))
     if not headline or not body:
@@ -660,20 +661,23 @@ def review_post_text(item):
         parts.append(html.escape(reaction))
     source_attribution = item.get('source_attribution_html') or ''
     if source_attribution:
+        # Weather API license attribution remains public because the provider requires credit.
         parts.append(source_attribution)
     credit = item.get('image_credit_html') or ''
     if credit:
         parts.append(credit)
-    source_url = item.get('source_url') or (item.get('link') if item.get('kind') == 'news' else '')
-    if source_url and item.get('kind') == 'news':
-        source_name = clean(item.get('source_name') or source_name_from_url(source_url))
-        source_date = parse_dt_strict(item.get('source_published_at'))
-        date_label = ' · ' + source_date.strftime('%d.%m.%Y %H:%M') if source_date else ''
-        parts.append('Источник: <a href="' + html.escape(source_url, quote=True) + '">' +
-                     html.escape(source_name) + '</a>' + date_label + ' · время Нячанга')
+    if item.get('kind') == 'news' and item.get('show_public_source'):
+        source_url = item.get('source_url') or item.get('link') or ''
+        if source_url:
+            source_name = clean(item.get('source_name') or source_name_from_url(source_url))
+            source_date = parse_dt_strict(item.get('source_published_at'))
+            date_label = ' · ' + source_date.strftime('%d.%m.%Y %H:%M') if source_date else ''
+            parts.append(
+                'Источник: <a href="' + html.escape(source_url, quote=True) + '">' +
+                html.escape(source_name) + '</a>' + date_label + ' · время Нячанга'
+            )
     parts.append(footer().strip())
     return '\n\n'.join(part for part in parts if part)
-
 
 def delete_review_previews(item):
     """Remove the private draft previews after publication or rejection."""
@@ -691,18 +695,30 @@ def delete_review_previews(item):
 def review_status_text(item):
     planned = parse_dt_strict(item.get('planned_at')) or (now() + timedelta(minutes=15))
     headline = html.escape(item.get('headline') or item.get('title') or 'без заголовка')
+    source_block = ''
+    source_url = item.get('source_url') or (item.get('link') if item.get('kind') == 'news' else '')
+    if source_url and item.get('kind') == 'news':
+        source_name = html.escape(clean(item.get('source_name') or source_name_from_url(source_url)))
+        safe_url = html.escape(source_url, quote=True)
+        source_date = parse_dt_strict(item.get('source_published_at'))
+        date_text = source_date.strftime('%d.%m.%Y %H:%M') if source_date else 'дата не подтверждена'
+        basis = html.escape(clean(item.get('source_date_basis') or 'не указано'))
+        score = item.get('score')
+        score_text = f' · редакторская оценка: {score}/100' if isinstance(score, int) else ''
+        source_block = (
+            f'\nИсточник для проверки: <a href="{safe_url}">{source_name}</a>'
+            f'\nДата источника: {date_text} · проверка: {basis}{score_text}'
+        )
     return (
         f'<b>Черновик: {html.escape(item.get("kind_label", "новость"))}</b>\n'
         f'<b>{headline}</b>\n\n'
         f'План публикации: <b>{planned.strftime("%d.%m.%Y в %H:%M")}</b> по времени Нячанга.\n'
-        f'Версия: <code>{int(item.get("version", 1))}</code> · ID: <code>{html.escape(str(item.get("id", "")))}</code>\n\n'
+        f'Версия: <code>{int(item.get("version", 1))}</code> · ID: <code>{html.escape(str(item.get("id", "")))}</code>'
+        f'{source_block}\n\n'
         'Если ничего не менять, бот опубликует материал по таймеру. Можно поменять заголовок, текст, фото или время; '
         'любая правка обновляет предпросмотр и запускает 15 минут заново. '
         '«Отклонить» гарантирует, что материал не выйдет.'
     )
-
-
-
 
 def send_review_preview(item):
     """Send the complete image/video/album preview and inline controls to every editor."""
@@ -2995,8 +3011,11 @@ def map_weatherapi_code(code):
 
 
 def fetch_weather_data():
-    """Fetch a common hourly weather shape from the commercial-free API when keyed; otherwise test mode."""
+    """Fetch a commercial-safe forecast for production, with Open-Meteo reserved for local/tests."""
     retrieved = iso(now())
+    production_run = os.environ.get('GITHUB_ACTIONS', '').casefold() == 'true' and os.environ.get('BOT_TEST_MODE') != '1'
+    if not WEATHERAPI_KEY and production_run:
+        raise RuntimeError('В боевом запуске погода отключена: добавь WEATHERAPI_KEY. Open-Meteo не используется в производстве без отдельной проверки лицензии.')
     if WEATHERAPI_KEY:
         params = urllib.parse.urlencode({'key': WEATHERAPI_KEY, 'q': '12.2388,109.1967', 'days': 3, 'aqi': 'no', 'alerts': 'yes'})
         try:
@@ -3475,9 +3494,9 @@ def publish_news(s):
             if s.get('last_news_hour') == n.strftime('%Y-%m-%d-%H'):
                 continue
             last_news_at = parse_dt_strict(s.get('last_news_published_at'))
-            if last_news_at and timedelta(0) <= n - last_news_at < timedelta(hours=2):
+            if last_news_at and timedelta(0) <= n - last_news_at < timedelta(hours=1):
                 continue
-            if n.hour in (6, 7, 8, 11, 12, 17, 18, 22, 23):
+            if n.hour in (0, 1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 17, 18, 22, 23):
                 continue
             if routine_target_within(25, n):
                 continue
@@ -3548,7 +3567,6 @@ def publish_news(s):
             continue
 
         final_source_url = article_page_url or link
-        final_source_url = normalize_image_url(final_source_url) or final_source_url
         if not source_published_at:
             stats['missing_date'] += 1
             continue

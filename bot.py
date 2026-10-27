@@ -926,10 +926,15 @@ def promote_next_review_item(s):
             item['preview_failure_notified'] = True
             for admin_id in sorted(ADMIN_USER_IDS):
                 try:
-                    send_dm(admin_id,
-                        f'⚠️ Не удалось показать предпросмотр <code>{html.escape(str(item.get("id", "")))}</code>: нет доступного фото или личное сообщение не доставлено. Материал сохранён в очереди; автоматической публикации без фото не будет.')
+                    send_dm(
+                        admin_id,
+                        f'⚠️ Не удалось показать предпросмотр <code>{html.escape(str(item.get("id", "")))}</code>. Материал сохранён в очереди; автопубликация остановлена до успешного предпросмотра.',
+                        queue_photo_keyboard(str(item.get('id', '')))
+                    )
                 except Exception:
                     pass
+        # Keep queue order: do not skip a blocked item and preview a later one first.
+        return False
     return False
 
 
@@ -1129,9 +1134,65 @@ def publish_review_item(s, item, preserve_pending=False):
             print('Review publication notice failed:', type(exc).__name__)
     return result
 
+def retry_active_review_preview(s):
+    """Retry a failed private preview; no timer starts until every configured editor receives it."""
+    item = s.get('pending_news_review') or {}
+    if not item or item.get('status') != 'needs_preview':
+        return False
+    retry_at = parse_dt_strict(item.get('next_preview_retry_at'))
+    if retry_at and retry_at > now():
+        return False
+    if review_caption_too_long(item):
+        item['status'] = 'needs_edit'
+        item['needs_edit_reason'] = 'caption_too_long'
+        hold_item_for_text_edit(item)
+        return False
+    delete_review_previews(item)
+    item['preview_messages'] = []
+    item['review_status_messages'] = []
+    if send_review_preview(item):
+        if review_caption_too_long(item):
+            item['status'] = 'needs_edit'
+            item['needs_edit_reason'] = 'caption_too_long'
+            hold_item_for_text_edit(item)
+            return False
+        item['status'] = 'pending_review'
+        item.pop('needs_edit_reason', None)
+        item.pop('next_preview_retry_at', None)
+        item.pop('preview_failure_notified', None)
+        item['planned_at'] = iso(now() + timedelta(minutes=15))
+        for admin_id in sorted(ADMIN_USER_IDS):
+            try:
+                send_dm(admin_id, '✅ Предпросмотр доставлен. Таймер 15 минут начался заново; при необходимости измени текст или фото.')
+            except Exception:
+                pass
+        return True
+    delete_review_previews(item)
+    item['preview_messages'] = []
+    item['review_status_messages'] = []
+    item['status'] = 'needs_preview'
+    item['next_preview_retry_at'] = iso(now() + timedelta(minutes=15))
+    item['preview_failures'] = int(item.get('preview_failures', 0)) + 1
+    last_notice = parse_dt_strict(item.get('preview_failure_notified_at'))
+    if not last_notice or now() - last_notice >= timedelta(hours=1):
+        for admin_id in sorted(ADMIN_USER_IDS):
+            try:
+                send_dm(
+                    admin_id,
+                    f'⚠️ Не удалось повторно доставить предпросмотр <code>{html.escape(str(item.get("id", "")))}</code>. Таймер не запущен; следующее повторение через 15 минут. Проверь личные сообщения боту и доступность фотографии.'
+                )
+            except Exception:
+                pass
+        item['preview_failure_notified_at'] = iso(now())
+    return False
+
+
 def process_news_review(s):
     """Publish the active review item at its due time and promote the next queued item."""
     item = s.get('pending_news_review') or {}
+    if item and item.get('status') == 'needs_preview':
+        retry_active_review_preview(s)
+        item = s.get('pending_news_review') or {}
     if not item:
         promote_next_review_item(s)
         item = s.get('pending_news_review') or {}
@@ -2120,6 +2181,80 @@ def handle_admin_album(messages, s):
 
 
 
+def show_ad_preview(s, uid):
+    """Render an ad draft in the private chat and start the 15-minute timer only after delivery."""
+    ad = s.get('pending_ad') or {}
+    if not ad or ad.get('awaiting_content') or not (ad.get('text') or ad.get('file_id') or ad.get('media_items')):
+        send_dm(uid, 'Сначала создай черновик через /ad 1/24 и отправь содержимое.')
+        return False
+    preview = ((ad.get('text') or '') + footer()).strip()
+    kind = ad.get('type')
+    try:
+        if kind == 'album':
+            if len(preview) > 1024:
+                send_dm(uid, 'Подпись альбома длиннее лимита Telegram 1024 символа. Сократи подпись перед предпросмотром.')
+                return False
+            media = []
+            for i, media_item in enumerate(ad.get('media_items', [])):
+                element = {'type': media_item['type'], 'media': media_item['file_id']}
+                item_caption = html.escape(media_item.get('caption', '') or '')
+                if i == 0:
+                    element['caption'] = preview
+                    element['parse_mode'] = 'HTML'
+                elif item_caption:
+                    element['caption'] = item_caption
+                    element['parse_mode'] = 'HTML'
+                media.append(element)
+            if len(media) < 2:
+                send_dm(uid, 'В альбоме должно быть минимум два фото или видео.')
+                return False
+            result = api('sendMediaGroup', {'chat_id': uid, 'media': json.dumps(media, ensure_ascii=False)})
+            if not isinstance(result, list) or len(result) < 2:
+                raise RuntimeError('Telegram did not confirm the ad preview album.')
+        elif kind in ('photo', 'video', 'document'):
+            if len(preview) > 1024:
+                send_dm(uid, 'Подпись к медиа длиннее лимита Telegram 1024 символа. Сократи текст перед предпросмотром.')
+                return False
+            method, field = {'photo': ('sendPhoto', 'photo'), 'video': ('sendVideo', 'video'), 'document': ('sendDocument', 'document')}[kind]
+            result = api(method, {'chat_id': uid, field: ad['file_id'], 'caption': preview, 'parse_mode': 'HTML'})
+            if not isinstance(result, dict) or not result.get('message_id'):
+                raise RuntimeError('Telegram did not confirm the ad media preview.')
+        else:
+            sent_messages = []
+            for part in split_html_text(preview):
+                sent = send_dm(uid, part)
+                if not sent or not sent.get('message_id'):
+                    raise RuntimeError('Telegram did not confirm the ad text preview.')
+                sent_messages.append(sent)
+                time.sleep(0.2)
+            if not sent_messages:
+                raise RuntimeError('Empty ad text preview.')
+    except Exception as exc:
+        print('Ad preview delivery failed:', type(exc).__name__)
+        try:
+            send_dm(uid, '⚠️ Предпросмотр рекламы не доставлен. Таймер не запущен и автопубликации не будет. Проверь содержимое или попробуй снова через /preview.')
+        except Exception:
+            pass
+        return False
+
+    ad.setdefault('draft_id', new_ad_draft_id(uid))
+    ad['review_version'] = int(ad.get('review_version', 0)) + 1
+    ad['previewed_at'] = iso(now())
+    ad['review_due_at'] = iso(now() + timedelta(minutes=15))
+    ad['created_by'] = uid
+    ad['review_status'] = 'pending_review'
+    s['pending_ad'] = ad
+    send_dm(
+        uid,
+        f'<b>Предпросмотр рекламы готов</b>\n'
+        f'Формат: {html.escape(str(ad.get("format", "1/24")))}\n'
+        'Если ничего не менять, реклама выйдет через 15 минут — при наличии коммерчески разрешённого погодного API. '
+        'Можно опубликовать сразу, отредактировать черновик или отменить.',
+        ad_review_keyboard(ad)
+    )
+    return True
+
+
 def handle_admin_message(msg, s):
     user = msg.get('from') or {}
     uid = str(user.get('id', ''))
@@ -2276,12 +2411,14 @@ def handle_admin_message(msg, s):
             s['pending_news_review'] = item
             send_dm(uid, 'Изменения сохранены. Таймер проверки обновлён: публикация состоится через 15 минут, если материал не отклонить.')
         else:
-            item['status'] = 'needs_edit' if review_caption_too_long(item) else 'pending_review'
+            item['status'] = 'needs_edit' if review_caption_too_long(item) else 'needs_preview'
             if item['status'] == 'needs_edit':
                 item['needs_edit_reason'] = 'caption_too_long'
+            else:
+                item['next_preview_retry_at'] = iso(now() + timedelta(minutes=15))
             item['planned_at'] = iso(now() + timedelta(minutes=15))
             s['pending_news_review'] = item
-            send_dm(uid, 'Не удалось обновить предпросмотр с фотографией. Черновик сохранён; проверь длину текста и фото. Автопубликация остановлена, если текст не помещается в подпись.')
+            send_dm(uid, 'Не удалось доставить новый предпросмотр. Автопубликация остановлена, пока предпросмотр не будет успешно доставлен. Бот попробует снова; при проблеме с фото добавь его вручную.')
         return
 
     manual_pending = s.get('pending_manual_post') or {}
@@ -2301,7 +2438,7 @@ def handle_admin_message(msg, s):
         elif not text:
             send_dm(uid,'Пришли текст, фото, видео или документ с подписью. Для отмены: /cancel'); return
         pending.update(content); pending['awaiting_content']=False; s['pending_ad']=pending
-        send_dm(uid, f'Черновик готов. Формат <b>{pending["format"]}</b>.\\n\\nПубликуем сейчас: /publish\\nОтложить: /schedule ГГГГ-ММ-ДД ЧЧ:ММ\\nОтменить: /cancel')
+        show_ad_preview(s, uid)
         return
     aliases = {'📬 На проверке':'/reviewqueue', '🌦 Погода':'/weatherstatus', '📰 Новости':'/newsqueue', '📣 Реклама':'/ads', '📊 Статус':'/status', '⏸ Пауза':'/togglepause', '⚙️ Настройки':'/settings'}
     if text in aliases:
@@ -2330,55 +2467,9 @@ def handle_admin_message(msg, s):
         send_dm(uid,f'Пришли следующим сообщением рекламный текст, фото или видео.\\nФормат: <b>{top_hours}/{life_hours}</b>.\\nПервые {top_hours} ч. бот не будет публиковать обычные новости и рубрики; реклама удалится через {life_hours} ч.\\n/cancel — отмена.', main_menu())
 
     elif cmd=='/preview':
-        ad = s.get('pending_ad') or {}
-        if not ad or ad.get('awaiting_content') or not (ad.get('text') or ad.get('file_id') or ad.get('media_items')):
-            send_dm(uid, 'Сначала создай черновик через /ad 1/24 и отправь содержимое.')
-            return
-        preview = ((ad.get('text') or '') + footer()).strip()
-        kind = ad.get('type')
-        if kind == 'album':
-            if len(preview) > 1024:
-                send_dm(uid, 'Подпись альбома длиннее лимита Telegram 1024 символа. Сократи подпись перед предпросмотром.')
-                return
-            media = []
-            for i, item in enumerate(ad.get('media_items', [])):
-                element = {'type': item['type'], 'media': item['file_id']}
-                item_caption = html.escape(item.get('caption', '') or '')
-                if i == 0:
-                    element['caption'] = preview
-                    element['parse_mode'] = 'HTML'
-                elif item_caption:
-                    element['caption'] = item_caption
-                    element['parse_mode'] = 'HTML'
-                media.append(element)
-            if len(media) >= 2:
-                api('sendMediaGroup', {'chat_id': uid, 'media': json.dumps(media, ensure_ascii=False)})
-            else:
-                send_dm(uid, 'В альбоме должно быть минимум два фото или видео.')
-        elif kind in ('photo', 'video', 'document'):
-            if len(preview) > 1024:
-                send_dm(uid, 'Подпись к медиа длиннее лимита Telegram 1024 символа. Сократи текст перед предпросмотром.')
-                return
-            method, field = {'photo': ('sendPhoto', 'photo'), 'video': ('sendVideo', 'video'), 'document': ('sendDocument', 'document')}[kind]
-            api(method, {'chat_id': uid, field: ad['file_id'], 'caption': preview, 'parse_mode': 'HTML'})
-        else:
-            for part in split_html_text(preview):
-                send_dm(uid, part)
-                time.sleep(0.2)
+        show_ad_preview(s, uid)
 
-        ad.setdefault('draft_id', new_ad_draft_id(uid))
-        ad['review_version'] = int(ad.get('review_version', 0)) + 1
-        ad['previewed_at'] = iso(now())
-        ad['review_due_at'] = iso(now() + timedelta(minutes=15))
-        ad['created_by'] = uid
-        ad['review_status'] = 'pending_review'
-        s['pending_ad'] = ad
-        send_dm(uid,
-            f'<b>Предпросмотр рекламы готов</b>\n'
-            f'Формат: {html.escape(str(ad.get("format", "1/24")))}\n'
-            f'Если ничего не менять, реклама выйдет через 15 минут — при наличии коммерчески разрешённого погодного API. '
-            f'Можно опубликовать сразу, отредактировать черновик или отменить.',
-            ad_review_keyboard(ad))
+
 
     elif cmd=='/publish':
         ad=s.get('pending_ad') or {}

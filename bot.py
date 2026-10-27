@@ -206,12 +206,18 @@ def ad_actions(ad_id):
     ]]}
 
 
-def ad_review_keyboard():
+def new_ad_draft_id(uid):
+    return 'ad' + hashlib.sha256((str(uid) + ':' + str(time.time_ns())).encode('utf-8')).hexdigest()[:12]
+
+
+def ad_review_keyboard(ad):
+    draft_id = str(ad.get('draft_id') or 'missing')
+    version = int(ad.get('review_version', 1))
     return {'inline_keyboard': [
-        [{'text': '✅ Опубликовать сейчас', 'callback_data': 'adreview:publish'}],
-        [{'text': '✏️ Изменить черновик', 'callback_data': 'adreview:edit'},
-         {'text': '🕒 Ещё 15 минут', 'callback_data': 'adreview:delay15'}],
-        [{'text': '🗑 Отменить рекламу', 'callback_data': 'adreview:reject'}]
+        [{'text': '✅ Опубликовать сейчас', 'callback_data': f'adreview:publish:{draft_id}:{version}'}],
+        [{'text': '✏️ Изменить черновик', 'callback_data': f'adreview:edit:{draft_id}:{version}'}],
+        [{'text': '🕒 Ещё 15 минут', 'callback_data': f'adreview:delay15:{draft_id}:{version}'}],
+        [{'text': '🗑 Отменить рекламу', 'callback_data': f'adreview:reject:{draft_id}:{version}'}]
     ]}
 
 def send_dm(user_id, text, markup=None):
@@ -2108,7 +2114,7 @@ def handle_admin_message(msg, s):
         top_hours, life_hours=map(int,m.groups())
         if not (1<=top_hours<=72 and top_hours<=life_hours<=720):
             send_dm(uid,'Допустимо: время в топе 1–72 часа, срок жизни не меньше времени в топе и не больше 720 часов.'); return
-        s['pending_ad']={'format':f'{top_hours}/{life_hours}','top_hours':top_hours,'life_hours':life_hours,'created_by':uid,'awaiting_content':True}
+        s['pending_ad']={'draft_id':new_ad_draft_id(uid),'review_version':0,'format':f'{top_hours}/{life_hours}','top_hours':top_hours,'life_hours':life_hours,'created_by':uid,'awaiting_content':True}
         send_dm(uid,f'Пришли следующим сообщением рекламный текст, фото или видео.\\nФормат: <b>{top_hours}/{life_hours}</b>.\\nПервые {top_hours} ч. бот не будет публиковать обычные новости и рубрики; реклама удалится через {life_hours} ч.\\n/cancel — отмена.', main_menu())
 
     elif cmd=='/preview':
@@ -2148,6 +2154,8 @@ def handle_admin_message(msg, s):
                 send_dm(uid, part)
                 time.sleep(0.2)
 
+        ad.setdefault('draft_id', new_ad_draft_id(uid))
+        ad['review_version'] = int(ad.get('review_version', 0)) + 1
         ad['previewed_at'] = iso(now())
         ad['review_due_at'] = iso(now() + timedelta(minutes=15))
         ad['created_by'] = uid
@@ -2158,7 +2166,7 @@ def handle_admin_message(msg, s):
             f'Формат: {html.escape(str(ad.get("format", "1/24")))}\n'
             f'Если ничего не менять, реклама выйдет через 15 минут — при наличии коммерчески разрешённого погодного API. '
             f'Можно опубликовать сразу, отредактировать черновик или отменить.',
-            ad_review_keyboard())
+            ad_review_keyboard(ad))
 
     elif cmd=='/publish':
         ad=s.get('pending_ad') or {}
@@ -2596,10 +2604,20 @@ def handle_callback(q, s):
 
 
         elif data.startswith('adreview:'):
-            action = data.split(':', 1)[1]
+            parts = data.split(':', 3)
+            action = parts[1] if len(parts) > 1 else ''
+            draft_id = parts[2] if len(parts) > 2 else ''
+            try:
+                expected_version = int(parts[3]) if len(parts) > 3 else -1
+            except ValueError:
+                expected_version = -1
             pending = s.get('pending_ad') or {}
-            if not pending or not pending.get('previewed_at'):
-                send_dm(uid, 'Черновик рекламы уже завершён или ещё не прошёл предпросмотр.', main_menu())
+            if (
+                not pending or not pending.get('previewed_at')
+                or str(pending.get('draft_id') or '') != draft_id
+                or int(pending.get('review_version', 0)) != expected_version
+            ):
+                send_dm(uid, 'Эта кнопка относится к старому или завершённому рекламному черновику. Открой /ads и используй последние кнопки.', main_menu())
             elif action == 'publish':
                 try:
                     publish_ad(pending, s, uid)
@@ -2608,6 +2626,7 @@ def handle_callback(q, s):
                     send_dm(uid, f'⚠️ Реклама пока не опубликована: {html.escape(str(exc)[:220])}. Черновик сохранён. Проверь /settings.', main_menu())
             elif action == 'edit':
                 pending['awaiting_content'] = True
+                pending['review_version'] = int(pending.get('review_version', 0)) + 1
                 pending.pop('previewed_at', None)
                 pending.pop('review_due_at', None)
                 pending.pop('review_status', None)
@@ -2616,12 +2635,17 @@ def handle_callback(q, s):
                 send_dm(uid, 'Пришли заново текст, фото или видео рекламы. Старый материал будет заменён. Затем бот снова покажет предпросмотр и запустит таймер 15 минут.', main_menu())
             elif action == 'delay15':
                 pending['review_due_at'] = iso(now() + timedelta(minutes=15))
-                send_dm(uid, f'🕒 Таймер рекламы продлён до {(now()+timedelta(minutes=15)).strftime("%d.%m %H:%M")} по времени Нячанга.', main_menu())
+                pending['review_version'] = int(pending.get('review_version', 0)) + 1
+                send_dm(uid,
+                    f'🕒 Таймер рекламы продлён до {(now()+timedelta(minutes=15)).strftime("%d.%m %H:%M")} по времени Нячанга.',
+                    ad_review_keyboard(pending))
             elif action == 'reject':
                 s['pending_ad'] = {}
                 send_dm(uid, '🗑 Черновик рекламы отменён. Он не будет опубликован.', main_menu())
             else:
                 send_dm(uid, 'Неизвестное действие рекламы. Открой /ads и попробуй ещё раз.', main_menu())
+
+
         elif data.startswith('ad_new:'):
             try:
                 _, top_text, life_text = data.split(':', 2)
@@ -2637,6 +2661,7 @@ def handle_callback(q, s):
                 send_dm(uid, 'Недопустимая длительность рекламы. Используй предложенные кнопки.', main_menu())
             else:
                 s['pending_ad'] = {
+                    'draft_id': new_ad_draft_id(uid), 'review_version': 0,
                     'format': f'{top_hours}/{life_hours}', 'top_hours': top_hours, 'life_hours': life_hours,
                     'created_by': uid, 'awaiting_content': True
                 }

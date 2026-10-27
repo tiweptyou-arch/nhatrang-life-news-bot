@@ -978,7 +978,9 @@ def process_news_review(s):
     if now() + tolerance < planned:
         return
 
-    if is_paused(s):
+    kind = str(item.get('kind') or '')
+    priority_weather = kind.startswith('weather') or bool(item.get('urgent'))
+    if is_paused(s) and not priority_weather:
         later = top_pause_until(s)
         planned = later if later > now() else now() + timedelta(minutes=5)
         item['planned_at'] = iso(planned)
@@ -987,6 +989,18 @@ def process_news_review(s):
                 send_dm(admin_id, f'⏸ Материал <code>{html.escape(item.get("id", ""))}</code> сдвинут на {planned.strftime("%d.%m %H:%M")}: сейчас действует пауза.')
             except Exception as e:
                 print('Review pause notice failed:', type(e).__name__)
+        return
+    if count_today(s) >= MAX_DAILY_POSTS and not priority_weather:
+        item['status'] = 'held_daily_limit'
+        delete_review_previews(item)
+        s['pending_news_review'] = {}
+        s['review_editing'] = {}
+        for admin_id in sorted(ADMIN_USER_IDS):
+            try:
+                send_dm(admin_id, f'🧹 Материал <b>{html.escape(item.get("headline") or item.get("title") or "без заголовка")}</b> снят с очереди: достигнут лимит {MAX_DAILY_POSTS} публикаций за день. Погодные сообщения имеют отдельный приоритет.')
+            except Exception:
+                pass
+        promote_next_review_item(s)
         return
     try:
         publish_review_item(s, item)
@@ -3172,6 +3186,7 @@ def main():
     else:
         print('Admin polling skipped; scheduled content and review timers will still run.')
     process_ad_timers(s)
+    check_weather_changes(s)
     process_news_review(s)
     if not is_paused(s):
         routine_posts(s)

@@ -1082,12 +1082,15 @@ def publish_review_item(s, item, preserve_pending=False):
         if not isinstance(result, dict) or not result.get('message_id'):
             raise RuntimeError('Telegram did not confirm the news media.')
     else:
-        result = post_with_image(
-            post_text_value,
-            image_url=item.get('image_url') or None,
-            image_file_id=item.get('image_file_id') or None,
-            image_query=item.get('image_query') or None
-        )
+        try:
+            result = post_with_image(
+                post_text_value,
+                image_url=item.get('image_url') or None,
+                image_file_id=item.get('image_file_id') or None,
+                image_query=item.get('image_query') or None
+            )
+        except MediaCaptionTooLongError:
+            return hold_item_for_text_edit(item)
         if not result and review_caption_too_long(item):
             return hold_item_for_text_edit(item)
 
@@ -1172,7 +1175,11 @@ def process_news_review(s):
         promote_next_review_item(s)
         return
     try:
-        publish_review_item(s, item)
+        publish_result = publish_review_item(s, item)
+        if not publish_result:
+            if item.get('status') == 'needs_edit':
+                return
+            raise RuntimeError('Публикация не подтверждена; материал остался в очереди.')
         if item.get('slot_key'):
             mark_slot(s, item['slot_key'])
     except Exception as e:
@@ -1433,6 +1440,10 @@ def split_html_text(text, limit=3900):
 
 
 
+class MediaCaptionTooLongError(RuntimeError):
+    """A photo-led post would require an impermissible text-only continuation."""
+
+
 def post_with_image(text, image_url=None, illustration=False, image_query=None, image_file_id=None):
     """Publish a single photo-led post. Never split overflow into a text-only follow-up."""
     if not text or not text.strip():
@@ -1443,7 +1454,7 @@ def post_with_image(text, image_url=None, illustration=False, image_query=None, 
         caption, continuation = split_photo_caption(text, limit=950)
         if continuation:
             print('Reviewed media caption is too long; publication paused for editorial shortening.')
-            return None
+            raise MediaCaptionTooLongError('MEDIA_CAPTION_TOO_LONG: reviewed media caption')
         try:
             return api('sendPhoto', {
                 'chat_id': CHANNEL, 'photo': image_file_id,
@@ -1484,7 +1495,7 @@ def post_with_image(text, image_url=None, illustration=False, image_query=None, 
         caption, continuation = split_photo_caption(content, limit=950)
         if continuation:
             print('Photo caption plus attribution is too long; publication paused for editorial shortening.')
-            return None
+            raise MediaCaptionTooLongError('MEDIA_CAPTION_TOO_LONG: photo caption plus attribution')
         if not caption:
             caption = '🇻🇳 Новости Нячанга'
         try:
@@ -2251,6 +2262,12 @@ def handle_admin_message(msg, s):
         item['review_count'] = int(item.get('review_count', 0)) + 1
         item['version'] = int(item.get('version', 1)) + 1
         item['planned_at'] = iso(now() + timedelta(minutes=15))
+        if review_caption_too_long(item):
+            item['status'] = 'needs_edit'
+            item['needs_edit_reason'] = 'caption_too_long'
+        else:
+            item['status'] = 'pending_review'
+            item.pop('needs_edit_reason', None)
         delete_review_previews(item)
         item['preview_messages'] = []
         item['review_status_messages'] = []
@@ -2259,10 +2276,12 @@ def handle_admin_message(msg, s):
             s['pending_news_review'] = item
             send_dm(uid, 'Изменения сохранены. Таймер проверки обновлён: публикация состоится через 15 минут, если материал не отклонить.')
         else:
-            item['status'] = 'pending_review'
+            item['status'] = 'needs_edit' if review_caption_too_long(item) else 'pending_review'
+            if item['status'] == 'needs_edit':
+                item['needs_edit_reason'] = 'caption_too_long'
             item['planned_at'] = iso(now() + timedelta(minutes=15))
             s['pending_news_review'] = item
-            send_dm(uid, 'Не удалось обновить предпросмотр с фотографией. Черновик сохранён; попробую повторно показать его при следующем запуске.')
+            send_dm(uid, 'Не удалось обновить предпросмотр с фотографией. Черновик сохранён; проверь длину текста и фото. Автопубликация остановлена, если текст не помещается в подпись.')
         return
 
     manual_pending = s.get('pending_manual_post') or {}
@@ -3743,12 +3762,28 @@ def publish_news(s):
         verified_urgent = is_verified_urgent_source(
             final_source_url, title, source_text, date_basis, image_url
         )
-        if verified_urgent and not s.get('pending_news_review') and not s.get('review_queue'):
+        # Do not bypass an existing identical draft; otherwise a verified urgent alert may
+        # publish immediately while the user's unrelated editor draft remains untouched.
+        pending_items = [s.get('pending_news_review') or {}] + list(s.get('review_queue') or [])
+        same_pending = any(
+            pending_item and (
+                (pending_item.get('link') and pending_item.get('link') == link)
+                or (pending_item.get('idempotency_key') and pending_item.get('idempotency_key') == link)
+            )
+            for pending_item in pending_items
+        )
+        if verified_urgent and not same_pending:
             try:
-                publish_review_item(s, item)
-                stats['urgent_published'] += 1
-                print('Published verified urgent alert immediately from trusted source:', final_source_url)
-                break
+                publish_result = publish_review_item(s, item, preserve_pending=True)
+                if publish_result:
+                    stats['urgent_published'] += 1
+                    print('Published verified urgent alert immediately from trusted source:', final_source_url)
+                    break
+                if item.get('status') == 'needs_edit':
+                    queued = queue_review_item(s, item)
+                    if queued:
+                        stats['queued'] += 1
+                    break
             except Exception as exc:
                 print('Immediate urgent publication failed; falling back to private review:', type(exc).__name__)
         queued = queue_review_item(s, item)

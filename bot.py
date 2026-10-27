@@ -3407,6 +3407,33 @@ def source_date_rejection_reason(published_at, current_time=None, urgent=False):
     return ''
 
 
+def is_verified_urgent_source(source_url, title, body, source_date_basis, image_url):
+    """Auto-release only fresh, visibly safety-critical stories from trusted sources with an article image."""
+    if not URGENT_AUTO_PUBLISH or not source_url or not image_url or not source_date_basis:
+        return False
+    host = (urllib.parse.urlparse(source_url).hostname or '').casefold().strip('.')
+    if host.startswith('www.'):
+        host = host[4:]
+    official = host.endswith('.gov.vn') or host.endswith('.gov') or host in (
+        'gov.vn', 'chmf.gov.vn', 'vndms.gov.vn'
+    )
+    trusted_news = any(host == domain or host.endswith('.' + domain) for domain in (
+        'baokhanhhoa.vn', 'tuoitre.vn', 'vnexpress.net', 'thanhnien.vn',
+        'dantri.com.vn', 'laodong.vn', 'vov.vn', 'vietnamnews.vn',
+        'nld.com.vn', 'congan.com.vn'
+    ))
+    if not (official or trusted_news):
+        return False
+    text = clean((title or '') + ' ' + (body or '')).casefold()
+    safety_phrases = (
+        'cảnh báo', 'khẩn cấp', 'sơ tán', 'ngập lụt', 'lũ quét', 'lũ lớn',
+        'sạt lở', 'cháy lớn', 'cấm tắm biển', 'đóng đường khẩn cấp',
+        'emergency', 'evacuation', 'flood warning', 'flash flood',
+        'landslide warning', 'beach closure', 'road closure', 'storm warning'
+    )
+    return is_urgent_news(text) and any(contains_term(text, term) for term in safety_phrases)
+
+
 def publish_news(s):
     """Find one high-value local story, verify the source date and queue it for private review."""
     n = now()
@@ -3418,7 +3445,7 @@ def publish_news(s):
         'stale': 0, 'missing_date': 0, 'future_date': 0, 'cached_date_skip': 0,
         'date_fallback_checked': 0, 'date_fallback_deferred': 0,
         'duplicate': 0, 'short_body': 0, 'low_score': 0, 'ai_rejected': 0,
-        'ai_failed': 0, 'image_missing': 0, 'queued': 0
+        'ai_failed': 0, 'image_missing': 0, 'queued': 0, 'urgent_published': 0
     }
     items = []
     links = set()
@@ -3674,6 +3701,17 @@ def publish_news(s):
             'idempotency_key': link
         }
 
+        verified_urgent = is_verified_urgent_source(
+            final_source_url, title, source_text, date_basis, image_url
+        )
+        if verified_urgent and not s.get('pending_news_review') and not s.get('review_queue'):
+            try:
+                publish_review_item(s, item)
+                stats['urgent_published'] += 1
+                print('Published verified urgent alert immediately from trusted source:', final_source_url)
+                break
+            except Exception as exc:
+                print('Immediate urgent publication failed; falling back to private review:', type(exc).__name__)
         queued = queue_review_item(s, item)
         if queued:
             stats['queued'] += 1

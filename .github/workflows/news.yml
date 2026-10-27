@@ -60,9 +60,10 @@ jobs:
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       WEATHERAPI_KEY: ${{ secrets.WEATHERAPI_KEY }}
-      MAX_DAILY_POSTS: '6'
-      MAX_DAILY_NEWS: '3'
+      MAX_DAILY_POSTS: '10'
+      MAX_DAILY_NEWS: '6'
       MAX_AI_CALLS_PER_DAY: '40'
+      URGENT_AUTO_PUBLISH: 'true'
     steps:
       - name: Checkout main
         uses: actions/checkout@v4

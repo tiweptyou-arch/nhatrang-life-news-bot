@@ -19,7 +19,7 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '').strip()
 GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-3.8-flash').strip()
 WEATHERAPI_KEY = os.environ.get('WEATHERAPI_KEY', '').strip()
 SUPABASE_URL = os.environ.get('SUPABASE_URL', '').strip().rstrip('/')
-SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '').strip()
+SUPABASE_SERVICE_ROLE_KEY = (os.environ.get('SUPABASE_SECRET_KEY', '').strip() or os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '').strip())
 SUBSCRIBE_URL = 'https://t.me/NhaTrangLifeNews'
 SUGGEST_URL = 'https://t.me/fsfinesed'
 FOOTER = f'🇻🇳 <a href="{SUBSCRIBE_URL}">ПОДПИСАТЬСЯ</a> | <a href="{SUGGEST_URL}">ПРЕДЛОЖИТЬ НОВОСТЬ</a>'
@@ -226,6 +226,8 @@ def supabase_state_configured():
 
 def ensure_production_state_backend():
     """GitHub-hosted production runs must not persist private editorial state in the public repo."""
+    if os.environ.get('BOT_TEST_MODE') == '1':
+        return
     configured = bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
     partial = bool(SUPABASE_URL) != bool(SUPABASE_SERVICE_ROLE_KEY)
     if partial:

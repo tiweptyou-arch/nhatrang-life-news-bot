@@ -774,6 +774,10 @@ def send_review_preview(item):
 
     return bool(admins) and photo_delivered_admins == set(admins) and bool(item.get('image_file_id'))
 
+def queue_photo_keyboard(item_id):
+    return {'inline_keyboard': [[{'text': '📷 Добавить фото вручную', 'callback_data': f'queuephoto:{item_id}'}]]}
+
+
 def review_priority(item):
     """Lower number means earlier review; weather and confirmed safety updates take priority."""
     kind = str(item.get('kind') or '')
@@ -883,7 +887,8 @@ def queue_review_item(s, item, planned_at=None, slot_key=None):
             for admin_id in sorted(ADMIN_USER_IDS):
                 try:
                     send_dm(admin_id,
-                        f'🖼 Для материала «{html.escape(item["headline"][:120])}» не найдено подходящее фото. Он сохранён без публикации. Добавь фото после восстановления предпросмотра.')
+                        f'🖼 Для материала «{html.escape(item["headline"][:120])}» не найдено подходящее фото. Он сохранён без публикации. Пришли собственное изображение кнопкой ниже.',
+                        queue_photo_keyboard(item_id))
                 except Exception:
                     pass
             return True
@@ -1918,6 +1923,32 @@ def handle_admin_message(msg, s):
 
     # Review editing is isolated from the existing advertising/manual-post draft flows.
     editing = s.get('review_editing') or {}
+    if editing and editing.get('user_id') == uid and editing.get('mode') == 'queued_photo':
+        if text.casefold() in ('/cancelreview', '/cancel'):
+            s['review_editing'] = {}
+            send_dm(uid, 'Добавление фото отменено. Материал остался в очереди и не будет опубликован без изображения.')
+            return
+        queued_item = next((entry for entry in s.get('review_queue', []) if str(entry.get('id')) == str(editing.get('id'))), None)
+        if not queued_item:
+            s['review_editing'] = {}
+            send_dm(uid, 'Материал уже вышел из очереди. Открой /reviewqueue.')
+            return
+        if not msg.get('photo'):
+            send_dm(uid, 'Пришли именно фотографию. Для отмены — /cancelreview.')
+            return
+        queued_item['image_file_id'] = msg['photo'][-1]['file_id']
+        queued_item['image_url'] = ''
+        queued_item['image_credit_html'] = ''
+        queued_item['status'] = 'pending_review'
+        queued_item['version'] = int(queued_item.get('version', 1)) + 1
+        queued_item['planned_at'] = iso(now() + timedelta(minutes=15))
+        queued_item.pop('preview_failure_notified', None)
+        s['review_editing'] = {}
+        if not s.get('pending_news_review'):
+            promote_next_review_item(s)
+        send_dm(uid, f'✅ Фото сохранено для материала «{html.escape((queued_item.get("headline") or queued_item.get("title") or "")[:120])}». Предпросмотр появится, когда материал дойдёт до начала очереди; таймер 15 минут начнётся после предпросмотра.', main_menu())
+        return
+
     if editing and editing.get('user_id') == uid:
         if editing.get('mode') == 'time':
             if text.casefold() in ('/cancelreview', '/cancel'):

@@ -220,6 +220,8 @@ def ensure_production_state_backend():
     partial = bool(SUPABASE_URL) != bool(SUPABASE_SERVICE_ROLE_KEY)
     if partial:
         raise RuntimeError('Настроена только часть параметров Supabase. Проверь secrets SUPABASE_URL и SUPABASE_SERVICE_ROLE_KEY.')
+    if os.environ.get('GITHUB_ACTIONS', '').casefold() == 'true' and not ADMIN_USER_IDS:
+        raise RuntimeError('Публикация остановлена: настрой GitHub secret ADMIN_USER_ID или ADMIN_USER_IDS с числовым Telegram ID редактора.')
     if os.environ.get('GITHUB_ACTIONS', '').casefold() == 'true' and not configured:
         raise RuntimeError(
             'Публикация остановлена: в GitHub Actions не настроено приватное хранилище состояния. '
@@ -692,7 +694,7 @@ def send_review_preview(item):
     item.setdefault('review_status_messages', [])
     item['image_file_id'] = item.get('image_file_id') or ''
     image_fallback_attempted = False
-    failed_admins = []
+    photo_delivered_admins = set()
 
     for admin_id in admins:
         if item.get('image_file_id'):
@@ -738,6 +740,7 @@ def send_review_preview(item):
                 item['preview_messages'].append({
                     'chat_id': admin_id, 'message_id': sent_photo.get('message_id')
                 })
+                photo_delivered_admins.add(admin_id)
                 if continuation:
                     continued = send_dm(admin_id, 'Продолжение текста публикации:\n\n' + continuation)
                     if continued and continued.get('message_id'):
@@ -752,12 +755,11 @@ def send_review_preview(item):
                 break
             except Exception as e:
                 print('Review photo preview failed:', type(e).__name__)
-                failed_admins.append(admin_id)
                 item['image_file_id'] = ''
                 photo = ''
                 continue
 
-    return bool(item.get('preview_messages')) and bool(item.get('image_file_id')) and not failed_admins
+    return bool(admins) and photo_delivered_admins == set(admins) and bool(item.get('image_file_id'))
 
 def review_priority(item):
     """Lower number means earlier review; weather and confirmed safety updates take priority."""
@@ -1870,6 +1872,7 @@ def handle_admin_message(msg, s):
                 send_dm(uid, 'Новое время должно быть минимум через 5 минут, чтобы бот успел подготовить публикацию.')
                 return
             item['planned_at'] = iso(planned)
+            item['version'] = int(item.get('version', 1)) + 1
             item['time_edited_at'] = iso(now())
             item['time_edited_by'] = uid
             s['review_editing'] = {}
@@ -1960,7 +1963,7 @@ def handle_admin_message(msg, s):
         pending.update(content); pending['awaiting_content']=False; s['pending_ad']=pending
         send_dm(uid, f'Черновик готов. Формат <b>{pending["format"]}</b>.\\n\\nПубликуем сейчас: /publish\\nОтложить: /schedule ГГГГ-ММ-ДД ЧЧ:ММ\\nОтменить: /cancel')
         return
-    aliases = {'📰 Новости':'/newsqueue', '📥 Предложить пост':'/suggest', '📣 Добавить рекламу':'/ad', '📋 Активная реклама':'/ads', '📊 Статус':'/status', '⏸ Пауза / ▶️ Продолжить':'/togglepause'}
+    aliases = {'📬 На проверке':'/reviewqueue', '🌦 Погода':'/weatherstatus', '📰 Новости':'/newsqueue', '📣 Реклама':'/ads', '📊 Статус':'/status', '⏸ Пауза':'/togglepause', '⚙️ Настройки':'/settings'}
     if text in aliases:
         text = aliases[text]
     parts = text.split(maxsplit=1)
@@ -2269,40 +2272,89 @@ def handle_callback(q, s):
         return
     try:
         if data.startswith('review:'):
-            parts = data.split(':', 2)
+            parts = data.split(':', 3)
             action = parts[1] if len(parts) > 1 else ''
             target = parts[2] if len(parts) > 2 else ''
+            expected_version = None
+            if len(parts) > 3:
+                try:
+                    expected_version = int(parts[3])
+                except ValueError:
+                    expected_version = -1
             item = s.get('pending_news_review') or {}
             if not item or str(item.get('id')) != target:
                 send_dm(uid, 'Этот черновик уже опубликован, отклонён или заменён.')
-            elif action == 'edit':
-                s['review_editing'] = {'id': target, 'user_id': uid, 'started_at': iso(now()), 'mode': 'text'}
-                send_dm(uid, 'Отправь следующим сообщением новый текст публикации. Если нужно заменить изображение — отправь фото с новой подписью.\n\nТаймер публикации перезапустится на 15 минут после изменения. Для отмены: /cancelreview')
+            elif expected_version is not None and expected_version != int(item.get('version', 1)):
+                send_dm(uid, 'Эта кнопка относится к старой версии черновика. Используй кнопки из последнего предпросмотра.')
+            elif action in ('edit', 'body', 'headline', 'photo'):
+                mode = 'body' if action == 'edit' else action
+                s['review_editing'] = {
+                    'id': target, 'user_id': uid, 'started_at': iso(now()),
+                    'mode': mode, 'version': int(item.get('version', 1))
+                }
+                prompts = {
+                    'body': 'Отправь новый текст публикации одним сообщением. Заголовок останется отдельным и жирным. Для отмены — /cancelreview.',
+                    'headline': 'Отправь новый короткий заголовок. Он будет выделен жирным и не должен повторять первый абзац. Для отмены — /cancelreview.',
+                    'photo': 'Пришли одно фото, которое нужно поставить в публикацию. Можно добавить подпись, но текст поста сохранится. Для отмены — /cancelreview.'
+                }
+                send_dm(uid, prompts[mode])
             elif action == 'time':
-                s['review_editing'] = {'id': target, 'user_id': uid, 'started_at': iso(now()), 'mode': 'time'}
-                send_dm(uid, 'Отправь новое время в формате <code>HH:MM</code> или <code>YYYY-MM-DD HH:MM</code>. До публикации должно оставаться минимум 5 минут. Для отмены: /cancelreview')
+                s['review_editing'] = {'id': target, 'user_id': uid, 'started_at': iso(now()), 'mode': 'time', 'version': int(item.get('version', 1))}
+                send_dm(uid, 'Отправь новое время в формате <code>HH:MM</code> или <code>YYYY-MM-DD HH:MM</code>. Минимум 5 минут до публикации. Для отмены — /cancelreview.')
+            elif action in ('delay15', 'delay30', 'delay60'):
+                minutes = {'delay15': 15, 'delay30': 30, 'delay60': 60}[action]
+                planned = now() + timedelta(minutes=minutes)
+                item['planned_at'] = iso(planned)
+                item['version'] = int(item.get('version', 1)) + 1
+                item['time_edited_at'] = iso(now())
+                updated = False
+                for ref in item.get('review_status_messages', []):
+                    try:
+                        api('editMessageText', {
+                            'chat_id': ref['chat_id'],
+                            'message_id': ref['message_id'],
+                            'text': review_status_text(item),
+                            'parse_mode': 'HTML',
+                            'reply_markup': json.dumps(review_keyboard(item['id'], item['version']), ensure_ascii=False)
+                        })
+                        updated = True
+                    except Exception as exc:
+                        print('Could not update review timer message:', type(exc).__name__)
+                if not updated:
+                    status = send_dm(uid, review_status_text(item), review_keyboard(item['id'], item['version']))
+                    if status and status.get('message_id'):
+                        ref = {'chat_id': status['chat_id'], 'message_id': status['message_id']}
+                        item.setdefault('preview_messages', []).append(ref)
+                        item.setdefault('review_status_messages', []).append(ref)
+                send_dm(uid, f'🕒 Таймер продлён до {planned.strftime("%H:%M")} по времени Нячанга.')
             elif action == 'reject':
                 item['status'] = 'rejected'
                 item['rejected_at'] = iso(now())
                 item['rejected_by'] = uid
                 link = item.get('link') or ''
                 original_title = item.get('source_title') or item.get('title') or ''
-                if link:
+                if link and item.get('kind') == 'news':
                     s['rejected_news_links'] = (s.get('rejected_news_links', []) + [link])[-1000:]
-                if original_title:
+                if original_title and item.get('kind') == 'news':
                     fingerprint = title_fingerprint(original_title)
                     s['rejected_news_fingerprints'] = (s.get('rejected_news_fingerprints', []) + [fingerprint])[-1000:]
                     s['rejected_news_titles'] = (s.get('rejected_news_titles', []) + [original_title])[-500:]
                 delete_review_previews(item)
                 s['pending_news_review'] = {}
                 s['review_editing'] = {}
-                send_dm(uid, '🗑 Черновик отклонён. Он не будет опубликован; бот продолжит поиск следующей новости.')
+                send_dm(uid, '🗑 Черновик отклонён. Он не будет опубликован; бот перейдёт к следующему материалу.')
+                promote_next_review_item(s)
             elif action == 'publish':
                 try:
                     publish_review_item(s, item)
-                except Exception as e:
-                    print('Immediate review publication failed:', type(e).__name__)
-                    send_dm(uid, f'Не удалось опубликовать черновик. Он сохранён в очереди: {html.escape(str(e)[:250])}')
+                    promote_next_review_item(s)
+                except Exception as exc:
+                    print('Immediate review publication failed:', type(exc).__name__)
+                    send_dm(uid, f'Не удалось опубликовать черновик. Он сохранён для повтора: {html.escape(str(exc)[:180])}')
+            else:
+                send_dm(uid, 'Неизвестное действие. Открой /menu и используй последние кнопки.')
+
+
         elif data.startswith('ad_delete:'):
             target=data.split(':',1)[1]
             ad=next((a for a in s['ads'] if str(a.get('id'))==target and not a.get('deleted')),None)

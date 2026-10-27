@@ -423,7 +423,7 @@ class NewsQualityTests(unittest.TestCase):
 
 
 
-    def test_morning_chat_prompt_is_integrated_into_weather_not_a_separate_post(self):
+    def test_morning_greeting_does_not_queue_before_the_catchup_window(self):
         current = datetime(2026, 10, 26, 6, 2, tzinfo=bot.TZ)
         state = {"published_news": [], "daily_counts": {}, "last_slots": {}}
         with patch.object(bot, "now", return_value=current), \
@@ -450,7 +450,7 @@ class NewsQualityTests(unittest.TestCase):
             bot.routine_posts(state)
         queue_mock.assert_called_once()
         candidate = queue_mock.call_args.args[1]
-        self.assertEqual(candidate["headline"], "Открываем ночной чат!")
+        self.assertEqual(candidate["headline"], "🌙 Доброй ночи!")
         self.assertIn("вам на", candidate["body"])
         self.assertIn("имена", candidate["body"])
         self.assertEqual(candidate["reaction_line"], "")
@@ -741,18 +741,27 @@ class NewsQualityTests(unittest.TestCase):
         self.assertIn("изменено", dm_mock.call_args.args[1])
 
 
-    def test_morning_routine_catches_up_without_emitting_a_duplicate_greeting(self):
+    def test_morning_routine_catches_up_and_queues_saved_greeting(self):
         current = datetime(2026, 10, 26, 6, 42, tzinfo=bot.TZ)
         state = {"published_news": [], "daily_counts": {}, "last_slots": {}, "pending_news_review": {}}
         with patch.object(bot, "now", return_value=current), \
              patch.object(bot, "is_paused", return_value=False), \
              patch.object(bot, "count_today", return_value=0), \
              patch.object(bot, "slot_once", return_value=False), \
-             patch.object(bot, "queue_review_item") as queue_mock, \
+             patch.object(bot, "queue_review_item", return_value=True) as queue_mock, \
              patch.object(bot, "mark_slot") as mark_mock:
             bot.routine_posts(state)
-        queue_mock.assert_not_called()
-        mark_mock.assert_not_called()
+        queue_mock.assert_called_once()
+        candidate = queue_mock.call_args.args[1]
+        self.assertEqual(candidate["kind"], "morning_greeting")
+        self.assertEqual(candidate["headline"], "☀️ Доброе утро!")
+        self.assertIn("Желаем вам хорошего дня!", candidate["body"])
+        self.assertIn("Выспались?", candidate["body"])
+        self.assertIn("😴 — ещё сплю", candidate["body"])
+        self.assertEqual(candidate["reaction_line"], "")
+        self.assertEqual(queue_mock.call_args.kwargs["slot_key"], "review_morning")
+        self.assertEqual(queue_mock.call_args.kwargs["planned_at"], current + timedelta(minutes=15))
+        mark_mock.assert_called_once_with(state, "review_morning")
 
 
 

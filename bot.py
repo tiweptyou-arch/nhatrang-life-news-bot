@@ -3029,39 +3029,123 @@ def weather_change_decision(previous, current):
 
 
 def check_weather_changes(s):
-    """Check forecasts every 30 minutes; queue a priority private review when conditions materially worsen."""
-    state=s.setdefault('weather_alert_state',{}); n=now()
-    checked=_weather_time(state.get('last_checked_at'))
-    if checked and timedelta(0)<=n-checked<timedelta(minutes=30): return
-    try: data=fetch_weather_data()
+    """Check forecasts every 30 minutes and never ignore newly issued provider alerts."""
+    state = s.setdefault('weather_alert_state', {})
+    n = now()
+    checked = _weather_time(state.get('last_checked_at'))
+    if checked and timedelta(0) <= n - checked < timedelta(minutes=30):
+        return
+    try:
+        data = fetch_weather_data()
     except Exception as exc:
-        print('Weather change check unavailable:',type(exc).__name__); return
-    current=_weather_next_window(data,n); previous=state.get('next_six_hours') or {}
-    state['last_checked_at']=iso(n); state['next_six_hours']=current; state['provider']=data.get('provider','')
-    should,reason=weather_change_decision(previous,current)
-    if not should: return
-    last=_weather_time(state.get('last_alert_at'))
-    escalation=current.get('severe_code') is not None and previous.get('severe_code') is None
-    if last and timedelta(0)<=n-last<timedelta(hours=2) and not escalation: return
-    old=_numeric(previous.get('rain_max')); new=_numeric(current.get('rain_max'))
-    details=[f'Прогноз на ближайшие 6 часов заметно ухудшился: {reason}.',
-             f'Период: {n:%H:%M}–{(n+timedelta(hours=6)):%H:%M} по времени Нячанга.']
-    if old is not None and new is not None: details.append(f'Вероятность дождя: было {round(old)}%, стало {round(new)}%.')
-    elif new is not None: details.append(f'Максимальная вероятность дождя в новом прогнозе: {round(new)}%.')
-    if current.get('wind_max') is not None: details.append(f'Порывы ветра по прогнозу — до {round(current["wind_max"])} км/ч.')
-    details.append(f'Данные получены {n:%d.%m.%Y %H:%M}; источник: {data.get("provider","погодный API")}.')
-    details.append('При опасных условиях проверьте официальные предупреждения перед поездками.')
-    headline='Погода в Нячанге резко меняется'
-    attribution='Источник прогноза: <a href="'+html.escape(data.get('provider_url') or 'https://open-meteo.com/',quote=True)+'">'+html.escape(data.get('provider') or 'погодный API')+'</a> · данные получены '+html.escape(data.get('retrieved_at') or iso(n))
-    item={'kind':'weather_update','kind_label':'Изменение прогноза погоды','headline':headline,'title':headline,
-          'body':'\n\n'.join(details),'source_attribution_html':attribution,'reaction_line':'','urgent':True,
-          'image_query':'Nha Trang Vietnam storm clouds heavy rain flooded city street real photograph',
-          'idempotency_key':'weather_update:'+n.strftime('%Y-%m-%d-%H')}
-    if queue_review_item(s,item):
-        state['last_alert_at']=iso(n);state['last_alert_reason']=reason;state['last_alert_window']=current
+        print('Weather change check unavailable:', type(exc).__name__)
+        diagnostics = s.setdefault('diagnostics', {})
+        diagnostics['last_weather_poll_error_at'] = iso(n)
+        diagnostics['last_weather_poll_error'] = type(exc).__name__
+        return
+
+    current = _weather_next_window(data, n)
+    previous = state.get('next_six_hours') or {}
+    known_fingerprints = set(state.get('official_alert_fingerprints') or [])
+    new_official_alerts = []
+    all_fingerprints = list(state.get('official_alert_fingerprints') or [])
+    for alert in data.get('official_alerts') or []:
+        if not isinstance(alert, dict):
+            continue
+        title = clean(alert.get('headline') or alert.get('event') or alert.get('category') or 'Официальное предупреждение')
+        effective = clean(alert.get('effective') or '')
+        expires = clean(alert.get('expires') or '')
+        description = clean(alert.get('desc') or alert.get('instruction') or '')
+        fingerprint = hashlib.sha256(
+            (title + '|' + effective + '|' + expires + '|' + description[:300]).encode('utf-8')
+        ).hexdigest()
+        if fingerprint not in known_fingerprints:
+            new_official_alerts.append({
+                'fingerprint': fingerprint, 'title': title, 'effective': effective,
+                'expires': expires, 'description': description,
+                'severity': clean(alert.get('severity') or ''),
+                'certainty': clean(alert.get('certainty') or '')
+            })
+            all_fingerprints.append(fingerprint)
+
+    state['last_checked_at'] = iso(n)
+    state['next_six_hours'] = current
+    state['provider'] = data.get('provider', '')
+    state['last_retrieved_at'] = data.get('retrieved_at', '')
+    state['last_error'] = ''
+
+    should_alert, reason = weather_change_decision(previous, current)
+    if new_official_alerts:
+        should_alert = True
+        reason = 'получено новое официальное предупреждение: ' + new_official_alerts[0]['title']
+    if not should_alert:
+        state['official_alert_fingerprints'] = all_fingerprints[-300:]
+        return
+
+    last_alert = _weather_time(state.get('last_alert_at'))
+    severe_escalation = current.get('severe_code') is not None and previous.get('severe_code') is None
+    # A new official warning is not suppressed by the ordinary two-hour forecast cooldown.
+    if last_alert and timedelta(0) <= n - last_alert < timedelta(hours=2) and not severe_escalation and not new_official_alerts:
+        state['official_alert_fingerprints'] = all_fingerprints[-300:]
+        return
+
+    old_rain = _numeric(previous.get('rain_max'))
+    new_rain = _numeric(current.get('rain_max'))
+    details = [
+        f'Прогноз на ближайшие 6 часов заметно изменился: {reason}.',
+        f'Период: {n:%H:%M}–{(n + timedelta(hours=6)):%H:%M} по времени Нячанга.'
+    ]
+    if old_rain is not None and new_rain is not None:
+        details.append(f'Вероятность дождя: было {round(old_rain)}%, стало {round(new_rain)}%.')
+    elif new_rain is not None:
+        details.append(f'Максимальная вероятность дождя в новом прогнозе: {round(new_rain)}%.')
+    if current.get('wind_max') is not None:
+        details.append(f'Порывы ветра по прогнозу — до {round(current["wind_max"])} км/ч.')
+
+    for alert in new_official_alerts[:2]:
+        details.append('Официальное предупреждение: ' + alert['title'] + '.')
+        if alert.get('severity') or alert.get('certainty'):
+            meta = ' · '.join(x for x in (alert.get('severity'), alert.get('certainty')) if x)
+            details.append('Уровень/достоверность: ' + meta + '.')
+        if alert.get('effective'):
+            details.append('Начало действия: ' + alert['effective'] + '.')
+        if alert.get('expires'):
+            details.append('Окончание действия: ' + alert['expires'] + '.')
+        if alert.get('description'):
+            details.append(alert['description'][:650])
+
+    details.append(f'Данные получены {n:%d.%m.%Y %H:%M}; источник: {data.get("provider", "погодный API")}.')
+    details.append('При опасных условиях проверьте официальные указания местных служб перед поездками.')
+    headline = 'Предупреждение о погоде в Нячанге' if new_official_alerts else 'Погода в Нячанге резко меняется'
+    attribution = (
+        'Источник прогноза: <a href="' +
+        html.escape(data.get('provider_url') or 'https://open-meteo.com/', quote=True) +
+        '">' + html.escape(data.get('provider') or 'погодный API') +
+        '</a> · данные получены ' + html.escape(data.get('retrieved_at') or iso(n))
+    )
+    fingerprint_suffix = new_official_alerts[0]['fingerprint'][:16] if new_official_alerts else n.strftime('%Y-%m-%d-%H')
+    item = {
+        'kind': 'weather_update', 'kind_label': 'Изменение прогноза погоды',
+        'headline': headline, 'title': headline, 'body': '\n\n'.join(details),
+        'source_attribution_html': attribution, 'reaction_line': '', 'urgent': True,
+        'image_query': 'Nha Trang Vietnam official weather warning tropical storm heavy rain flooded city street real photograph',
+        'idempotency_key': 'weather_update:' + fingerprint_suffix
+    }
+    queued = queue_review_item(s, item)
+    state['official_alert_fingerprints'] = all_fingerprints[-300:]
+    if queued:
+        state['last_alert_at'] = iso(n)
+        state['last_alert_reason'] = reason
+        state['last_alert_window'] = current
         for uid in sorted(ADMIN_USER_IDS):
-            try: send_dm(uid,f'🌧 <b>Изменение погоды обнаружено</b>\n{html.escape(reason)}\nМатериал добавлен в приоритетную очередь предпросмотра.')
-            except Exception: pass
+            try:
+                send_dm(
+                    uid,
+                    f'🌧 <b>Обнаружено изменение погоды</b>\n{html.escape(reason)}\nМатериал добавлен в приоритетную очередь предпросмотра.'
+                )
+            except Exception:
+                pass
+
 
 
 def weather_post(s, period):

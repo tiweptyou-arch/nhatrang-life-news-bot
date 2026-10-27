@@ -2785,7 +2785,7 @@ def routine_posts(s):
     headline = 'Открываем ночной чат!'
     body = (
         'Сегодня играем в слова, но называть можно только имена.\n\n'
-        f'Начинаем: <b>{html.escape(name)}, вам на «{html.escape(letter)}»!</b>\n\n'
+        f'Начинаем: {html.escape(name)}, вам на «{html.escape(letter)}»!\n\n'
         'Пишите имя на последнюю букву предыдущего имени. Города, предметы и фамилии сегодня не принимаются.'
     )
     queued = queue_review_item(s, {
@@ -3061,6 +3061,13 @@ def weather_post(s, period):
     if not target-timedelta(minutes=15)<=n<=target+timedelta(hours=5): return
     try:
         data=fetch_weather_data(); headline,body,target_date=format_weather_forecast(data,period,n)
+        day_index=weather_daily_index(data,target_date)
+        rain_probability=_weather_daily(data,'precipitation_probability_max',day_index)
+        daily_code=_weather_daily(data,'weather_code',day_index)
+        if (rain_probability is not None and rain_probability >= 60) or daily_code in (65,67,82,95,96,99):
+            image='Nha Trang Vietnam heavy rain storm clouds flooded street tropical downpour real photograph'
+        elif rain_probability is not None and rain_probability >= 35:
+            image='Nha Trang Vietnam rainy weather wet streets tropical rain real photograph'
         attribution='Источник прогноза: <a href="'+html.escape(data.get('provider_url') or 'https://open-meteo.com/',quote=True)+'">'+html.escape(data.get('provider') or 'погодный API')+'</a> · данные получены '+html.escape(data.get('retrieved_at') or iso(n))
         if data.get('provider')=='Open-Meteo' and not WEATHERAPI_KEY:
             attribution+=' · бесплатный тестовый режим; перед размещением рекламы настрой коммерческий источник'

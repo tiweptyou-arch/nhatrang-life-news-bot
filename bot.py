@@ -1647,7 +1647,10 @@ def send_ad_content(ad):
 
 def count_today(s):
     key = now().date().isoformat()
-    return int(s['daily_counts'].get(key,0))
+    daily_counts = s.get('daily_counts') or {}
+    if not isinstance(daily_counts, dict):
+        return 0
+    return int(daily_counts.get(key, 0))
 
 def bump_today(s):
     key = now().date().isoformat(); s['daily_counts'][key] = int(s['daily_counts'].get(key,0))+1
@@ -2054,7 +2057,8 @@ def handle_admin_message(msg, s):
                 send_dm(uid, 'После удаления ссылок текст пуст. Отправь текст публикации ещё раз или /cancelreview.')
                 return
             item['body'] = body
-            item['reaction_line'] = sanitize_reaction_line(item.get('reaction_line', ''))
+            # Body edits can change the story's meaning; don't keep a stale engagement prompt.
+            item['reaction_line'] = ''
 
         item['edited_by'] = uid
         item['edited_at'] = iso(now())

@@ -8,10 +8,17 @@ TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 CHANNEL = os.environ.get('TELEGRAM_CHAT_ID', '@NhaTrangLifeNews')
 ADMIN_USER_ID = os.environ.get('ADMIN_USER_ID', '').strip()
 # Allowed private-chat managers. The environment ID remains supported for compatibility.
-ADMIN_USER_IDS = {x.strip() for x in os.environ.get('ADMIN_USER_IDS', '1335496436,8563451956').split(',') if x.strip()}
+ADMIN_USER_IDS = {x.strip() for x in os.environ.get('ADMIN_USER_IDS', '').split(',') if x.strip()}
 if ADMIN_USER_ID: ADMIN_USER_IDS.add(ADMIN_USER_ID)
 TZ = ZoneInfo('Asia/Ho_Chi_Minh')
-STATE_FILE = 'bot_state.json'
+STATE_FILE = os.environ.get('BOT_STATE_FILE', 'bot_state.json')
+MAX_DAILY_POSTS = int(os.environ.get('MAX_DAILY_POSTS', '6'))
+MAX_DAILY_NEWS = int(os.environ.get('MAX_DAILY_NEWS', '3'))
+MAX_AI_CALLS_PER_DAY = int(os.environ.get('MAX_AI_CALLS_PER_DAY', '40'))
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '').strip()
+GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-3.8-flash').strip()
+SUPABASE_URL = os.environ.get('SUPABASE_URL', '').strip().rstrip('/')
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '').strip()
 SUBSCRIBE_URL = 'https://t.me/NhaTrangLifeNews'
 SUGGEST_URL = 'https://t.me/fsfinesed'
 FOOTER = f'🇻🇳 <a href="{SUBSCRIBE_URL}">ПОДПИСАТЬСЯ</a> | <a href="{SUGGEST_URL}">ПРЕДЛОЖИТЬ НОВОСТЬ</a>'
@@ -110,7 +117,19 @@ def api(method, data=None):
 
 
 def main_menu():
-    return {'keyboard': [[{'text':'📰 Новости'}, {'text':'📥 Предложить пост'}], [{'text':'📣 Добавить рекламу'}, {'text':'📋 Активная реклама'}], [{'text':'📊 Статус'}, {'text':'⏸ Пауза / ▶️ Продолжить'}]], 'resize_keyboard': True, 'is_persistent': True}
+    return {
+        'keyboard': [
+            [{'text': '📬 На проверке'}, {'text': '🌦 Погода'}],
+            [{'text': '📰 Новости'}, {'text': '📣 Реклама'}],
+            [{'text': '📊 Статус'}, {'text': '⏸ Пауза'}],
+            [{'text': '⚙️ Настройки'}]
+        ],
+        'resize_keyboard': True,
+        'is_persistent': True
+    }
+
+
+
 
 def ad_actions(ad_id):
     return {'inline_keyboard': [[
@@ -125,47 +144,133 @@ def send_dm(user_id, text, markup=None):
     return api('sendMessage', data)
 
 
-def load_state():
-    """Load existing state without silently replacing damaged data with defaults."""
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, encoding='utf-8') as f:
-                s = json.load(f)
-        except (OSError, json.JSONDecodeError) as e:
-            raise RuntimeError(
-                f'Не удалось прочитать {STATE_FILE}; файл не будет перезаписан, чтобы не потерять данные.'
-            ) from e
-        if not isinstance(s, dict):
-            raise RuntimeError(f'{STATE_FILE} должен содержать JSON-объект; сохранение остановлено.')
-    else:
-        s = {}
-    defaults = {
-      'seen_links': [], 'seen_titles': [], 'seen_fingerprints': [], 'last_update_id': 0, 'pending_ad': {},
-      'ads': [], 'paused': False, 'pause_until': '', 'daily_counts': {}, 'last_slots': {},
-      'game_history': [], 'last_news_hour': '', 'manual_posts': [], 'pending_manual_post': {}, 'published_news': [],
-      'pending_news_review': {}, 'review_editing': {}, 'rejected_news_links': [], 'rejected_news_fingerprints': [], 'rejected_news_titles': []
+def supabase_state_configured():
+    return bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+
+
+def ensure_production_state_backend():
+    """GitHub-hosted production runs must not persist private editorial state in the public repo."""
+    configured = bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
+    partial = bool(SUPABASE_URL) != bool(SUPABASE_SERVICE_ROLE_KEY)
+    if partial:
+        raise RuntimeError('Настроена только часть параметров Supabase. Проверь secrets SUPABASE_URL и SUPABASE_SERVICE_ROLE_KEY.')
+    if os.environ.get('GITHUB_ACTIONS', '').casefold() == 'true' and not configured:
+        raise RuntimeError(
+            'Публикация остановлена: в GitHub Actions не настроено приватное хранилище состояния. '
+            'Создай таблицу Supabase и задай secrets SUPABASE_URL и SUPABASE_SERVICE_ROLE_KEY. '
+            'Черновики/реклама не должны записываться в публичный репозиторий.'
+        )
+
+
+def _supabase_request(method, payload=None):
+    if not supabase_state_configured():
+        raise RuntimeError('Supabase state storage is not configured.')
+    url = SUPABASE_URL + '/rest/v1/bot_state'
+    if method == 'GET':
+        url += '?id=eq.main&select=state'
+    elif method == 'POST':
+        url += '?on_conflict=id'
+    body = json.dumps(payload, ensure_ascii=False).encode('utf-8') if payload is not None else None
+    headers = {
+        'apikey': SUPABASE_SERVICE_ROLE_KEY,
+        'Authorization': 'Bearer ' + SUPABASE_SERVICE_ROLE_KEY,
+        'Accept': 'application/json',
+        'User-Agent': 'NhaTrangLifeNewsBot/3.0'
     }
-    for k, v in defaults.items():
-        s.setdefault(k, v)
-    for key in ('seen_links', 'seen_titles', 'seen_fingerprints', 'ads', 'published_news', 'game_history', 'manual_posts', 'rejected_news_links', 'rejected_news_fingerprints', 'rejected_news_titles'):
+    if body is not None:
+        headers['Content-Type'] = 'application/json'
+    if method == 'POST':
+        headers['Prefer'] = 'resolution=merge-duplicates,return=minimal'
+    request = urllib.request.Request(url, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            raw = response.read().decode('utf-8', 'replace')
+    except Exception as exc:
+        status = getattr(exc, 'code', None)
+        raise RuntimeError(f'Ошибка приватного хранилища состояния (HTTP {status or "network"}).') from None
+    if method == 'GET':
+        try:
+            rows = json.loads(raw or '[]')
+        except (TypeError, json.JSONDecodeError):
+            raise RuntimeError('Приватное хранилище вернуло некорректный JSON состояния.') from None
+        if not isinstance(rows, list):
+            raise RuntimeError('Приватное хранилище вернуло неожиданный формат состояния.')
+        if not rows:
+            return None
+        state = rows[0].get('state')
+        if not isinstance(state, dict):
+            raise RuntimeError('В Supabase поле state должно быть JSON-объектом.')
+        return state
+    return None
+
+
+def _read_local_state_file(path):
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding='utf-8') as f:
+            value = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        raise RuntimeError(
+            f'Не удалось прочитать {path}; файл не будет перезаписан, чтобы не потерять данные.'
+        ) from None
+    if not isinstance(value, dict):
+        raise RuntimeError(f'{path} должен содержать JSON-объект; сохранение остановлено.')
+    return value
+
+
+def load_state():
+    """Load persistent state; fail closed on corrupt data instead of silently resetting the bot."""
+    if supabase_state_configured():
+        s = _supabase_request('GET')
+        if s is None:
+            seed_path = 'bot_state_seed.json'
+            s = _read_local_state_file(seed_path) if os.path.exists(seed_path) else {}
+    else:
+        s = _read_local_state_file(STATE_FILE)
+
+    defaults = {
+        'seen_links': [], 'seen_titles': [], 'seen_fingerprints': [], 'last_update_id': 0, 'pending_ad': {},
+        'ads': [], 'paused': False, 'pause_until': '', 'daily_counts': {}, 'last_slots': {},
+        'game_history': [], 'last_news_hour': '', 'last_news_published_at': '',
+        'manual_posts': [], 'pending_manual_post': {}, 'published_news': [],
+        'pending_news_review': {}, 'review_queue': [], 'review_editing': {},
+        'rejected_news_links': [], 'rejected_news_fingerprints': [], 'rejected_news_titles': [],
+        'date_checked_links': {}, 'weather_snapshot': {}, 'weather_alert_state': {},
+        'ai_usage_daily': {}, 'diagnostics': {}
+    }
+    for key, value in defaults.items():
+        s.setdefault(key, value)
+    for key in (
+        'seen_links', 'seen_titles', 'seen_fingerprints', 'ads', 'published_news', 'game_history',
+        'manual_posts', 'rejected_news_links', 'rejected_news_fingerprints', 'rejected_news_titles',
+        'review_queue'
+    ):
         if not isinstance(s.get(key), list):
-            raise RuntimeError(
-                f'Поле {key} в {STATE_FILE} имеет неверный формат; файл не будет сохранён, чтобы не потерять данные.'
-            )
-    for key in ('daily_counts', 'last_slots', 'pending_ad', 'pending_manual_post', 'pending_news_review', 'review_editing'):
+            raise RuntimeError(f'Поле {key} в состоянии имеет неверный формат; сохранение остановлено.')
+    for key in (
+        'daily_counts', 'last_slots', 'pending_ad', 'pending_manual_post', 'pending_news_review',
+        'review_editing', 'date_checked_links', 'weather_snapshot', 'weather_alert_state',
+        'ai_usage_daily', 'diagnostics'
+    ):
         if not isinstance(s.get(key), dict):
-            raise RuntimeError(
-                f'Поле {key} в {STATE_FILE} имеет неверный формат; файл не будет сохранён, чтобы не потерять данные.'
-            )
+            raise RuntimeError(f'Поле {key} в состоянии имеет неверный формат; сохранение остановлено.')
     if not isinstance(s.get('last_update_id'), int):
-        raise RuntimeError(f'Поле last_update_id в {STATE_FILE} имеет неверный формат; сохранение остановлено.')
+        raise RuntimeError('Поле last_update_id имеет неверный формат; сохранение остановлено.')
     if not isinstance(s.get('paused'), bool):
-        raise RuntimeError(f'Поле paused в {STATE_FILE} имеет неверный формат; сохранение остановлено.')
+        raise RuntimeError('Поле paused имеет неверный формат; сохранение остановлено.')
     return s
 
 
 def save_state(s):
-    """Atomic write: a failed process cannot leave half-written JSON."""
+    """Persist private state to Supabase; local atomic JSON remains for tests/development only."""
+    if supabase_state_configured():
+        _supabase_request('POST', {
+            'id': 'main',
+            'state': s,
+            'updated_at': iso(now())
+        })
+        return
     temp_path = STATE_FILE + '.tmp'
     try:
         with open(temp_path, 'w', encoding='utf-8') as f:
@@ -179,7 +284,6 @@ def save_state(s):
                 os.remove(temp_path)
         except OSError:
             pass
-
 
 
 def clean(value):
@@ -408,30 +512,76 @@ def news_image_query(title, body=''):
 
 
 
-def review_keyboard(item_id):
-    """Inline controls for the private review preview."""
+def review_keyboard(item_id, version=1):
+    """Short versioned inline controls for private draft review."""
+    suffix = f':{int(version)}'
     return {'inline_keyboard': [
+        [{'text': '✅ Опубликовать сейчас', 'callback_data': f'review:publish:{item_id}{suffix}'}],
         [
-            {'text': '✅ Опубликовать сейчас', 'callback_data': f'review:publish:{item_id}'},
-            {'text': '✏️ Изменить текст', 'callback_data': f'review:edit:{item_id}'}
+            {'text': '✏️ Заголовок', 'callback_data': f'review:headline:{item_id}{suffix}'},
+            {'text': '📝 Текст', 'callback_data': f'review:body:{item_id}{suffix}'}
         ],
         [
-            {'text': '⏰ Изменить время', 'callback_data': f'review:time:{item_id}'},
-            {'text': '🗑 Отклонить', 'callback_data': f'review:reject:{item_id}'}
-        ]
+            {'text': '🖼 Фото', 'callback_data': f'review:photo:{item_id}{suffix}'},
+            {'text': '🕒 Время', 'callback_data': f'review:time:{item_id}{suffix}'}
+        ],
+        [
+            {'text': '+15 мин', 'callback_data': f'review:delay15:{item_id}{suffix}'},
+            {'text': '+30 мин', 'callback_data': f'review:delay30:{item_id}{suffix}'},
+            {'text': '+60 мин', 'callback_data': f'review:delay60:{item_id}{suffix}'}
+        ],
+        [{'text': '🗑 Отклонить', 'callback_data': f'review:reject:{item_id}{suffix}'}]
     ]}
 
+
+
+
+def sanitize_reaction_line(value):
+    """Keep reaction prompts within the channel's approved reaction allowlist."""
+    if not value:
+        return ''
+    allowed = ('❤️', '🙏', '😱', '👍', '🤣')
+    lines = []
+    for raw_line in clean_multiline(value).splitlines():
+        line = raw_line.strip()
+        emoji = next((candidate for candidate in allowed if line.startswith(candidate)), None)
+        if emoji:
+            lines.append(line)
+    return '\n'.join(lines)
+
+
+def source_name_from_url(url):
+    try:
+        host = urllib.parse.urlparse(url or '').hostname or ''
+        host = host.lower()
+        if host.startswith('www.'):
+            host = host[4:]
+        return host or 'источник'
+    except Exception:
+        return 'источник'
+
+
 def review_post_text(item):
-    """Build the exact public post from plain text; keep article links out of the message."""
+    """Render the exact public post with a bold headline and no quote/repost formatting."""
+    headline = clean_multiline(item.get('headline') or item.get('title') or '')
     body = clean_multiline(item.get('body', ''))
+    if not headline or not body:
+        return ''
     prefix = '⚠️ ' if item.get('urgent') and item.get('kind') == 'news' else ''
-    parts = [html.escape(prefix + body)]
-    reaction = clean_multiline(item.get('reaction_line', ''))
+    parts = [prefix + '<b>' + html.escape(headline) + '</b>', html.escape(body)]
+    reaction = sanitize_reaction_line(item.get('reaction_line', ''))
     if reaction:
         parts.append(html.escape(reaction))
     credit = item.get('image_credit_html') or ''
     if credit:
         parts.append(credit)
+    source_url = item.get('source_url') or (item.get('link') if item.get('kind') == 'news' else '')
+    if source_url and item.get('kind') == 'news':
+        source_name = clean(item.get('source_name') or source_name_from_url(source_url))
+        source_date = parse_dt_strict(item.get('source_published_at'))
+        date_label = ' · ' + source_date.strftime('%d.%m.%Y %H:%M') if source_date else ''
+        parts.append('Источник: <a href="' + html.escape(source_url, quote=True) + '">' +
+                     html.escape(source_name) + '</a>' + date_label + ' · время Нячанга')
     parts.append(footer().strip())
     return '\n\n'.join(part for part in parts if part)
 
@@ -451,13 +601,17 @@ def delete_review_previews(item):
 
 def review_status_text(item):
     planned = parse_dt_strict(item.get('planned_at')) or (now() + timedelta(minutes=15))
+    headline = html.escape(item.get('headline') or item.get('title') or 'без заголовка')
     return (
         f'<b>Черновик: {html.escape(item.get("kind_label", "новость"))}</b>\n'
-        f'План публикации: <b>{planned.strftime("%d.%m.%Y в %H:%M")}</b> по времени Нячанга.\n\n'
-        'Если ничего не менять, бот опубликует материал в указанное время. '
-        'Можно изменить текст, изменить время, опубликовать сразу или отклонить. '
-        'Не удаляй предпросмотр вручную вместо отклонения: Telegram не сообщает боту об удалении сообщения.'
+        f'<b>{headline}</b>\n\n'
+        f'План публикации: <b>{planned.strftime("%d.%m.%Y в %H:%M")}</b> по времени Нячанга.\n'
+        f'Версия: <code>{int(item.get("version", 1))}</code> · ID: <code>{html.escape(str(item.get("id", "")))}</code>\n\n'
+        'Если ничего не менять, бот опубликует материал по таймеру. Можно поменять заголовок, текст, фото или время; '
+        'любая правка обновляет предпросмотр и запускает 15 минут заново. '
+        '«Отклонить» гарантирует, что материал не выйдет.'
     )
+
 
 
 
@@ -472,6 +626,7 @@ def send_review_preview(item):
     item.setdefault('review_status_messages', [])
     item['image_file_id'] = item.get('image_file_id') or ''
     image_fallback_attempted = False
+    failed_admins = []
 
     for admin_id in admins:
         if item.get('image_file_id'):
@@ -523,7 +678,7 @@ def send_review_preview(item):
                         item['preview_messages'].append({
                             'chat_id': admin_id, 'message_id': continued['message_id']
                         })
-                status = send_dm(admin_id, review_status_text(item), review_keyboard(item['id']))
+                status = send_dm(admin_id, review_status_text(item), review_keyboard(item['id'], item.get('version', 1)))
                 if status and status.get('message_id'):
                     message_ref = {'chat_id': admin_id, 'message_id': status['message_id']}
                     item['preview_messages'].append(message_ref)
@@ -531,23 +686,102 @@ def send_review_preview(item):
                 break
             except Exception as e:
                 print('Review photo preview failed:', type(e).__name__)
+                failed_admins.append(admin_id)
                 item['image_file_id'] = ''
                 photo = ''
                 continue
 
-    return bool(item.get('preview_messages')) and bool(item.get('image_file_id'))
+    return bool(item.get('preview_messages')) and bool(item.get('image_file_id')) and not failed_admins
+
+def review_priority(item):
+    """Lower number means earlier review; weather and confirmed safety updates take priority."""
+    kind = str(item.get('kind') or '')
+    if kind.startswith('weather'):
+        return 0
+    if item.get('urgent'):
+        return 1
+    if kind == 'news':
+        return 2
+    return 3
+
+
+def promote_next_review_item(s):
+    """Show the next queued draft when the active one is resolved, without dropping failed items."""
+    if s.get('pending_news_review'):
+        return True
+    queue = s.setdefault('review_queue', [])
+    if not queue:
+        return False
+    queue.sort(key=lambda item: (
+        review_priority(item),
+        parse_dt_strict(item.get('planned_at')) or (now() + timedelta(days=3650)),
+        str(item.get('created_at') or '')
+    ))
+    for item in list(queue):
+        planned = parse_dt_strict(item.get('planned_at'))
+        minimum = now() + timedelta(minutes=15)
+        if not planned or planned < minimum:
+            item['planned_at'] = iso(minimum)
+        item['version'] = max(1, int(item.get('version', 1)))
+        item['preview_messages'] = []
+        item['review_status_messages'] = []
+        item['image_file_id'] = item.get('image_file_id') or ''
+        if send_review_preview(item):
+            queue.remove(item)
+            s['pending_news_review'] = item
+            s['review_editing'] = {}
+            for admin_id in sorted(ADMIN_USER_IDS):
+                try:
+                    send_dm(admin_id, f'📬 В очереди появился следующий материал: <b>{html.escape(item.get("kind_label", "публикация"))}</b>. Автовыпуск через 15 минут после предпросмотра.')
+                except Exception:
+                    pass
+            print('Promoted review queue item:', item.get('id'))
+            return True
+        item['preview_failures'] = int(item.get('preview_failures', 0)) + 1
+        if not item.get('preview_failure_notified'):
+            item['preview_failure_notified'] = True
+            for admin_id in sorted(ADMIN_USER_IDS):
+                try:
+                    send_dm(admin_id,
+                        f'⚠️ Не удалось показать предпросмотр <code>{html.escape(str(item.get("id", "")))}</code>: нет доступного фото или личное сообщение не доставлено. Материал сохранён в очереди; автоматической публикации без фото не будет.')
+                except Exception:
+                    pass
+    return False
+
 
 def queue_review_item(s, item, planned_at=None, slot_key=None):
-    """Persist one private review candidate; publication waits until its planned time."""
-    if s.get('pending_news_review'):
-        return False
+    """Persist a review candidate and send a preview now or when it reaches the head of the queue."""
     item = dict(item)
-    stamp = str(int(time.time()))
-    fingerprint = hashlib.md5(
-        ((item.get('link') or '') + stamp + (item.get('title') or '')).encode('utf-8')
-    ).hexdigest()[:7]
-    item_id = 'rv' + stamp + fingerprint
+    item['headline'] = clean_multiline(item.get('headline') or item.get('title') or '')
+    item['title'] = item['headline']
+    item['body'] = clean_multiline(item.get('body', ''))
+    if not item['headline'] or not item['body']:
+        print('Review candidate has no headline or body; blocked.')
+        return False
+
+    link = item.get('link') or ''
+    fingerprint = item.get('idempotency_key') or (
+        link or title_fingerprint(item.get('source_title') or item['headline'])
+    )
+    active = s.get('pending_news_review') or {}
+    for existing in [active] + list(s.get('review_queue') or []):
+        if not existing:
+            continue
+        existing_link = existing.get('link') or ''
+        existing_key = existing.get('idempotency_key') or (
+            existing_link or title_fingerprint(existing.get('source_title') or existing.get('headline') or existing.get('title', ''))
+        )
+        if fingerprint and existing_key == fingerprint:
+            print('Duplicate candidate already waiting for review:', existing.get('id'))
+            return False
+
+    item['idempotency_key'] = fingerprint
+    stamp = str(time.time_ns())
+    item_id = 'rv' + hashlib.sha256(
+        ((link or '') + stamp + item['headline']).encode('utf-8')
+    ).hexdigest()[:18]
     item['id'] = item_id
+    item['version'] = 1
     item['created_at'] = iso(now())
     item['status'] = 'pending_review'
     item['review_count'] = 0
@@ -556,15 +790,22 @@ def queue_review_item(s, item, planned_at=None, slot_key=None):
     item['planned_at'] = iso(max(requested_time, minimum_time))
     item['slot_key'] = slot_key or ''
     item['preview_messages'] = []
+    item['review_status_messages'] = []
     item['image_url'] = normalize_image_url(item.get('image_url') or '') or ''
     item['image_file_id'] = item.get('image_file_id') or ''
 
-    # Find a Vietnam/topic-specific fallback before sending the preview if the article has no usable image.
     if not item['image_url'] and not item['image_file_id']:
-        fallback = commons_image(item.get('image_query') or news_image_query(item.get('title', ''), item.get('body', '')))
+        fallback = commons_image(item.get('image_query') or news_image_query(item['headline'], item['body']))
         if not fallback:
-            print('No suitable image found; candidate was not queued:', item.get('title', item_id))
-            return False
+            item['status'] = 'needs_image'
+            s.setdefault('review_queue', []).append(item)
+            for admin_id in sorted(ADMIN_USER_IDS):
+                try:
+                    send_dm(admin_id,
+                        f'🖼 Для материала «{html.escape(item["headline"][:120])}» не найдено подходящее фото. Он сохранён без публикации. Добавь фото после восстановления предпросмотра.')
+                except Exception:
+                    pass
+            return True
         if isinstance(fallback, dict):
             item['image_url'] = normalize_image_url(fallback.get('url') or '') or ''
             item['image_credit_html'] = fallback.get('credit_html') or ''
@@ -572,18 +813,35 @@ def queue_review_item(s, item, planned_at=None, slot_key=None):
             item['image_url'] = normalize_image_url(fallback) or ''
             item['image_credit_html'] = ''
         if not item['image_url']:
-            print('Fallback image was not a usable web image; candidate was not queued:', item_id)
-            return False
+            item['status'] = 'needs_image'
+            s.setdefault('review_queue', []).append(item)
+            return True
+
+    if s.get('pending_news_review') or s.get('review_queue'):
+        s.setdefault('review_queue', []).append(item)
+        print('Queued for later review:', item_id, 'kind=', item.get('kind'))
+        return True
 
     if not send_review_preview(item):
         delete_review_previews(item)
-        print('Private photo preview could not be delivered; candidate not queued:', item_id)
-        return False
+        item['status'] = 'needs_preview'
+        item['preview_failure_notified'] = True
+        s.setdefault('review_queue', []).append(item)
+        for admin_id in sorted(ADMIN_USER_IDS):
+            try:
+                send_dm(admin_id,
+                    f'⚠️ Не удалось доставить предпросмотр <code>{item_id}</code>. Материал сохранён в очереди; без успешного предпросмотра он не будет опубликован.')
+            except Exception:
+                pass
+        print('Private preview failed; candidate kept in queue:', item_id)
+        return True
 
     s['pending_news_review'] = item
     s['review_editing'] = {}
     print('Queued for review:', item_id, 'planned_at=', item['planned_at'], 'kind=', item.get('kind'))
     return True
+
+
 
 
 def publish_review_item(s, item):
@@ -628,8 +886,11 @@ def publish_review_item(s, item):
 
 
 def process_news_review(s):
-    """Publish a queued item at its planned time, tolerating sub-minute cron jitter for fixed rubrics."""
+    """Publish the active review item at its due time and promote the next queued item."""
     item = s.get('pending_news_review') or {}
+    if not item:
+        promote_next_review_item(s)
+        item = s.get('pending_news_review') or {}
     if not item or item.get('status') != 'pending_review':
         return
     planned = parse_dt_strict(item.get('planned_at'))
@@ -990,13 +1251,9 @@ def post_with_image(text, image_url=None, illustration=False, image_query=None, 
                 if fallback:
                     candidates.append(fallback)
 
-    # Last-resort protection: do not drop important information if Telegram cannot fetch any image.
-    print('No usable image could be sent; publishing text fallback.')
-    result = None
-    for part in split_html_text(text, limit=3900):
-        result = post_text(part)
-        time.sleep(0.2)
-    return result
+    # Mandatory photo policy: never publish a text-only fallback.
+    print('No usable image could be sent; publication blocked until a photo is available.')
+    return None
 
 def translate(text):
     """Translate the whole text in bounded chunks instead of silently truncating at 4,000 chars."""
@@ -1392,13 +1649,13 @@ def handle_admin_message(msg, s):
                         'message_id': ref['message_id'],
                         'text': review_status_text(item),
                         'parse_mode': 'HTML',
-                        'reply_markup': json.dumps(review_keyboard(item['id']), ensure_ascii=False)
+                        'reply_markup': json.dumps(review_keyboard(item['id'], item.get('version', 1)), ensure_ascii=False)
                     })
                     updated = True
                 except Exception as e:
                     print('Could not update review status message:', type(e).__name__)
             if not updated:
-                status = send_dm(uid, review_status_text(item), review_keyboard(item['id']))
+                status = send_dm(uid, review_status_text(item), review_keyboard(item['id'], item.get('version', 1)))
                 if status and status.get('message_id'):
                     ref = {'chat_id': uid, 'message_id': status['message_id']}
                     item.setdefault('preview_messages', []).append(ref)
@@ -2292,6 +2549,7 @@ def publish_news(s):
 
 
 def main():
+    ensure_production_state_backend()
     s = load_state()
     if ensure_polling_no_webhook():
         get_updates(s)
@@ -2309,10 +2567,13 @@ def main():
     pending = s.get('pending_news_review') or {}
     print(
         'Finished:', now().isoformat(),
-        'posts_today=', count_today(s),
+        'posts_today=', count_today(s), '/', MAX_DAILY_POSTS,
         'paused=', is_paused(s),
         'review_pending=', bool(pending),
-        'review_due=', pending.get('planned_at', '')
+        'review_queue=', len(s.get('review_queue', [])),
+        'review_due=', pending.get('planned_at', ''),
+        'ai_mode=', 'gemini' if GEMINI_API_KEY else 'rule-based-fallback',
+        'state_store=', 'supabase' if supabase_state_configured() else 'local-development'
     )
 
 

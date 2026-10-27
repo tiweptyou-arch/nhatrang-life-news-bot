@@ -1907,28 +1907,46 @@ def handle_admin_message(msg, s):
             send_dm(uid, 'Этот черновик уже опубликован или отклонён. Новая очередь доступна в следующем предпросмотре.')
             return
 
-        if msg.get('photo'):
-            # A photo with a caption replaces both the body and the image; without a caption, keep the existing body.
-            body = text or item.get('body', '')
+        mode = editing.get('mode') or 'body'
+        if mode == 'headline':
+            if not text or text.startswith('/') or msg.get('photo'):
+                send_dm(uid, 'Отправь новый заголовок обычным текстовым сообщением. Для отмены — /cancelreview.')
+                return
+            headline = clean_multiline(text).replace('\n', ' ').strip()
+            if len(headline) > 160:
+                send_dm(uid, 'Заголовок должен быть не длиннее 160 символов. Пришли более короткий вариант.')
+                return
+            item['headline'] = headline
+            item['title'] = headline
+        elif mode == 'photo':
+            if not msg.get('photo'):
+                send_dm(uid, 'Для замены изображения пришли именно фото. Для отмены — /cancelreview.')
+                return
             item['image_file_id'] = msg['photo'][-1]['file_id']
             item['image_url'] = ''
             item['image_credit_html'] = ''
         else:
-            if not text or text.startswith('/'):
-                send_dm(uid, 'Отправь новый текст публикации одним сообщением. Для отмены: /cancelreview')
+            if msg.get('photo'):
+                body = text or item.get('body', '')
+                item['image_file_id'] = msg['photo'][-1]['file_id']
+                item['image_url'] = ''
+                item['image_credit_html'] = ''
+            else:
+                if not text or text.startswith('/'):
+                    send_dm(uid, 'Отправь новый текст публикации одним сообщением. Для отмены: /cancelreview')
+                    return
+                body = text
+            body = clean_multiline(re.sub(r'https?://\S+', '', body))
+            if not body:
+                send_dm(uid, 'После удаления ссылок текст пуст. Отправь текст публикации ещё раз или /cancelreview.')
                 return
-            body = text
+            item['body'] = body
+            item['reaction_line'] = sanitize_reaction_line(item.get('reaction_line', ''))
 
-        body = clean_multiline(re.sub(r'https?://\S+', '', body))
-        if not body:
-            send_dm(uid, 'После удаления ссылок текст пуст. Отправь текст публикации ещё раз или /cancelreview.')
-            return
-
-        item['body'] = body
-        item['reaction_line'] = ''
         item['edited_by'] = uid
         item['edited_at'] = iso(now())
         item['review_count'] = int(item.get('review_count', 0)) + 1
+        item['version'] = int(item.get('version', 1)) + 1
         item['planned_at'] = iso(now() + timedelta(minutes=15))
         delete_review_previews(item)
         item['preview_messages'] = []

@@ -1561,5 +1561,33 @@ class NewsQualityTests(unittest.TestCase):
         self.assertEqual(state["published_news"], [])
 
 
+
+    def test_queued_preview_retry_restores_pending_status_without_duplicate_preview(self):
+        current = datetime(2026, 10, 27, 11, 30, tzinfo=bot.TZ)
+        item = {
+            "id": "rv-queue-retry", "kind": "news", "status": "needs_preview",
+            "headline": "Дорога в Нячанге", "title": "Дорога в Нячанге",
+            "body": "Проверенная информация об изменении движения в городе. Выбирайте маршрут заранее.",
+            "image_url": "https://cdn.publisher.example/road.jpg",
+            "planned_at": (current - timedelta(minutes=5)).isoformat(),
+            "next_preview_retry_at": (current - timedelta(minutes=1)).isoformat(),
+            "preview_messages": [], "review_status_messages": [],
+        }
+        state = {
+            "pending_news_review": {}, "review_queue": [item],
+            "daily_counts": {}, "paused": False, "pause_until": "",
+        }
+        with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "send_review_preview", return_value=True) as preview_mock, \
+             patch.object(bot, "send_dm"):
+            bot.promote_next_review_item(state)
+            bot.process_news_review(state)
+        self.assertEqual(state["pending_news_review"]["id"], "rv-queue-retry")
+        self.assertEqual(item["status"], "pending_review")
+        self.assertEqual(item["planned_at"], (current + timedelta(minutes=15)).isoformat())
+        self.assertNotIn("next_preview_retry_at", item)
+        preview_mock.assert_called_once_with(item)
+
+
 if __name__ == "__main__":
     unittest.main()

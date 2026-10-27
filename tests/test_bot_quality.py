@@ -1250,7 +1250,7 @@ class NewsQualityTests(unittest.TestCase):
             bot.handle_callback(callback, state)
         publish_mock.assert_not_called()
         dm_mock.assert_called_once()
-        self.assertIn("старого", str(dm_mock.call_args.args[1]))
+        self.assertIn("старому", str(dm_mock.call_args.args[1]))
 
     def test_pending_ad_auto_publish_requires_confirmed_preview_and_due_time(self):
         uid = "111111111"

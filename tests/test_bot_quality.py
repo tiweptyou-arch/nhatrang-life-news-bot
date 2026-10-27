@@ -774,7 +774,7 @@ class NewsQualityTests(unittest.TestCase):
         self.assertNotIn("publisher.example", result)
         self.assertTrue(result.endswith("…") or result.endswith((".", "!", "?")))
 
-    def test_publish_news_queues_article_image_without_generated_headline_or_source_link(self):
+    def test_publish_news_queues_article_image_with_separate_headline_and_source_metadata(self):
         current = datetime(2026, 10, 26, 10, 15, tzinfo=bot.TZ)
         description = (
             "The local authority announced road repairs in Nha Trang. "
@@ -1062,6 +1062,105 @@ class NewsQualityTests(unittest.TestCase):
         ad = {"chat_id": -1001, "message_id": 401, "message_ids": [401, 402]}
         with patch.object(bot, "api", side_effect=fake_api):
             bot.delete_ad_message(ad)
+
+
+
+    def test_public_post_has_bold_separate_headline_and_only_approved_reactions(self):
+        item = {
+            "kind": "news",
+            "headline": "Nha Trang changes the road access rules",
+            "body": "Residents should check the new route before travelling through the district.",
+            "reaction_line": "😂 — это смешно\n👍 — полезная информация",
+            "link": "https://publisher.example/road-story",
+            "source_url": "https://publisher.example/road-story",
+            "source_published_at": "2026-10-27T09:00:00+07:00",
+        }
+        rendered = bot.review_post_text(item)
+        self.assertTrue(rendered.startswith("<b>Nha Trang changes the road access rules</b>"))
+        self.assertIn("Residents should check", rendered)
+        self.assertIn('<a href="https://publisher.example/road-story">publisher.example</a>', rendered)
+        self.assertNotIn("<blockquote", rendered)
+        self.assertNotIn("😂", rendered)
+        self.assertIn("👍 — полезная информация", rendered)
+        self.assertIn("ПОДПИСАТЬСЯ", rendered)
+        self.assertIn("ПРЕДЛОЖИТЬ НОВОСТЬ", rendered)
+
+    def test_reactions_reject_every_emoji_outside_the_allowlist(self):
+        value = "😂 — нет\n🔥 — нет\n❤️ — да\n🙏 — да\n😱 — да\n👍 — да\n🤣 — да\n🙂 — нет"
+        actual = bot.sanitize_reaction_line(value)
+        self.assertEqual(actual.splitlines(), [
+            "❤️ — да", "🙏 — да", "😱 — да", "👍 — да", "🤣 — да"
+        ])
+
+    def test_no_photo_means_no_public_text_only_fallback(self):
+        post = "<b>Заголовок</b>\n\nПроверенный текст новости."
+        with patch.object(bot, "commons_image", return_value=None), \
+             patch.object(bot, "api") as api_mock, \
+             patch.object(bot, "post_text") as text_mock:
+            result = bot.post_with_image(post, image_url=None, image_query="Nha Trang road")
+        self.assertIsNone(result)
+        api_mock.assert_not_called()
+        text_mock.assert_not_called()
+
+    def test_article_date_metadata_is_used_when_rss_date_is_missing(self):
+        page = (
+            '<html><head>'
+            '<meta property="article:published_time" content="2026-10-27T08:15:00+07:00">'
+            '<meta property="og:updated_time" content="2026-10-27T08:45:00+07:00">'
+            '</head><body></body></html>'
+        )
+        dates = bot.extract_article_date_candidates(page)
+        self.assertEqual(len(dates), 2)
+        current = datetime(2026, 10, 27, 9, 0, tzinfo=bot.TZ)
+        recent = bot.extract_recent_article_date(page, current_time=current)
+        self.assertIsNotNone(recent)
+        self.assertEqual(recent.hour, 8)
+        self.assertEqual(recent.minute, 45)
+
+    def test_weather_alert_decision_requires_a_material_measurable_change(self):
+        changed, reason = bot.weather_change_decision(
+            {"rain_max": 40, "severe_code": None, "wind_max": 15},
+            {"rain_max": 80, "severe_code": None, "wind_max": 20},
+        )
+        self.assertTrue(changed)
+        self.assertIn("40%", reason)
+        self.assertIn("80%", reason)
+        unchanged, _ = bot.weather_change_decision(
+            {"rain_max": None, "severe_code": None, "wind_max": None},
+            {"rain_max": None, "severe_code": None, "wind_max": None},
+        )
+        self.assertFalse(unchanged)
+
+    def test_weather_copy_does_not_turn_missing_rain_probability_into_zero(self):
+        current = datetime(2026, 10, 27, 8, 0, tzinfo=bot.TZ)
+        data = make_weather_fixture(current)
+        data["daily"]["precipitation_probability_max"] = [None, None]
+        data["hourly"]["precipitation_probability"] = [None] * 48
+        headline, body, target = bot.format_weather_forecast(data, "morning", current)
+        self.assertEqual(target, current.date())
+        self.assertIn("вероятность дождя: нет данных", body)
+        self.assertIn("Максимальная вероятность дождя за день: нет данных.", body)
+        self.assertNotIn("0%", body)
+        self.assertIn("Обновлено: 27.10.2026 08:00", body)
+        self.assertTrue(headline.startswith("Погода в Нячанге"))
+
+    def test_gemini_reaction_prompt_is_whitelisted_and_limited(self):
+        line = bot.format_ai_reaction_prompt([
+            {"emoji": "😂", "text": "не разрешено"},
+            {"emoji": "❤️", "text": "приятно"},
+            {"emoji": "❤️", "text": "повтор"},
+            {"emoji": "🙏", "text": "спасибо"},
+            {"emoji": "🔥", "text": "не разрешено"},
+            {"emoji": "😱", "text": "третья реакция"},
+        ])
+        self.assertEqual(line, "❤️ — приятно; 🙏 — спасибо")
+        self.assertEqual(bot.format_ai_reaction_prompt([{"emoji": "😱", "text": "опасность"}], serious=True), "")
+
+    def test_review_keyboard_uses_only_short_callback_payloads(self):
+        markup = bot.review_keyboard("rv0123456789abcdefab", version=3)
+        callbacks = [button["callback_data"] for row in markup["inline_keyboard"] for button in row]
+        self.assertIn("review:publish:rv0123456789abcdefab:3", callbacks)
+        self.assertTrue(all(len(value.encode("utf-8")) <= 64 for value in callbacks))
 
 
 if __name__ == "__main__":

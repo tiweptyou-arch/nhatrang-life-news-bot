@@ -1520,7 +1520,7 @@ def split_html_text(text, limit=3900):
 
 
 
-class MediaCaptionTooLongError(RuntimeError):
+class MediaCaptionTooLongError(ValueError):
     """A photo-led post would require an impermissible text-only continuation."""
 
 
@@ -2073,9 +2073,11 @@ def publish_manual_post(item, s, uid=None):
             image_query=news_image_query(title, body)
         )
 
+    if not isinstance(result, dict) or not result.get('message_id'):
+        raise ValueError('Telegram не подтвердил публикацию. Материал оставлен в очереди и не отмечен опубликованным; проверь фото и повтори предпросмотр.')
     item['status'] = 'published'
     item['published_at'] = iso(now())
-    item['published_message_id'] = (result or {}).get('message_id')
+    item['published_message_id'] = result.get('message_id')
     item['title'] = title
     s['published_news'] = (s.get('published_news', []) + [{
         'title': title, 'summary': body, 'link': source_link,

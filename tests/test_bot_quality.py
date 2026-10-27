@@ -1539,5 +1539,27 @@ class NewsQualityTests(unittest.TestCase):
         self.assertNotIn("review_status", draft)
 
 
+
+    def test_legacy_manual_post_is_not_marked_published_without_telegram_confirmation(self):
+        current = datetime(2026, 10, 27, 11, 0, tzinfo=bot.TZ)
+        item = {
+            "id": "manual-no-photo", "status": "pending",
+            "content": "Road repair update\n\nThe city announced a scheduled road repair for local residents. Use the alternate route and check signs.",
+            "type": "text",
+        }
+        state = {
+            "ads": [], "paused": False, "pause_until": "", "daily_counts": {},
+            "seen_links": [], "seen_titles": [], "seen_fingerprints": [], "published_news": [],
+        }
+        with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "is_paused", return_value=False), \
+             patch.object(bot, "count_today", return_value=0), \
+             patch.object(bot, "post_with_image", return_value=None):
+            with self.assertRaisesRegex(ValueError, "не подтвердил публикацию"):
+                bot.publish_manual_post(item, state)
+        self.assertEqual(item["status"], "pending")
+        self.assertEqual(state["published_news"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

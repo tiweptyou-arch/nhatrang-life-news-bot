@@ -423,7 +423,7 @@ URGENT_NEWS_TERMS = (
     'tai nạn nghiêm trọng', 'mất tích', 'nguy hiểm', 'cấm tắm biển', 'sóng lớn',
     'dịch bệnh', 'đóng đường khẩn cấp', 'emergency', 'flood', 'storm', 'evacuation'
 )
-ALLOWED_REACTIONS = ('🤣', '😱', '👍', '❤️', '🙏')
+ALLOWED_REACTIONS = ('❤️', '🙏', '😱', '👍', '🤣')
 
 
 def contains_term(text, term):
@@ -1364,6 +1364,172 @@ def translate(text):
             # Do not pretend that an untranslated source passage was successfully translated.
             return ''
     return '\n\n'.join(part for part in translated if part).strip()
+
+
+
+def editorial_score_parts(title, body, source_url, published_at, urgent=False, duplicate=False, now_dt=None):
+    """Deterministic editorial score used as a guardrail around model suggestions."""
+    now_dt = now_dt or now()
+    text = clean((title or '') + ' ' + (body or '')).casefold()
+    local_terms = ('nha trang', 'nhatrang', 'cam ranh', 'diên khánh', 'dien khanh', 'vạn ninh', 'van ninh', 'khánh hòa', 'khanh hoa', 'trường sa', 'truong sa')
+    local = 5 if any(term in text for term in local_terms) else 3
+    practical = 5 if urgent or is_urgent_news(text) else (
+        4 if any(contains_term(text, term) for term in PRACTICAL_NEWS_TERMS) else 2
+    )
+    host = (urllib.parse.urlparse(source_url or '').hostname or '').lower()
+    if host.startswith('www.'):
+        host = host[4:]
+    if host.endswith('.gov.vn') or host.endswith('.gov') or host in ('nhatrang.khanhhoa.gov.vn', 'khanhhoa.gov.vn'):
+        reliability = 5
+    elif any(host == domain or host.endswith('.' + domain) for domain in (
+        'baokhanhhoa.vn', 'tuoitre.vn', 'vnexpress.net', 'thanhnien.vn', 'dantri.com.vn',
+        'laodong.vn', 'vov.vn', 'vietnamnews.vn', 'nld.com.vn', 'congan.com.vn'
+    )):
+        reliability = 4
+    elif host and host not in ('news.google.com', 'google.com'):
+        reliability = 3
+    else:
+        reliability = 2
+    if not published_at:
+        freshness = 0
+    else:
+        age = now_dt - published_at
+        if age < -timedelta(minutes=15) or age > timedelta(hours=72):
+            freshness = 0
+        elif age <= timedelta(hours=6):
+            freshness = 5
+        elif age <= timedelta(hours=24):
+            freshness = 4
+        elif age <= timedelta(hours=48):
+            freshness = 3
+        else:
+            freshness = 2
+    novelty = 0 if duplicate else 5
+    score = 6 * local + 5 * practical + 4 * reliability + 3 * freshness + 2 * novelty
+    return {
+        'local_relevance': local, 'practical_usefulness': practical,
+        'source_confidence': reliability, 'freshness_confidence': freshness,
+        'novelty': novelty, 'score': score
+    }
+
+
+def has_unsupported_numeric_facts(draft_text, source_text):
+    """Reject AI rewrites that introduce numeric facts not present in the source material."""
+    source_numbers = set(re.findall(r'\d+(?:[.,]\d+)?', source_text or ''))
+    draft_numbers = set(re.findall(r'\d+(?:[.,]\d+)?', draft_text or ''))
+    return not draft_numbers.issubset(source_numbers)
+
+
+def format_ai_reaction_prompt(reactions, serious=False):
+    """Render at most two permitted emoji reactions from a validated model payload."""
+    if serious or not isinstance(reactions, list):
+        return ''
+    output = []
+    seen = set()
+    for entry in reactions:
+        if not isinstance(entry, dict):
+            continue
+        emoji = entry.get('emoji')
+        label = clean(entry.get('text') or '')
+        if emoji not in ALLOWED_REACTIONS or not label or emoji in seen:
+            continue
+        seen.add(emoji)
+        output.append(f'{emoji} — {label[:70]}')
+        if len(output) == 2:
+            break
+    return '; '.join(output)
+
+
+def ai_editorial_review(s, source_title, source_text, source_url, published_at, urgent=False):
+    """Call Gemini as a constrained editor. The model never controls Telegram or publication state."""
+    if not GEMINI_API_KEY:
+        return None
+    today = now().date().isoformat()
+    usage = s.get('ai_usage_daily') or {}
+    if usage.get('date') != today:
+        usage = {'date': today, 'calls': 0}
+        s['ai_usage_daily'] = usage
+    if int(usage.get('calls', 0)) >= MAX_AI_CALLS_PER_DAY:
+        print('AI review skipped: daily request budget reached.')
+        return None
+    usage['calls'] = int(usage.get('calls', 0)) + 1
+
+    prompt = (
+        'Ты редактор русскоязычного локального новостного Telegram-канала для жителей Нячанга и Кханьхоа. '
+        'Используй только факты из переданного первоисточника; ничего не додумывай. '
+        'Если новость не помогает жителям/туристам, старая, неподтверждённая или содержит мало проверяемой фактуры — '
+        'выбери hold или reject. Не пиши цитатный блок и не копируй оригинальные формулировки целиком. '
+        'Верни только валидный JSON без Markdown. Все оценки — целые числа 0..5. '
+        'Схема: {"decision":"draft|hold|reject","local_relevance":0,"practical_usefulness":0,'
+        '"source_confidence":0,"freshness_confidence":0,"novelty":0,"why_it_matters":"...",'
+        '"headline_ru":"короткий отдельный заголовок","body_ru":"короткий пересказ на русском",'
+        '"category":"weather|safety|transport|rules|services|city|tourism|life",'
+        '"image_query_en":"конкретная сцена/объект для тематического фото",'
+        '"reaction_prompt":[{"emoji":"👍","text":"Полезно"}],"uncertainties":[]} '
+        'В реакциях разрешены только ❤️, 🙏, 😱, 👍, 🤣; для трагедий/опасных происшествий реакцию не предлагай. '
+        'Запрос для картинки должен быть конкретным; добавляй Nha Trang/Vietnam, только если это действительно локальный сюжет. '
+        f'Источник URL: {source_url}\n'
+        f'Дата источника: {published_at.isoformat() if published_at else "unknown"}\n'
+        f'Срочная тема по ключевым словам: {bool(urgent)}\n'
+        f'Заголовок источника: {source_title[:1200]}\n'
+        f'Текст источника:\n{(source_text or "")[:8500]}'
+    )
+    endpoint = (
+        'https://generativelanguage.googleapis.com/v1beta/models/' +
+        urllib.parse.quote(GEMINI_MODEL, safe='') + ':generateContent'
+    )
+    payload = {
+        'contents': [{'role': 'user', 'parts': [{'text': prompt}]}],
+        'generationConfig': {
+            'responseMimeType': 'application/json',
+            'temperature': 0.2,
+            'maxOutputTokens': 1400
+        }
+    }
+    request = urllib.request.Request(
+        endpoint,
+        data=json.dumps(payload, ensure_ascii=False).encode('utf-8'),
+        headers={'Content-Type': 'application/json', 'x-goog-api-key': GEMINI_API_KEY,
+                 'User-Agent': 'NhaTrangLifeNewsBot/3.0'},
+        method='POST'
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            payload_out = json.loads(response.read().decode('utf-8'))
+        text = ''.join(
+            part.get('text', '')
+            for part in payload_out['candidates'][0]['content']['parts']
+            if isinstance(part, dict)
+        ).strip()
+        result = json.loads(text)
+    except Exception as exc:
+        status = getattr(exc, 'code', None)
+        print('AI editorial review failed safely:', 'HTTP ' + str(status) if status else type(exc).__name__)
+        return None
+    if not isinstance(result, dict):
+        return None
+    if result.get('decision') not in ('draft', 'hold', 'reject'):
+        return None
+    valid_categories = {'weather', 'safety', 'transport', 'rules', 'services', 'city', 'tourism', 'life'}
+    if result.get('category') not in valid_categories:
+        return None
+    for field in ('local_relevance', 'practical_usefulness', 'source_confidence', 'freshness_confidence', 'novelty'):
+        score = result.get(field)
+        if not isinstance(score, int) or score < 0 or score > 5:
+            return None
+    headline = clean_multiline(result.get('headline_ru') or '')
+    body = clean_multiline(result.get('body_ru') or '')
+    if result['decision'] == 'draft' and (len(headline) < 8 or len(body) < 100 or len(body.split()) < 18):
+        return None
+    result['headline_ru'] = headline
+    result['body_ru'] = body
+    query = clean(result.get('image_query_en') or '')
+    if query and not any(x in query.casefold() for x in ('nha trang', 'vietnam', 'khanh hoa')):
+        query = query[:140] + ' Nha Trang Vietnam'
+    result['image_query_en'] = query[:220]
+    result['reaction_line'] = format_ai_reaction_prompt(result.get('reaction_prompt'), serious=urgent)
+    return result
+
 
 
 def footer(): return '\n\n' + FOOTER

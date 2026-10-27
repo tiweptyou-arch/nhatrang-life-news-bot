@@ -28,7 +28,7 @@ jobs:
     env:
       BOT_TEST_MODE: '1'
       TELEGRAM_BOT_TOKEN: 'test-token-for-local-unit-tests'
-      ADMIN_USER_IDS: '1335496436,8563451956'
+      ADMIN_USER_IDS: '111111111,222222222'
       WEATHERAPI_KEY: 'test-only-weather-key'
     steps:
       - name: Checkout source

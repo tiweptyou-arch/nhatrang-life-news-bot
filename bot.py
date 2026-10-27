@@ -1966,33 +1966,36 @@ def handle_admin_album(messages, s):
         if not media_items:
             send_dm(uid, 'В альбоме не найдено фото или видео. Пришли альбом ещё раз или /cancel.')
             return
-        if len(media_items) > 10:
-            media_items = media_items[:10]
+        media_items = media_items[:10]
         content = (first.get('caption') or '').strip()
         if not content:
             content = next(((m.get('caption') or '').strip() for m in messages if (m.get('caption') or '').strip()), '')
+        content = clean_multiline(content)
         if not content:
-            send_dm(uid, 'Добавь короткое описание к альбому. Без текста материал не попадёт в очередь. Для отмены: /cancel')
+            send_dm(uid, 'Добавь отдельный заголовок и 1–2 предложения описания к альбому. Без текста материал не попадёт в очередь. Для отмены: /cancel')
             return
 
         source_match = re.search(r'https?://[^\s<>]+', content)
         source_url = source_match.group(0).rstrip('.,);]') if source_match else ''
         clean_content = clean_multiline(re.sub(r'https?://\S+', '', content))
-        headline, body = split_manual_content(clean_content)
-        if not body:
+        rows = [row.strip() for row in clean_content.splitlines() if row.strip()]
+        if len(rows) >= 2:
+            headline = rows[0][:160]
+            body = clean_multiline('\n'.join(rows[1:]))
+        elif len(clean_content) >= 120:
+            headline = clean_content[:95].rsplit(' ', 1)[0].rstrip(' .,:;') + '…'
             body = clean_content
-            headline = clean_content.split('\n', 1)[0][:120].strip()
-        if not headline:
-            headline = 'Материал редактора'
+        else:
+            send_dm(uid, 'Не хватает описания для отдельного заголовка и текста. Пришли альбом повторно с форматом: заголовок с первой строки, описание со второй строки.')
+            return
         if normalized_title(headline) == normalized_title(body[:len(headline)]):
             body = body[len(headline):].lstrip(' .,:;—-\n')
-        if not body:
-            body = clean_content
-        if not body:
-            send_dm(uid, 'В подписи альбома не осталось описания. Добавь пару предложений и пришли снова.')
+        if not body or len(body) < 30:
+            send_dm(uid, 'Описание слишком короткое или повторяет заголовок. Добавь факты: где, что произошло и когда.')
             return
 
         item_id = f'{uid}-{first.get("message_id") or int(time.time() * 1000)}'
+        idempotency_key = source_url or 'manual-album:' + item_id
         first_media = media_items[0]
         queued = queue_review_item(s, {
             'kind': 'news' if source_url else 'manual_tip',
@@ -2000,23 +2003,27 @@ def handle_admin_album(messages, s):
             'headline': headline, 'title': headline, 'source_title': headline,
             'body': body, 'link': source_url, 'source_url': source_url,
             'source_name': source_name_from_url(source_url) if source_url else '',
-            'source_published_at': iso(now()),
-            'image_file_id': first_media['file_id'],
-            'media_type': first_media['type'],
-            'media_items': media_items,
-            'image_url': '', 'image_query': news_image_query(headline, body),
+            'source_published_at': '',
+            'image_file_id': first_media['file_id'], 'media_type': first_media['type'],
+            'media_items': media_items, 'image_url': '',
+            'image_query': news_image_query(headline, body),
             'reaction_line': sanitize_reaction_line(reaction_line(headline + ' ' + body)),
-            'urgent': False, 'idempotency_key': source_url or 'manual-album:' + item_id
+            'urgent': False, 'idempotency_key': idempotency_key
         })
+        matching = (
+            (s.get('pending_news_review') or {})
+            if (s.get('pending_news_review') or {}).get('idempotency_key') == idempotency_key
+            else next((entry for entry in s.get('review_queue', []) if entry.get('idempotency_key') == idempotency_key), {})
+        )
         s.setdefault('manual_posts', []).append({
             'id': item_id, 'status': 'queued_for_review' if queued else 'not_queued',
             'content': content, 'type': 'album', 'media_items': media_items,
-            'review_id': (s.get('pending_news_review') or {}).get('id', ''),
+            'review_id': matching.get('id', ''),
             'submitted_by': uid, 'created_at': iso(now())
         })
         s['pending_manual_post'] = {}
         if queued:
-            send_dm(uid, f'✅ Альбом добавлен в редакторскую очередь. ID: <code>{html.escape(item_id)}</code>. Проверь фото/текст в предпросмотре; публикация не начнётся без подтверждённого предпросмотра.', main_menu())
+            send_dm(uid, f'✅ Альбом добавлен в редакторскую очередь. ID: <code>{html.escape(item_id)}</code>. Заголовок, текст, фото и таймер редактируются из личного предпросмотра. Для проверки очереди — /reviewqueue.', main_menu())
         else:
             send_dm(uid, 'Альбом не добавлен: материал уже в очереди или не прошёл проверку. Открой /reviewqueue.', main_menu())
         return

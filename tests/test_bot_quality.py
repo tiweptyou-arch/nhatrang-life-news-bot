@@ -1495,5 +1495,49 @@ class NewsQualityTests(unittest.TestCase):
         self.assertNotIn("review_status", draft)
 
 
+
+    def test_photo_replacement_updates_album_payload_and_video_single_media_type(self):
+        album = {
+            "media_items": [
+                {"type": "video", "file_id": "old-video"},
+                {"type": "photo", "file_id": "keep-photo"},
+            ],
+            "media_type": "video",
+        }
+        bot.apply_review_photo(album, "replacement-photo")
+        self.assertEqual(album["media_items"][0], {"type": "photo", "file_id": "replacement-photo"})
+        self.assertEqual(album["media_items"][1], {"type": "photo", "file_id": "keep-photo"})
+        self.assertNotIn("media_type", album)
+        self.assertEqual(album["image_file_id"], "replacement-photo")
+
+        single = {"media_type": "video", "image_file_id": "old-video"}
+        bot.apply_review_photo(single, "replacement-photo")
+        self.assertEqual(single["media_type"], "photo")
+        self.assertEqual(single["image_file_id"], "replacement-photo")
+        self.assertNotIn("media_items", single)
+
+    def test_ad_timer_is_not_started_if_preview_buttons_fail_to_deliver(self):
+        current = datetime(2026, 10, 27, 10, 30, tzinfo=bot.TZ)
+        uid = "111111111"
+        draft = {
+            "format": "1/24", "top_hours": 1, "life_hours": 24,
+            "created_by": uid, "awaiting_content": False, "text": "A useful local service for Nha Trang residents."
+        }
+        state = {"pending_ad": draft, "ads": [], "daily_counts": {}}
+        sent_responses = [
+            {"message_id": 501, "chat": {"id": uid}},
+            None,  # The editor controls did not arrive.
+            None,  # The explanatory warning couldn't be delivered either.
+        ]
+        def fake_send(*args, **kwargs):
+            return sent_responses.pop(0) if sent_responses else None
+        with patch.object(bot, "now", return_value=current), patch.object(bot, "send_dm", side_effect=fake_send):
+            result = bot.show_ad_preview(state, uid)
+        self.assertFalse(result)
+        self.assertNotIn("previewed_at", draft)
+        self.assertNotIn("review_due_at", draft)
+        self.assertNotIn("review_status", draft)
+
+
 if __name__ == "__main__":
     unittest.main()

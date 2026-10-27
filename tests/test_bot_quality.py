@@ -611,8 +611,9 @@ class NewsQualityTests(unittest.TestCase):
         posted_text = post_mock.call_args.args[0]
         self.assertIn("Местные власти объявили", posted_text)
         self.assertNotIn("Nha Trang announces road repairs", posted_text)
-        self.assertIn('Источник: <a href="https://publisher.example/road-repair">publisher.example</a>', posted_text)
-        self.assertNotIn("publisher.example/road-repair", posted_text.split("Источник:", 1)[0])
+        self.assertNotIn("publisher.example/road-repair", posted_text)
+        self.assertIn("ПОДПИСАТЬСЯ", posted_text)
+        self.assertIn("ПРЕДЛОЖИТЬ НОВОСТЬ", posted_text)
         self.assertEqual(post_mock.call_args.kwargs["image_file_id"], "reviewed-photo-file")
         self.assertEqual(state["pending_news_review"], {})
         self.assertEqual(state["published_news"][0]["link"], "https://publisher.example/road-repair")
@@ -1091,7 +1092,13 @@ class NewsQualityTests(unittest.TestCase):
         rendered = bot.review_post_text(item)
         self.assertTrue(rendered.startswith("<b>Nha Trang changes the road access rules</b>"))
         self.assertIn("Residents should check", rendered)
-        self.assertIn('<a href="https://publisher.example/road-story">publisher.example</a>', rendered)
+        self.assertNotIn("publisher.example/road-story", rendered)
+        status = bot.review_status_text({
+            **item, "kind_label": "Полезная новость", "id": "rv-test", "version": 1,
+            "planned_at": "2026-10-27T10:00:00+07:00", "source_date_basis": "article_metadata"
+        })
+        self.assertIn('<a href="https://publisher.example/road-story">publisher.example</a>', status)
+        self.assertIn("Дата источника", status)
         self.assertNotIn("<blockquote", rendered)
         self.assertNotIn("😂", rendered)
         self.assertIn("👍 — полезная информация", rendered)
@@ -1275,6 +1282,76 @@ class NewsQualityTests(unittest.TestCase):
              patch.object(bot, "publish_ad") as never_publish:
             bot.process_ad_timers(no_preview)
         never_publish.assert_not_called()
+
+
+
+    def test_verified_urgent_auto_publish_requires_trusted_recent_source_image_and_serious_signal(self):
+        self.assertTrue(bot.is_verified_urgent_source(
+            "https://khanhhoa.gov.vn/emergency-flood",
+            "Cảnh báo khẩn cấp: ngập lụt, người dân cần sơ tán",
+            "Officials issue flood warning and evacuation instructions.",
+            "article_metadata",
+            "https://cdn.khanhhoa.gov.vn/flood.jpg",
+        ))
+        self.assertFalse(bot.is_verified_urgent_source(
+            "https://random-blog.example/emergency-flood",
+            "Cảnh báo khẩn cấp ngập lụt",
+            "Evacuation",
+            "article_metadata",
+            "https://random-blog.example/flood.jpg",
+        ))
+        self.assertFalse(bot.is_verified_urgent_source(
+            "https://khanhhoa.gov.vn/emergency-flood",
+            "Cảnh báo khẩn cấp ngập lụt",
+            "Evacuation",
+            "article_metadata",
+            "",
+        ))
+        self.assertFalse(bot.is_verified_urgent_source(
+            "https://khanhhoa.gov.vn/emergency-flood",
+            "Cảnh báo khẩn cấp ngập lụt",
+            "Evacuation",
+            "",
+            "https://cdn.khanhhoa.gov.vn/flood.jpg",
+        ))
+        with patch.object(bot, "URGENT_AUTO_PUBLISH", False):
+            self.assertFalse(bot.is_verified_urgent_source(
+                "https://khanhhoa.gov.vn/emergency-flood",
+                "Cảnh báo khẩn cấp ngập lụt",
+                "Evacuation",
+                "article_metadata",
+                "https://cdn.khanhhoa.gov.vn/flood.jpg",
+            ))
+
+    def test_production_weather_refuses_open_meteo_fallback_without_commercial_key(self):
+        env = {"GITHUB_ACTIONS": "true", "BOT_TEST_MODE": "", "WEATHERAPI_KEY": ""}
+        with patch.dict(os.environ, env), patch.object(bot, "get_url") as url_mock:
+            with self.assertRaisesRegex(RuntimeError, "WEATHERAPI_KEY"):
+                bot.fetch_weather_data()
+        url_mock.assert_not_called()
+
+    def test_news_sources_are_private_metadata_but_weather_license_credit_remains_public(self):
+        news = {
+            "kind": "news", "headline": "Road closure in Nha Trang",
+            "body": "A current road closure affects residents. Use an alternative route.",
+            "link": "https://publisher.example/road-closure",
+            "source_url": "https://publisher.example/road-closure",
+            "source_name": "publisher.example",
+            "source_published_at": "2026-10-27T09:00:00+07:00",
+            "source_date_basis": "article_metadata", "score": 90,
+            "id": "rv-test", "version": 1,
+            "planned_at": "2026-10-27T10:00:00+07:00"
+        }
+        public_news = bot.review_post_text(news)
+        private_status = bot.review_status_text(news)
+        self.assertNotIn("publisher.example/road-closure", public_news)
+        self.assertIn("publisher.example/road-closure", private_status)
+        weather = {
+            "kind": "weather_morning", "headline": "Погода в Нячанге",
+            "body": "Вероятность дождя сегодня — до 40%.",
+            "source_attribution_html": 'Источник прогноза: <a href="https://www.weatherapi.com/">WeatherAPI.com</a>',
+        }
+        self.assertIn("WeatherAPI.com", bot.review_post_text(weather))
 
 
 if __name__ == "__main__":

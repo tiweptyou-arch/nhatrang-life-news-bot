@@ -930,6 +930,11 @@ def promote_next_review_item(s):
             item['status'] = 'needs_edit'
             item['needs_edit_reason'] = 'caption_too_long'
         if send_review_preview(item):
+            if item.get('status') != 'needs_edit':
+                item['status'] = 'pending_review'
+                item.pop('needs_edit_reason', None)
+                item.pop('next_preview_retry_at', None)
+                item.pop('preview_failure_notified', None)
             queue.remove(item)
             s['pending_news_review'] = item
             s['review_editing'] = {}

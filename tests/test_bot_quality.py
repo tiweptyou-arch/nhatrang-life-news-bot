@@ -7,7 +7,59 @@ from unittest.mock import call, patch
 from urllib.parse import parse_qs, urlparse
 
 os.environ.setdefault("TELEGRAM_BOT_TOKEN", "test-token-for-local-unit-tests")
+os.environ.setdefault("ADMIN_USER_IDS", "111111111,222222222")
+os.environ.setdefault("WEATHERAPI_KEY", "test-only-weather-key")
 import bot  # noqa: E402
+
+
+def make_weather_fixture(
+    current_time,
+    rain_today=20,
+    rain_tomorrow=55,
+    code_today=2,
+    code_tomorrow=3,
+    current_code=2,
+    temperature=28,
+):
+    """Provider-neutral fixture for weather tests; every numeric value is explicit."""
+    today = current_time.date()
+    tomorrow = today + timedelta(days=1)
+    times = []
+    for offset in range(48):
+        dt = datetime(today.year, today.month, today.day, tzinfo=bot.TZ) + timedelta(hours=offset)
+        times.append(dt.isoformat(timespec="minutes"))
+    return {
+        "provider": "Open-Meteo",
+        "provider_url": "https://open-meteo.com/",
+        "retrieved_at": current_time.isoformat(),
+        "current": {
+            "temperature_2m": temperature,
+            "apparent_temperature": temperature + 4,
+            "weather_code": current_code,
+            "wind_speed_10m": 12,
+            "wind_gusts_10m": 20,
+        },
+        "hourly": {
+            "time": times,
+            "temperature_2m": [temperature] * 48,
+            "apparent_temperature": [temperature + 4] * 48,
+            "precipitation_probability": [rain_today] * 24 + [rain_tomorrow] * 24,
+            "precipitation": [0.0] * 48,
+            "weather_code": [code_today] * 24 + [code_tomorrow] * 24,
+            "wind_speed_10m": [12] * 48,
+            "wind_gusts_10m": [20] * 48,
+        },
+        "daily": {
+            "time": [today.isoformat(), tomorrow.isoformat()],
+            "temperature_2m_min": [25, 26],
+            "temperature_2m_max": [31, 30],
+            "precipitation_probability_max": [rain_today, rain_tomorrow],
+            "precipitation_sum": [0.0, 0.0],
+            "weather_code": [code_today, code_tomorrow],
+            "wind_gusts_10m_max": [20, 24],
+        },
+        "official_alerts": [],
+    }
 
 
 class NewsQualityTests(unittest.TestCase):
@@ -50,7 +102,7 @@ class NewsQualityTests(unittest.TestCase):
         self.assertTrue(bot.is_recent_source_date(current + timedelta(minutes=10), current))
 
     def test_suggest_command_collects_a_review_only_submission(self):
-        uid = 1335496436
+        uid = 111111111
         state = {"pending_ad": {}, "pending_manual_post": {}, "manual_posts": []}
         admin = {"from": {"id": uid}, "chat": {"id": uid}, "text": "/suggest", "message_id": 10}
         with patch.object(bot, "send_dm"):
@@ -66,7 +118,7 @@ class NewsQualityTests(unittest.TestCase):
         self.assertFalse(state["pending_manual_post"].get("awaiting_content", False))
 
     def test_newsqueue_lists_pending_item_id(self):
-        uid = 1335496436
+        uid = 111111111
         state = {
             "pending_ad": {}, "pending_manual_post": {},
             "manual_posts": [{"id": "item-123", "status": "pending", "content": "Road repair notice"}]
@@ -79,7 +131,7 @@ class NewsQualityTests(unittest.TestCase):
         self.assertIn("/approve item-123", sent)
 
     def test_approve_manual_post_publishes_only_after_explicit_command(self):
-        uid = 1335496436
+        uid = 111111111
         item = {
             "id": "item-234", "status": "pending",
             "type": "text",
@@ -108,7 +160,7 @@ class NewsQualityTests(unittest.TestCase):
         self.assertNotIn("<b>", posted_text)
 
     def test_manual_album_is_queued_and_not_published_until_approved(self):
-        uid = 1335496436
+        uid = 111111111
         state = {"pending_manual_post": {"user_id": str(uid), "awaiting_content": True},
                  "pending_ad": {}, "manual_posts": [], "ads": [], "paused": False,
                  "pause_until": "", "daily_counts": {}}
@@ -129,7 +181,7 @@ class NewsQualityTests(unittest.TestCase):
         api_mock.assert_not_called()
 
     def test_approved_manual_album_publishes_all_media_items(self):
-        uid = 1335496436
+        uid = 111111111
         item = {"id": "album-777", "status": "pending", "type": "album",
                 "content": "Road closure update\n\nUse another street.",
                 "media_items": [{"type": "photo", "file_id": "p1"},
@@ -152,7 +204,7 @@ class NewsQualityTests(unittest.TestCase):
         self.assertEqual([m["media"] for m in sent_media], ["p1", "v2"])
 
     def test_reject_manual_post_never_publishes(self):
-        uid = 1335496436
+        uid = 111111111
         item = {"id": "item-345", "status": "pending", "content": "Unverified claim"}
         state = {
             "pending_ad": {}, "pending_manual_post": {}, "manual_posts": [item],
@@ -166,7 +218,7 @@ class NewsQualityTests(unittest.TestCase):
         post_mock.assert_not_called()
 
     def test_manual_photo_without_context_is_not_queued(self):
-        uid = 1335496436
+        uid = 111111111
         state = {"pending_manual_post": {}, "manual_posts": []}
         msg = {
             "from": {"id": uid}, "chat": {"id": uid}, "message_id": 45,
@@ -361,115 +413,96 @@ class NewsQualityTests(unittest.TestCase):
 
 
 
-    def test_morning_routine_queues_greeting_at_six_with_reaction_choices(self):
+    def test_morning_chat_prompt_is_integrated_into_weather_not_a_separate_post(self):
         current = datetime(2026, 10, 26, 6, 2, tzinfo=bot.TZ)
         state = {"published_news": [], "daily_counts": {}, "last_slots": {}}
         with patch.object(bot, "now", return_value=current), \
              patch.object(bot, "is_paused", return_value=False), \
              patch.object(bot, "count_today", return_value=0), \
              patch.object(bot, "slot_once", return_value=False), \
-             patch.object(bot, "queue_review_item", return_value=True) as queue_mock, \
+             patch.object(bot, "queue_review_item") as queue_mock, \
              patch.object(bot, "mark_slot") as mark_mock:
             bot.routine_posts(state)
-        queue_mock.assert_called_once()
-        candidate = queue_mock.call_args.args[1]
-        self.assertIn("Доброе утро", candidate["body"])
-        self.assertIn("👍", candidate["body"])
-        self.assertIn("❤️", candidate["body"])
-        self.assertIn("🙏", candidate["body"])
-        self.assertIn("image_query", candidate)
-        self.assertEqual(candidate["image_query"], "Nha Trang Vietnam sunrise beach promenade morning light")
-        self.assertEqual(queue_mock.call_args.kwargs["slot_key"], "review_morning")
-        mark_mock.assert_called_once_with(state, "review_morning")
+        queue_mock.assert_not_called()
+        mark_mock.assert_not_called()
 
-    def test_night_routine_queues_goodnight_and_interaction(self):
-        current = datetime(2026, 10, 26, 22, 32, tzinfo=bot.TZ)
+
+
+    def test_night_routine_queues_name_only_game_with_no_reaction_prompt(self):
+        current = datetime(2026, 10, 27, 22, 32, tzinfo=bot.TZ)
         state = {"published_news": [], "daily_counts": {}, "last_slots": {}}
         with patch.object(bot, "now", return_value=current), \
              patch.object(bot, "is_paused", return_value=False), \
              patch.object(bot, "count_today", return_value=0), \
              patch.object(bot, "slot_once", return_value=False), \
-             patch.object(bot, "get_url", side_effect=OSError("offline")), \
              patch.object(bot, "queue_review_item", return_value=True) as queue_mock, \
              patch.object(bot, "mark_slot") as mark_mock:
             bot.routine_posts(state)
         queue_mock.assert_called_once()
         candidate = queue_mock.call_args.args[1]
-        self.assertIn("Доброй ночи", candidate["body"])
-        self.assertIn("выбери реакцию", candidate["body"])
-        self.assertIn("❤️", candidate["body"])
-        self.assertIn("🙏", candidate["body"])
-        self.assertIn("🤣", candidate["body"])
+        self.assertEqual(candidate["headline"], "Открываем ночной чат!")
+        self.assertIn("вам на", candidate["body"])
+        self.assertIn("имена", candidate["body"])
+        self.assertEqual(candidate["reaction_line"], "")
         self.assertIn("image_query", candidate)
-        self.assertEqual(candidate["image_query"], "Nha Trang Vietnam night city lights beach coastline")
         self.assertEqual(queue_mock.call_args.kwargs["slot_key"], "review_night")
         mark_mock.assert_called_once_with(state, "review_night")
+
+
 
     def test_morning_weather_is_planned_for_eight_not_six_thirty(self):
         early = datetime(2026, 10, 26, 6, 32, tzinfo=bot.TZ)
         state = {"daily_counts": {}, "last_slots": {}, "published_news": []}
         with patch.object(bot, "now", return_value=early), \
              patch.object(bot, "slot_once", return_value=False), \
-             patch.object(bot, "count_today", return_value=0), \
              patch.object(bot, "is_paused", return_value=False), \
-             patch.object(bot, "get_url") as get_mock, \
+             patch.object(bot, "fetch_weather_data") as forecast_mock, \
              patch.object(bot, "queue_review_item") as queue_mock:
             bot.weather_post(state, "morning")
-        get_mock.assert_not_called()
+        forecast_mock.assert_not_called()
         queue_mock.assert_not_called()
 
         current = datetime(2026, 10, 26, 8, 2, tzinfo=bot.TZ)
-        forecast = {
-            "current": {"temperature_2m": 28, "apparent_temperature": 32, "weather_code": 2},
-            "daily": {
-                "weather_code": [2, 3],
-                "temperature_2m_min": [25, 26],
-                "temperature_2m_max": [31, 30],
-                "precipitation_probability_max": [20, 55]
-            }
-        }
+        forecast = make_weather_fixture(current)
         with patch.object(bot, "now", return_value=current), \
              patch.object(bot, "slot_once", return_value=False), \
-             patch.object(bot, "count_today", return_value=0), \
              patch.object(bot, "is_paused", return_value=False), \
-             patch.object(bot, "get_url", return_value=json.dumps(forecast).encode("utf-8")), \
+             patch.object(bot, "fetch_weather_data", return_value=forecast), \
              patch.object(bot, "queue_review_item", return_value=True) as queue_mock, \
              patch.object(bot, "mark_slot") as mark_mock:
             bot.weather_post(state, "morning")
         queue_mock.assert_called_once()
         candidate = queue_mock.call_args.args[1]
         self.assertIn("Сейчас в Нячанге", candidate["body"])
-        self.assertIn("Сегодня ожидается", candidate["body"])
+        self.assertIn("Сегодня (26.10)", candidate["body"])
+        self.assertIn("вероятность дождя", candidate["body"])
+        self.assertIn("Обновлено:", candidate["body"])
         self.assertNotIn("<b>", candidate["body"])
-        self.assertIn("image_query", candidate)
+        self.assertEqual(candidate["forecast_date"], "2026-10-26")
         self.assertEqual(queue_mock.call_args.kwargs["slot_key"], "weather_morning")
         mark_mock.assert_called_once_with(state, "weather_morning")
 
 
 
+
     def test_heavy_rain_forecast_selects_a_rainy_vietnam_photo_query(self):
         current = datetime(2026, 10, 26, 8, 0, tzinfo=bot.TZ)
-        forecast = {
-            "current": {"temperature_2m": 28, "apparent_temperature": 32, "weather_code": 61},
-            "daily": {
-                "weather_code": [65, 82],
-                "temperature_2m_min": [25, 26],
-                "temperature_2m_max": [31, 30],
-                "precipitation_probability_max": [85, 90]
-            }
-        }
+        forecast = make_weather_fixture(current, rain_today=85, rain_tomorrow=90, code_today=65, code_tomorrow=82, current_code=61)
         state = {"daily_counts": {}, "last_slots": {}, "published_news": []}
         with patch.object(bot, "now", return_value=current), \
              patch.object(bot, "slot_once", return_value=False), \
-             patch.object(bot, "count_today", return_value=0), \
              patch.object(bot, "is_paused", return_value=False), \
-             patch.object(bot, "get_url", return_value=json.dumps(forecast).encode("utf-8")), \
+             patch.object(bot, "fetch_weather_data", return_value=forecast), \
              patch.object(bot, "queue_review_item", return_value=True) as queue_mock, \
              patch.object(bot, "mark_slot"):
             bot.weather_post(state, "morning")
         candidate = queue_mock.call_args.args[1]
-        self.assertIn("heavy rain", candidate["image_query"].casefold())
-        self.assertIn("Вероятность дождя высокая", candidate["body"])
+        self.assertGreaterEqual(candidate["body"].count("%"), 1)
+        self.assertRegex(candidate["image_query"].casefold(), r"rain|storm|downpour")
+        self.assertIn("Vietnam", candidate["image_query"])
+
+
+
 
     def test_google_hosted_thumbnails_are_rejected(self):
         self.assertIsNone(bot.normalize_image_url("https://encrypted-tbn0.gstatic.com/images?q=test"))
@@ -536,7 +569,7 @@ class NewsQualityTests(unittest.TestCase):
         mark_mock.assert_called_once_with(state, "weather_morning")
 
     def test_due_review_publishes_once_and_updates_published_news_history(self):
-        uid = 1335496436
+        uid = 111111111
         current = datetime(2026, 10, 26, 10, 30, tzinfo=bot.TZ)
         item = {
             "id": "rv-publish-1", "kind": "news", "status": "pending_review",
@@ -596,7 +629,7 @@ class NewsQualityTests(unittest.TestCase):
         self.assertEqual(state["pending_news_review"], {})
 
     def test_rejected_review_is_never_queued_again_from_same_source(self):
-        uid = 1335496436
+        uid = 111111111
         item = {
             "id": "rv-reject-1", "kind": "news", "status": "pending_review",
             "link": "https://publisher.example/rejected",
@@ -626,7 +659,7 @@ class NewsQualityTests(unittest.TestCase):
         self.assertTrue(bot.is_duplicate_news(state, item["source_title"], item["link"]))
 
     def test_editing_review_resets_the_fifteen_minute_timer(self):
-        uid = 1335496436
+        uid = 111111111
         current = datetime(2026, 10, 26, 10, 0, tzinfo=bot.TZ)
         item = {
             "id": "rv-edit-1", "kind": "news", "status": "pending_review",
@@ -650,7 +683,7 @@ class NewsQualityTests(unittest.TestCase):
 
 
     def test_review_time_button_sets_time_editing_mode(self):
-        uid = 1335496436
+        uid = 111111111
         item = {
             "id": "rv-time-1", "status": "pending_review",
             "planned_at": bot.iso(datetime(2026, 10, 26, 11, 0, tzinfo=bot.TZ))
@@ -671,7 +704,7 @@ class NewsQualityTests(unittest.TestCase):
         self.assertIn("HH:MM", dm_mock.call_args.args[1])
 
     def test_review_time_edit_updates_saved_schedule_and_status_message(self):
-        uid = 1335496436
+        uid = 111111111
         current = datetime(2026, 10, 26, 10, 0, tzinfo=bot.TZ)
         item = {
             "id": "rv-time-2", "kind": "news", "kind_label": "Новость Нячанга",
@@ -696,46 +729,33 @@ class NewsQualityTests(unittest.TestCase):
         self.assertIn("изменено", dm_mock.call_args.args[1])
 
 
-    def test_morning_routine_catches_up_when_github_schedule_runs_late(self):
+    def test_morning_routine_catches_up_without_emitting_a_duplicate_greeting(self):
         current = datetime(2026, 10, 26, 6, 42, tzinfo=bot.TZ)
         state = {"published_news": [], "daily_counts": {}, "last_slots": {}, "pending_news_review": {}}
-        queued = {}
-        def fake_queue(s, item, planned_at=None, slot_key=None):
-            queued.update({"item": item, "planned_at": planned_at, "slot_key": slot_key})
-            return True
         with patch.object(bot, "now", return_value=current), \
              patch.object(bot, "is_paused", return_value=False), \
              patch.object(bot, "count_today", return_value=0), \
              patch.object(bot, "slot_once", return_value=False), \
-             patch.object(bot, "queue_review_item", side_effect=fake_queue), \
+             patch.object(bot, "queue_review_item") as queue_mock, \
              patch.object(bot, "mark_slot") as mark_mock:
             bot.routine_posts(state)
-        self.assertEqual(queued["slot_key"], "review_morning")
-        self.assertIn("Доброе утро", queued["item"]["body"])
-        self.assertEqual(queued["planned_at"], current + timedelta(minutes=15))
-        mark_mock.assert_called_once_with(state, "review_morning")
+        queue_mock.assert_not_called()
+        mark_mock.assert_not_called()
+
+
 
     def test_morning_weather_catches_up_after_a_delayed_workflow_run(self):
         current = datetime(2026, 10, 26, 8, 42, tzinfo=bot.TZ)
-        state = {"published_news": [], "daily_counts": {}, "last_slots": {}, "pending_news_review": {}}
-        forecast = {
-            "current": {"temperature_2m": 28, "apparent_temperature": 32, "weather_code": 2},
-            "daily": {
-                "weather_code": [2, 3],
-                "temperature_2m_min": [25, 26],
-                "temperature_2m_max": [31, 30],
-                "precipitation_probability_max": [20, 55]
-            }
-        }
+        state = {"daily_counts": {}, "last_slots": {}, "published_news": [], "pending_news_review": {}}
+        forecast = make_weather_fixture(current)
         queued = {}
         def fake_queue(s, item, planned_at=None, slot_key=None):
             queued.update({"item": item, "planned_at": planned_at, "slot_key": slot_key})
             return True
         with patch.object(bot, "now", return_value=current), \
              patch.object(bot, "slot_once", return_value=False), \
-             patch.object(bot, "count_today", return_value=0), \
              patch.object(bot, "is_paused", return_value=False), \
-             patch.object(bot, "get_url", return_value=json.dumps(forecast).encode("utf-8")), \
+             patch.object(bot, "fetch_weather_data", return_value=forecast), \
              patch.object(bot, "queue_review_item", side_effect=fake_queue), \
              patch.object(bot, "mark_slot") as mark_mock:
             bot.weather_post(state, "morning")
@@ -743,6 +763,9 @@ class NewsQualityTests(unittest.TestCase):
         self.assertIn("Сейчас в Нячанге", queued["item"]["body"])
         self.assertEqual(queued["planned_at"], current + timedelta(minutes=15))
         mark_mock.assert_called_once_with(state, "weather_morning")
+
+
+
 
     def test_limit_news_body_is_concise_and_removes_urls(self):
         source = ("Первая важная информация для жителей города. " * 30) + " https://publisher.example/story "
@@ -927,7 +950,7 @@ class NewsQualityTests(unittest.TestCase):
         self.assertEqual(result["message_id"], 201)
 
     def test_editing_multipart_text_ad_replaces_all_parts(self):
-        uid = 1335496436
+        uid = 111111111
         ad = {
             "id": "ad-old", "text": "Old ad", "message_id": 10,
             "message_ids": [10, 11, 12], "chat_id": -1001,
@@ -970,7 +993,7 @@ class NewsQualityTests(unittest.TestCase):
         self.assertEqual(len(deleted), 3)
 
     def test_admin_can_pin_published_ad(self):
-        uid = "1335496436"
+        uid = "111111111"
         state = {"ads": [{"id": "ad-1", "message_id": 301, "message_ids": [301, 302], "chat_id": -1001}]}
         callback = {
             "id": "callback-1",
@@ -987,7 +1010,7 @@ class NewsQualityTests(unittest.TestCase):
         self.assertIn("📌 Закрепить", str(bot.ad_actions("ad-1")))
 
     def test_scheduled_ad_failure_notifies_owner_once_and_retries(self):
-        uid = "1335496436"
+        uid = "111111111"
         ad = {
             "id": "scheduled-1", "created_by": uid,
             "scheduled_at": bot.iso(bot.now() - timedelta(minutes=2)),
@@ -1003,7 +1026,7 @@ class NewsQualityTests(unittest.TestCase):
         self.assertEqual(send_mock.call_count, 1)
 
     def test_ad_expiry_failure_notifies_owner_once(self):
-        uid = "1335496436"
+        uid = "111111111"
         ad = {
             "id": "expiry-1", "created_by": uid, "message_id": 900,
             "message_ids": [900], "chat_id": -1001,

@@ -4,64 +4,75 @@ on:
   schedule:
     - cron: '*/5 * * * *'
   workflow_dispatch:
+    inputs:
+      run_bot:
+        description: 'Run the production bot on main (requires private storage and secrets)'
+        required: true
+        type: boolean
+        default: false
+  pull_request:
+    branches: [main]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: nhatrang-life-news-bot
   cancel-in-progress: false
 
 jobs:
-  run-bot:
+  test:
+    name: Compile and unit tests (no Telegram publishing)
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 10
+    env:
+      BOT_TEST_MODE: '1'
+      TELEGRAM_BOT_TOKEN: 'test-token-for-local-unit-tests'
+      ADMIN_USER_IDS: '1335496436,8563451956'
+      WEATHERAPI_KEY: 'test-only-weather-key'
     steps:
-      - name: Checkout repository
+      - name: Checkout source
         uses: actions/checkout@v4
-        with:
-          ref: main
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Compile Python
+        run: python -m py_compile bot.py
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
 
-      - name: Run news bot
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          ADMIN_USER_ID: ${{ secrets.ADMIN_USER_ID }}
-          ADMIN_USER_IDS: "1335496436,8563451956"
+  run-bot:
+    name: Scheduled production run
+    needs: test
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_bot == true && github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      ADMIN_USER_ID: ${{ secrets.ADMIN_USER_ID }}
+      ADMIN_USER_IDS: ${{ secrets.ADMIN_USER_IDS }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      WEATHERAPI_KEY: ${{ secrets.WEATHERAPI_KEY }}
+      MAX_DAILY_POSTS: '6'
+      MAX_DAILY_NEWS: '3'
+      MAX_AI_CALLS_PER_DAY: '40'
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile production code
+        run: python -m py_compile bot.py
+      - name: Run news and weather pipeline
         run: python bot.py
-
-      - name: Save bot state
-        if: always()
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add bot_state.json
-          if git diff --cached --quiet; then
-            echo "Bot state has not changed."
-            exit 0
-          fi
-          git commit -m "Update bot state"
-
-          # Retry non-fast-forward/network failures. If bot_state.json conflicts with
-          # a concurrent manual change, fail rather than replacing someone else's data.
-          for attempt in 1 2 3; do
-            if git push origin HEAD:main; then
-              echo "Bot state saved."
-              exit 0
-            fi
-            echo "Push attempt $attempt failed; fetching latest main and retrying."
-            git fetch origin main
-            if ! git rebase origin/main; then
-              git rebase --abort || true
-              echo "::error::Could not safely rebase bot state. No conflicting state was overwritten."
-              exit 1
-            fi
-          done
-
-          echo "::error::Could not save bot state after 3 attempts."
-          exit 1

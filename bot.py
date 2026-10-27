@@ -736,6 +736,23 @@ def review_caption_too_long(item, limit=950):
     return bool(continuation)
 
 
+def apply_review_photo(item, file_id):
+    """Apply a replacement photo to the actual published media payload, including albums."""
+    item['image_file_id'] = file_id
+    item['image_url'] = ''
+    item['image_credit_html'] = ''
+    media_items = item.get('media_items') or []
+    if len(media_items) >= 2:
+        updated = list(media_items)
+        updated[0] = {'type': 'photo', 'file_id': file_id}
+        item['media_items'] = updated
+        item.pop('media_type', None)
+    else:
+        item.pop('media_items', None)
+        item['media_type'] = 'photo'
+    return item
+
+
 def hold_item_for_text_edit(item):
     """Stop the publication timer when the complete post cannot fit one photo/video caption."""
     item['status'] = 'needs_edit'
@@ -2283,9 +2300,7 @@ def handle_admin_message(msg, s):
         if not msg.get('photo'):
             send_dm(uid, 'Пришли именно фотографию. Для отмены — /cancelreview.')
             return
-        queued_item['image_file_id'] = msg['photo'][-1]['file_id']
-        queued_item['image_url'] = ''
-        queued_item['image_credit_html'] = ''
+        apply_review_photo(queued_item, msg['photo'][-1]['file_id'])
         queued_item['status'] = 'pending_review'
         queued_item['version'] = int(queued_item.get('version', 1)) + 1
         queued_item['planned_at'] = iso(now() + timedelta(minutes=15))
@@ -2368,19 +2383,16 @@ def handle_admin_message(msg, s):
                 return
             item['headline'] = headline
             item['title'] = headline
+            item['reaction_line'] = ''
         elif mode == 'photo':
             if not msg.get('photo'):
                 send_dm(uid, 'Для замены изображения пришли именно фото. Для отмены — /cancelreview.')
                 return
-            item['image_file_id'] = msg['photo'][-1]['file_id']
-            item['image_url'] = ''
-            item['image_credit_html'] = ''
+            apply_review_photo(item, msg['photo'][-1]['file_id'])
         else:
             if msg.get('photo'):
                 body = text or item.get('body', '')
-                item['image_file_id'] = msg['photo'][-1]['file_id']
-                item['image_url'] = ''
-                item['image_credit_html'] = ''
+                apply_review_photo(item, msg['photo'][-1]['file_id'])
             else:
                 if not text or text.startswith('/'):
                     send_dm(uid, 'Отправь новый текст публикации одним сообщением. Для отмены: /cancelreview')

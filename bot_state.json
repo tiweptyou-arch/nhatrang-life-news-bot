@@ -89,7 +89,7 @@
     "Đập ngăn mặn 760 tỉ đồng vừa vận hành đã gây ngập nhà, ruộng lúa dân: Khánh Hòa chỉ đạo 'nóng' - Báo Tuổi Trẻ"
   ],
   "manual_posts": [],
-  "last_update_id": 420020177,
+  "last_update_id": 420020178,
   "last_weather_date": "2026-10-24",
   "last_weather_morning_date": "2026-10-24",
   "last_weather_evening_date": "2026-10-24",
@@ -134,7 +134,10 @@
     "4cd89da1df2313e815b6df8c4cacbea89b14ad53f551ca761f4767c74baf5930",
     "4bde249641ba126dd8c2d5bf5ae3f4a6e07e43ef85743d0d9e46d9eedc3ec2c0"
   ],
-  "pending_manual_post": {},
+  "pending_manual_post": {
+    "user_id": "1335496436",
+    "awaiting_content": true
+  },
   "published_news": [
     {
       "title": "Регулирование уровней расходов для обеспечения распространения информации и юридического образования, стандартов юридического доступа и примирения на низовом уровне в провинции Кханьхоа",

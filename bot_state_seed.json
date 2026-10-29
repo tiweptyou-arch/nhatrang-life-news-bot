@@ -97,13 +97,7 @@
   "last_weather_date": "2026-10-24",
   "last_weather_morning_date": "2026-10-24",
   "last_weather_evening_date": "2026-10-24",
-  "pending_ad": {
-    "format": "1/24",
-    "top_hours": 1,
-    "life_hours": 24,
-    "awaiting_content": false,
-    "text": "📊 Статус"
-  },
+  "pending_ad": {},
   "ads": [],
   "paused": false,
   "pause_until": "",
@@ -140,10 +134,7 @@
     "1878365922f9ec684b8e712a70826562810345506ca4249eb64c93d37d333563",
     "2b6e78e704d3f86dd4ebf854d24ff2a4f2207a5e4acca2a164007e0a7314cb18"
   ],
-  "pending_manual_post": {
-    "user_id": "1335496436",
-    "awaiting_content": true
-  },
+  "pending_manual_post": {},
   "published_news": [
     {
       "title": "Регулирование уровней расходов для обеспечения распространения информации и юридического образования, стандартов юридического доступа и примирения на низовом уровне в провинции Кханьхоа",
@@ -206,5 +197,6 @@
   "review_editing": {},
   "rejected_news_links": [],
   "rejected_news_fingerprints": [],
-  "rejected_news_titles": []
+  "rejected_news_titles": [],
+  "review_queue": []
 }

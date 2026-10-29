@@ -1,0 +1,9 @@
+# Runtime state must never be committed to the public repository.
+bot_state.json
+bot_state.json.tmp
+bot_state_seed.local.json
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example

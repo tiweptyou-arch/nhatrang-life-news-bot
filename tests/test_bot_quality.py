@@ -1589,5 +1589,28 @@ class NewsQualityTests(unittest.TestCase):
         preview_mock.assert_called_once_with(item)
 
 
+
+    def test_no_gemini_editorial_filter_holds_routine_storm_drill(self):
+        title = "Энергетическая компания Кханьхоа участвует в учениях перед штормовым сезоном"
+        description = "Проводится учебная тренировка по реагированию на чрезвычайные ситуации."
+        self.assertTrue(bot.is_non_actionable_exercise(title, description))
+        self.assertTrue(bot.is_editorially_weak_candidate(title, description))
+
+    def test_no_gemini_editorial_filter_holds_vague_mass_worm_claim(self):
+        title = "Многие жители Кханьхоа заражены типом червя"
+        description = "Врачи предупреждают о необходимости раннего лечения."
+        self.assertTrue(bot.is_vague_health_alarm(title, description))
+        self.assertTrue(bot.is_editorially_weak_candidate(title, description))
+
+    def test_no_gemini_editorial_filter_keeps_specific_health_information(self):
+        title = "В Кханьхоа выявили случаи заражения аскаридами"
+        description = "Медики назвали конкретного паразита и рассказали о симптомах и диагностике."
+        self.assertFalse(bot.is_vague_health_alarm(title, description))
+
+    def test_no_gemini_editorial_filter_keeps_real_outage_warning_during_drill(self):
+        title = "Во время учений в Кханьхоа возможны отключения электричества"
+        description = "Жителей предупредили о временном отключении электричества."
+        self.assertFalse(bot.is_non_actionable_exercise(title, description))
+
 if __name__ == "__main__":
     unittest.main()

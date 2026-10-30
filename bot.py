@@ -469,6 +469,53 @@ def is_relevant_news(title, description):
     return practical or urgent_or_safety
 
 
+
+def is_non_actionable_exercise(title, description):
+    """Exclude preparedness drills that do not announce a real service change or public warning."""
+    value = clean((title or '') + ' ' + (description or '')).casefold()
+    drill = any(contains_term(value, term) for term in (
+        'diễn tập', 'tập huấn', 'diễn tập ứng phó', 'exercise', 'drill',
+        'training exercise', 'учения', 'учениях', 'учений', 'тренировка', 'учебная тревога'
+    ))
+    if not drill:
+        return False
+    actionable = (
+        'mất điện', 'cúp điện', 'cắt điện', 'ngừng cấp điện', 'mất nước',
+        'ngập', 'sơ tán', 'cấm đường', 'đóng đường', 'cảnh báo khẩn cấp',
+        'power outage', 'electricity outage', 'water outage', 'evacuation',
+        'road closure', 'emergency warning', 'flood warning',
+        'отключение электричества', 'отключения электричества', 'отключение электроэнергии', 'отключения электроэнергии', 'эвакуация', 'перекрытие дороги'
+    )
+    return not any(contains_term(value, term) for term in actionable)
+
+
+def is_vague_health_alarm(title, description):
+    """Hold alarming mass-infection claims when the headline gives no verifiable specifics."""
+    value = clean((title or '') + ' ' + (description or '')).casefold()
+    health_topic = any(contains_term(value, term) for term in (
+        'giun', 'ký sinh trùng', 'nhiễm giun', 'worm infection', 'parasite',
+        'черв', 'червя', 'черви', 'червями', 'паразит', 'паразиты', 'гельминт', 'гельминты'
+    ))
+    mass_claim = any(contains_term(value, term) for term in (
+        'nhiều người dân', 'nhiều người', 'many residents', 'many people',
+        'многие жители', 'многие люди', 'многие заражены', 'массово зараж'
+    ))
+    if not (health_topic and mass_claim):
+        return False
+    has_specific_count = bool(re.search(r'\b\d{2,}\b', value))
+    has_named_condition = any(contains_term(value, term) for term in (
+        'giun đũa', 'giun móc', 'giun tóc', 'sán lá', 'giun lươn',
+        'roundworm', 'hookworm', 'whipworm', 'strongyloides',
+        'аскарид', 'анкилостом', 'трихинелл'
+    ))
+    return not (has_specific_count or has_named_condition)
+
+
+def is_editorially_weak_candidate(title, description):
+    """Deterministic no-LLM safety gate for common low-value or alarmist local stories."""
+    return is_non_actionable_exercise(title, description) or is_vague_health_alarm(title, description)
+
+
 def is_urgent_news(text):
     value = clean(text).casefold()
     return any(contains_term(value, term) for term in URGENT_NEWS_TERMS)
@@ -3698,6 +3745,10 @@ def publish_news(s):
                     continue
                 links.add(link)
                 if not is_relevant_news(title, desc):
+                    continue
+                if is_editorially_weak_candidate(title, desc):
+                    stats['low_score'] += 1
+                    print('Holding weak or alarmist candidate in deterministic editorial mode:', title[:120])
                     continue
                 stats['relevant'] += 1
                 urgent_candidate = is_urgent_news(title + ' ' + desc)

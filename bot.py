@@ -475,7 +475,7 @@ def is_non_actionable_exercise(title, description):
     value = clean((title or '') + ' ' + (description or '')).casefold()
     drill = any(contains_term(value, term) for term in (
         'diễn tập', 'tập huấn', 'diễn tập ứng phó', 'exercise', 'drill',
-        'training exercise', 'учения', 'тренировка', 'учебная тревога'
+        'training exercise', 'учения', 'учениях', 'учений', 'тренировка', 'учебная тревога'
     ))
     if not drill:
         return False
@@ -494,11 +494,11 @@ def is_vague_health_alarm(title, description):
     value = clean((title or '') + ' ' + (description or '')).casefold()
     health_topic = any(contains_term(value, term) for term in (
         'giun', 'ký sinh trùng', 'nhiễm giun', 'worm infection', 'parasite',
-        'черв', 'паразит', 'гельминт'
+        'черв', 'червя', 'черви', 'червями', 'паразит', 'паразиты', 'гельминт', 'гельминты'
     ))
     mass_claim = any(contains_term(value, term) for term in (
         'nhiều người dân', 'nhiều người', 'many residents', 'many people',
-        'многие жители', 'многие люди', 'массово зараж'
+        'многие жители', 'многие люди', 'многие заражены', 'массово зараж'
     ))
     if not (health_topic and mass_claim):
         return False

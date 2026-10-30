@@ -484,7 +484,7 @@ def is_non_actionable_exercise(title, description):
         'ngập', 'sơ tán', 'cấm đường', 'đóng đường', 'cảnh báo khẩn cấp',
         'power outage', 'electricity outage', 'water outage', 'evacuation',
         'road closure', 'emergency warning', 'flood warning',
-        'отключение электричества', 'эвакуация', 'перекрытие дороги'
+        'отключение электричества', 'отключения электричества', 'отключение электроэнергии', 'отключения электроэнергии', 'эвакуация', 'перекрытие дороги'
     )
     return not any(contains_term(value, term) for term in actionable)
 
@@ -502,7 +502,7 @@ def is_vague_health_alarm(title, description):
     ))
     if not (health_topic and mass_claim):
         return False
-    has_specific_count = bool(re.search(r'\\b\\d{2,}\\b', value))
+    has_specific_count = bool(re.search(r'\b\d{2,}\b', value))
     has_named_condition = any(contains_term(value, term) for term in (
         'giun đũa', 'giun móc', 'giun tóc', 'sán lá', 'giun lươn',
         'roundworm', 'hookworm', 'whipworm', 'strongyloides',

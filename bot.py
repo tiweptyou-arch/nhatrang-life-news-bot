@@ -2309,7 +2309,9 @@ def handle_admin_message(msg, s):
             s['review_editing'] = {}
             send_dm(uid, 'Добавление фото отменено. Материал остался в очереди и не будет опубликован без изображения.')
             return
-        queued_item = next((entry for entry in s.get('review_queue', []) if str(entry.get('id')) == str(editing.get('id'))), None)
+        queued_item = s.get('pending_news_review') or {}
+        if str(queued_item.get('id', '')) != str(editing.get('id')):
+            queued_item = next((entry for entry in s.get('review_queue', []) if str(entry.get('id')) == str(editing.get('id'))), None)
         if not queued_item:
             s['review_editing'] = {}
             send_dm(uid, 'Материал уже вышел из очереди. Открой /reviewqueue.')
@@ -2322,10 +2324,22 @@ def handle_admin_message(msg, s):
         queued_item['version'] = int(queued_item.get('version', 1)) + 1
         queued_item['planned_at'] = iso(now() + timedelta(minutes=15))
         queued_item.pop('preview_failure_notified', None)
+        queued_item.pop('preview_failures', None)
         s['review_editing'] = {}
-        if not s.get('pending_news_review'):
-            promote_next_review_item(s)
-        send_dm(uid, f'✅ Фото сохранено для материала «{html.escape((queued_item.get("headline") or queued_item.get("title") or "")[:120])}». Предпросмотр появится, когда материал дойдёт до начала очереди; таймер 15 минут начнётся после предпросмотра.', main_menu())
+        if queued_item is s.get('pending_news_review'):
+            queued_item['preview_messages'] = []
+            queued_item['review_status_messages'] = []
+            if send_review_preview(queued_item):
+                send_dm(uid, f'✅ Фото сохранено для материала «{html.escape((queued_item.get("headline") or queued_item.get("title") or "")[:120])}». Предпросмотр отправлен; таймер 15 минут начнётся после него.', main_menu())
+            else:
+                s['review_queue'].insert(0, queued_item)
+                s['pending_news_review'] = {}
+                send_dm(uid, 'Фото сохранено, но предпросмотр пока не отправился. Материал остался в очереди; бот повторит попытку.', main_menu())
+                promote_next_review_item(s)
+        else:
+            if not s.get('pending_news_review'):
+                promote_next_review_item(s)
+            send_dm(uid, f'✅ Фото сохранено для материала «{html.escape((queued_item.get("headline") or queued_item.get("title") or "")[:120])}». Предпросмотр появится, когда материал дойдёт до начала очереди; таймер 15 минут начнётся после предпросмотра.', main_menu())
         return
 
     if editing and editing.get('user_id') == uid:
@@ -3002,7 +3016,9 @@ def handle_callback(q, s):
                 send_dm(uid, f'Пришли следующим сообщением рекламный текст, фото или видео.\nФормат: {top_hours}/{life_hours} (часов в топе / часов до удаления).\nПосле получения содержимого бот покажет предпросмотр, и только через 15 минут без ответа сможет опубликовать рекламу.', main_menu())
         elif data.startswith('queuephoto:'):
             target = data.split(':', 1)[1]
-            item = next((entry for entry in s.get('review_queue', []) if str(entry.get('id')) == target), None)
+            active = s.get('pending_news_review') or {}
+            queued = next((entry for entry in s.get('review_queue', []) if str(entry.get('id')) == target), None)
+            item = active if str(active.get('id', '')) == target else queued
             if not item:
                 send_dm(uid, 'Материал больше не находится в очереди. Открой /reviewqueue.', main_menu())
             else:

@@ -1802,10 +1802,10 @@ def post_with_image(text, image_url=None, illustration=False, image_query=None, 
             else:
                 content = content.rstrip() + '\n\n' + credit
         caption, continuation = split_photo_caption(content, limit=950)
-        if continuation:
-            # Attribution is optional only when it would make the caption exceed Telegram's limit;
-            # keep the link in logs and try the same image without the long attribution block.
-            caption, continuation = split_photo_caption(text, limit=950)
+        if continuation and credit:
+            # Never strip legally required author/licence credit to force an image into a caption.
+            print('Skipping Commons candidate because its required attribution does not fit the caption.')
+            continue
         if continuation:
             raise MediaCaptionTooLongError('MEDIA_CAPTION_TOO_LONG: shorten the text before publication')
         result = send_photo_url_or_upload(photo_url, caption or '🇻🇳 Новости Нячанга')

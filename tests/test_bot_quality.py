@@ -1652,7 +1652,7 @@ class NewsQualityTests(unittest.TestCase):
              patch.object(bot, "send_dm") as dm_mock:
             self.assertTrue(bot.promote_next_review_item(state))
         self.assertEqual(state["pending_news_review"]["status"], "scheduled")
-        self.assertEqual(state["pending_news_review"]["planned_at"], (current + timedelta(minutes=5)).isoformat())
+        self.assertEqual(state["pending_news_review"]["planned_at"], (current - timedelta(minutes=30)).isoformat())
         preview_mock.assert_not_called()
         dm_mock.assert_not_called()
 
@@ -1674,6 +1674,25 @@ class NewsQualityTests(unittest.TestCase):
              patch.object(bot, "publish_review_item", return_value={"message_id": 123}) as publish_mock:
             bot.process_news_review(state)
         publish_mock.assert_called_once_with(state, item)
+
+
+    def test_direct_mode_skips_expired_greeting_instead_of_publishing_it_late(self):
+        current = datetime(2026, 11, 1, 10, 30, tzinfo=bot.TZ)
+        item = {
+            "id": "old-morning-post", "kind": "morning_greeting",
+            "status": "needs_image", "slot_key": "review_morning",
+            "headline": "☀️ Доброе утро!", "body": "Желаем хорошего дня.",
+            "planned_at": (current - timedelta(hours=2)).isoformat()
+        }
+        state = {"pending_news_review": item, "review_queue": [], "paused": False, "pause_until": ""}
+        with patch.object(bot, "AUTO_PUBLISH_DIRECT", True), \\
+             patch.object(bot, "now", return_value=current), \\
+             patch.object(bot, "is_paused", return_value=False), \\
+             patch.object(bot, "publish_review_item") as publish_mock:
+            bot.process_news_review(state)
+        self.assertEqual(item["status"], "expired")
+        self.assertEqual(state["pending_news_review"], {})
+        publish_mock.assert_not_called()
 
     def test_original_fallback_illustration_is_a_valid_png(self):
         image = bot.fallback_editorial_png("Nha Trang Vietnam night city lights")

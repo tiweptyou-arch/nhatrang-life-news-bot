@@ -1119,13 +1119,15 @@ class NewsQualityTests(unittest.TestCase):
             "❤️ — да", "🙏 — да", "😱 — да", "👍 — да", "🤣 — да"
         ])
 
-    def test_no_photo_means_no_public_text_only_fallback(self):
-        post = "<b>Заголовок</b>\n\nПроверенный текст новости."
-        with patch.object(bot, "commons_image", return_value=None), \
+    def test_image_search_uses_original_illustration_instead_of_text_only_fallback(self):
+        post = "<b>Заголовок</b>\\n\\nПроверенный текст новости."
+        with patch.object(bot, "commons_image_candidates", return_value=[]), \
+             patch.object(bot, "api_multipart", return_value={"message_id": 999}) as upload_mock, \
              patch.object(bot, "api") as api_mock, \
              patch.object(bot, "post_text") as text_mock:
             result = bot.post_with_image(post, image_url=None, image_query="Nha Trang road")
-        self.assertIsNone(result)
+        self.assertEqual(result["message_id"], 999)
+        upload_mock.assert_called_once()
         api_mock.assert_not_called()
         text_mock.assert_not_called()
 
@@ -1696,7 +1698,7 @@ class NewsQualityTests(unittest.TestCase):
 
     def test_original_fallback_illustration_is_a_valid_png(self):
         image = bot.fallback_editorial_png("Nha Trang Vietnam night city lights")
-        self.assertTrue(image.startswith(b"\\x89PNG\\r\\n\\x1a\\n"))
+        self.assertTrue(image.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertEqual(int.from_bytes(image[16:20], "big"), 800)
         self.assertEqual(int.from_bytes(image[20:24], "big"), 450)
 
@@ -1711,7 +1713,7 @@ class NewsQualityTests(unittest.TestCase):
         upload.assert_called_once()
         self.assertEqual(upload.call_args.args[0], "sendPhoto")
         fallback_bytes = upload.call_args.args[2]["photo"][1]
-        self.assertTrue(fallback_bytes.startswith(b"\\x89PNG\\r\\n\\x1a\\n"))
+        self.assertTrue(fallback_bytes.startswith(b"\x89PNG\r\n\x1a\n"))
 
 
 if __name__ == "__main__":

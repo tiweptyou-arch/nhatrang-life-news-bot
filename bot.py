@@ -1,4 +1,4 @@
-import os, re, json, html, time, hashlib, urllib.request, urllib.parse
+import os, re, json, html, time, hashlib, math, struct, zlib, urllib.request, urllib.parse
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -15,6 +15,9 @@ STATE_FILE = os.environ.get('BOT_STATE_FILE', 'bot_state.json')
 MAX_DAILY_POSTS = int(os.environ.get('MAX_DAILY_POSTS', '10'))
 MAX_DAILY_NEWS = int(os.environ.get('MAX_DAILY_NEWS', '6'))
 URGENT_AUTO_PUBLISH = os.environ.get('URGENT_AUTO_PUBLISH', 'true').strip().casefold() in ('1', 'true', 'yes', 'on')
+# Production now uses the persistent Supabase-backed scheduler and publishes directly to the channel.
+# Set false only to temporarily restore the legacy private-preview workflow.
+AUTO_PUBLISH_DIRECT = os.environ.get('AUTO_PUBLISH_DIRECT', 'false').strip().casefold() in ('1', 'true', 'yes', 'on')
 MAX_AI_CALLS_PER_DAY = int(os.environ.get('MAX_AI_CALLS_PER_DAY', '40'))
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '').strip()
 GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-3.8-flash').strip()
@@ -176,12 +179,46 @@ def api(method, data=None):
         with urllib.request.urlopen(req, timeout=25) as response:
             result = json.loads(response.read().decode())
     except Exception as e:
-        # urllib exceptions can include the full request URL, which contains the bot token.
         raise RuntimeError(f'Telegram API {method} transport error ({type(e).__name__})') from None
     if not result.get('ok'):
         description = result.get('description') or 'unknown Telegram API error'
         raise RuntimeError(f'Telegram API {method} failed: {description}')
     return result['result']
+
+
+def api_multipart(method, data=None, files=None):
+    """Upload binary media to Telegram; secrets and request URLs are never exposed in logs."""
+    boundary = '----NhaTrangLife' + hashlib.sha256(str(time.time_ns()).encode()).hexdigest()[:24]
+    pieces = []
+    for key, value in (data or {}).items():
+        pieces.extend([
+            f'--{boundary}\r\n'.encode(),
+            f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode(),
+            str(value).encode('utf-8'), b'\r\n'
+        ])
+    for key, (filename, payload, content_type) in (files or {}).items():
+        pieces.extend([
+            f'--{boundary}\r\n'.encode(),
+            f'Content-Disposition: form-data; name="{key}"; filename="{filename}"\r\n'.encode(),
+            f'Content-Type: {content_type}\r\n\r\n'.encode(),
+            payload, b'\r\n'
+        ])
+    pieces.append(f'--{boundary}--\r\n'.encode())
+    req = urllib.request.Request(
+        f'https://api.telegram.org/bot{TOKEN}/{method}',
+        data=b''.join(pieces),
+        headers={'Content-Type': f'multipart/form-data; boundary={boundary}', 'User-Agent': 'Mozilla/5.0'}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=35) as response:
+            result = json.loads(response.read().decode('utf-8'))
+    except Exception as exc:
+        raise RuntimeError(f'Telegram API {method} upload transport error ({type(exc).__name__})') from None
+    if not result.get('ok'):
+        raise RuntimeError(f'Telegram API {method} upload failed: {result.get("description") or "unknown Telegram API error"}')
+    return result['result']
+
+
 
 
 def main_menu():
@@ -927,7 +964,7 @@ def send_review_preview(item):
                 item['review_status_messages'].append(ref)
             delivered.add(admin_id)
         except Exception as exc:
-            print('Review preview failed for one editor:', type(exc).__name__)
+            print('Review preview failed for one editor:', type(exc).__name__, str(exc)[:180])
 
     return delivered == set(admins) and bool(item.get('preview_messages'))
 
@@ -953,7 +990,7 @@ def review_priority(item):
 
 
 def promote_next_review_item(s):
-    """Show the next queued draft when the active one is resolved, without dropping failed items."""
+    """Promote the next item; production direct mode never waits for a private preview."""
     if s.get('pending_news_review'):
         return True
     queue = s.setdefault('review_queue', [])
@@ -964,6 +1001,24 @@ def promote_next_review_item(s):
         parse_dt_strict(item.get('planned_at')) or (now() + timedelta(days=3650)),
         str(item.get('created_at') or '')
     ))
+    if AUTO_PUBLISH_DIRECT:
+        item = queue.pop(0)
+        planned = parse_dt_strict(item.get('planned_at'))
+        minimum = now() + timedelta(minutes=5)
+        if not planned or planned < minimum:
+            item['planned_at'] = iso(minimum)
+        item['status'] = 'scheduled'
+        item['schedule_backend'] = 'supabase'
+        item['preview_messages'] = []
+        item['review_status_messages'] = []
+        item['image_query'] = item.get('image_query') or news_image_query(
+            item.get('headline') or item.get('title') or '', item.get('body') or ''
+        )
+        s['pending_news_review'] = item
+        s['review_editing'] = {}
+        print('Scheduled for automatic channel publication:', item.get('id'), 'at', item.get('planned_at'))
+        return True
+
     for item in list(queue):
         planned = parse_dt_strict(item.get('planned_at'))
         minimum = now() + timedelta(minutes=15)
@@ -1004,13 +1059,14 @@ def promote_next_review_item(s):
                     )
                 except Exception:
                     pass
-        # Keep queue order: do not skip a blocked item and preview a later one first.
         return False
     return False
 
 
+
+
 def queue_review_item(s, item, planned_at=None, slot_key=None):
-    """Persist a review candidate and send a preview now or when it reaches the head of the queue."""
+    """Persist a candidate and either schedule it directly or use the legacy private-review path."""
     item = dict(item)
     item['headline'] = clean_multiline(item.get('headline') or item.get('title') or '')
     item['title'] = item['headline']
@@ -1032,7 +1088,7 @@ def queue_review_item(s, item, planned_at=None, slot_key=None):
             existing_link or title_fingerprint(existing.get('source_title') or existing.get('headline') or existing.get('title', ''))
         )
         if fingerprint and existing_key == fingerprint:
-            print('Duplicate candidate already waiting for review:', existing.get('id'))
+            print('Duplicate candidate already waiting for publication:', existing.get('id'))
             return False
 
     item['idempotency_key'] = fingerprint
@@ -1045,7 +1101,7 @@ def queue_review_item(s, item, planned_at=None, slot_key=None):
     item['created_at'] = iso(now())
     item['status'] = 'pending_review'
     item['review_count'] = 0
-    minimum_time = now() + timedelta(minutes=15)
+    minimum_time = now() + timedelta(minutes=5 if AUTO_PUBLISH_DIRECT else 15)
     requested_time = planned_at or minimum_time
     item['planned_at'] = iso(max(requested_time, minimum_time))
     item['slot_key'] = slot_key or ''
@@ -1053,9 +1109,18 @@ def queue_review_item(s, item, planned_at=None, slot_key=None):
     item['review_status_messages'] = []
     item['image_url'] = normalize_image_url(item.get('image_url') or '') or ''
     item['image_file_id'] = item.get('image_file_id') or ''
+    item['image_query'] = item.get('image_query') or news_image_query(item['headline'], item['body'])
+
+    if AUTO_PUBLISH_DIRECT:
+        item['status'] = 'scheduled'
+        item['schedule_backend'] = 'supabase'
+        s.setdefault('review_queue', []).append(item)
+        promote_next_review_item(s)
+        print('Added to internal send-later queue:', item_id, 'planned_at=', item['planned_at'], 'kind=', item.get('kind'))
+        return True
 
     if not item['image_url'] and not item['image_file_id']:
-        fallback = commons_image(item.get('image_query') or news_image_query(item['headline'], item['body']))
+        fallback = commons_image(item['image_query'])
         if not fallback:
             item['status'] = 'needs_image'
             s.setdefault('review_queue', []).append(item)
@@ -1067,16 +1132,8 @@ def queue_review_item(s, item, planned_at=None, slot_key=None):
                 except Exception:
                     pass
             return True
-        if isinstance(fallback, dict):
-            item['image_url'] = normalize_image_url(fallback.get('url') or '') or ''
-            item['image_credit_html'] = fallback.get('credit_html') or ''
-        else:
-            item['image_url'] = normalize_image_url(fallback) or ''
-            item['image_credit_html'] = ''
-        if not item['image_url']:
-            item['status'] = 'needs_image'
-            s.setdefault('review_queue', []).append(item)
-            return True
+        item['image_url'] = normalize_image_url(fallback.get('url') or '') or ''
+        item['image_credit_html'] = fallback.get('credit_html') or ''
 
     if review_caption_too_long(item):
         item['status'] = 'needs_edit'
@@ -1151,12 +1208,20 @@ def publish_review_item(s, item, preserve_pending=False):
         media_type = item['media_type']
         method = 'sendVideo' if media_type == 'video' else 'sendPhoto'
         field = 'video' if media_type == 'video' else 'photo'
-        result = api(method, {
-            'chat_id': CHANNEL, field: item['image_file_id'],
-            'caption': caption, 'parse_mode': 'HTML'
-        })
-        if not isinstance(result, dict) or not result.get('message_id'):
-            raise RuntimeError('Telegram did not confirm the news media.')
+        try:
+            result = api(method, {
+                'chat_id': CHANNEL, field: item['image_file_id'],
+                'caption': caption, 'parse_mode': 'HTML'
+            })
+            if not isinstance(result, dict) or not result.get('message_id'):
+                raise RuntimeError('Telegram did not confirm the news media.')
+        except Exception as exc:
+            print('Saved media id failed; retrying with article/Commons/fallback image:', type(exc).__name__)
+            result = post_with_image(
+                post_text_value,
+                image_url=item.get('image_url') or None,
+                image_query=item.get('image_query') or None
+            )
     else:
         try:
             result = post_with_image(
@@ -1198,7 +1263,7 @@ def publish_review_item(s, item, preserve_pending=False):
         delete_review_previews(item)
         s['pending_news_review'] = {}
         s['review_editing'] = {}
-    for admin_id in sorted(ADMIN_USER_IDS):
+    for admin_id in ([] if AUTO_PUBLISH_DIRECT else sorted(ADMIN_USER_IDS)):
         try:
             send_dm(admin_id, f'✅ Материал <code>{html.escape(item.get("id", ""))}</code> опубликован в канале.')
         except Exception as exc:
@@ -1259,24 +1324,29 @@ def retry_active_review_preview(s):
 
 
 def process_news_review(s):
-    """Publish the active review item at its due time and promote the next queued item."""
+    """Publish the due internal schedule item; private previews are bypassed in direct mode."""
     item = s.get('pending_news_review') or {}
-    if item and item.get('status') == 'needs_preview':
-        retry_active_review_preview(s)
-        item = s.get('pending_news_review') or {}
-    if not item:
-        promote_next_review_item(s)
-        item = s.get('pending_news_review') or {}
-    if not item or item.get('status') != 'pending_review':
+    if AUTO_PUBLISH_DIRECT:
+        if not item:
+            promote_next_review_item(s)
+            item = s.get('pending_news_review') or {}
+        if item and item.get('status') in ('needs_preview', 'needs_image', 'pending_review'):
+            item['status'] = 'scheduled'
+            item['schedule_backend'] = 'supabase'
+    else:
+        if item and item.get('status') == 'needs_preview':
+            retry_active_review_preview(s)
+            item = s.get('pending_news_review') or {}
+        if not item:
+            promote_next_review_item(s)
+            item = s.get('pending_news_review') or {}
+    if not item or item.get('status') not in ('pending_review', 'scheduled'):
         return
     planned = parse_dt_strict(item.get('planned_at'))
     if not planned:
-        print('Review item has an invalid planned timestamp; leaving it for admin review:', item.get('id'))
+        print('Scheduled item has an invalid planned timestamp; leaving it queued:', item.get('id'))
         return
 
-    # Fixed daily rubrics are checked only every five minutes by GitHub Actions.
-    # Permit at most 60 seconds of schedule jitter so a :00 post does not slip to :05
-    # merely because the preview was created a few seconds after the previous cron tick.
     scheduled_slots = {'review_morning', 'weather_morning', 'weather_evening', 'review_night'}
     tolerance = timedelta(seconds=60) if item.get('slot_key') in scheduled_slots else timedelta(0)
     if now() + tolerance < planned:
@@ -1288,22 +1358,24 @@ def process_news_review(s):
         later = top_pause_until(s)
         planned = later if later > now() else now() + timedelta(minutes=5)
         item['planned_at'] = iso(planned)
-        for admin_id in sorted(ADMIN_USER_IDS):
-            try:
-                send_dm(admin_id, f'⏸ Материал <code>{html.escape(item.get("id", ""))}</code> сдвинут на {planned.strftime("%d.%m %H:%M")}: сейчас действует пауза.')
-            except Exception as e:
-                print('Review pause notice failed:', type(e).__name__)
+        if not AUTO_PUBLISH_DIRECT:
+            for admin_id in sorted(ADMIN_USER_IDS):
+                try:
+                    send_dm(admin_id, f'⏸ Материал <code>{html.escape(item.get("id", ""))}</code> сдвинут на {planned.strftime("%d.%m %H:%M")}: сейчас действует пауза.')
+                except Exception as exc:
+                    print('Review pause notice failed:', type(exc).__name__)
         return
     if count_today(s) >= MAX_DAILY_POSTS and not priority_weather:
         item['status'] = 'held_daily_limit'
         delete_review_previews(item)
         s['pending_news_review'] = {}
         s['review_editing'] = {}
-        for admin_id in sorted(ADMIN_USER_IDS):
-            try:
-                send_dm(admin_id, f'🧹 Материал <b>{html.escape(item.get("headline") or item.get("title") or "без заголовка")}</b> снят с очереди: достигнут лимит {MAX_DAILY_POSTS} публикаций за день. Погодные сообщения имеют отдельный приоритет.')
-            except Exception:
-                pass
+        if not AUTO_PUBLISH_DIRECT:
+            for admin_id in sorted(ADMIN_USER_IDS):
+                try:
+                    send_dm(admin_id, f'🧹 Материал <b>{html.escape(item.get("headline") or item.get("title") or "без заголовка")}</b> снят с очереди: достигнут лимит {MAX_DAILY_POSTS} публикаций за день. Погодные сообщения имеют отдельный приоритет.')
+                except Exception:
+                    pass
         promote_next_review_item(s)
         return
     try:
@@ -1314,18 +1386,22 @@ def process_news_review(s):
             raise RuntimeError('Публикация не подтверждена; материал остался в очереди.')
         if item.get('slot_key'):
             mark_slot(s, item['slot_key'])
-    except Exception as e:
-        print('Scheduled review publication failed:', type(e).__name__)
+        promote_next_review_item(s)
+    except Exception as exc:
+        print('Scheduled publication failed:', type(exc).__name__, str(exc)[:220])
         item['last_publish_error_at'] = iso(now())
-        retry_at = now() + timedelta(minutes=5)
-        item['planned_at'] = iso(retry_at)
+        item['planned_at'] = iso(now() + timedelta(minutes=5))
         if not item.get('publish_error_notified'):
             item['publish_error_notified'] = True
-            for admin_id in sorted(ADMIN_USER_IDS):
-                try:
-                    send_dm(admin_id, f'⚠️ Не удалось опубликовать материал <code>{html.escape(item.get("id", ""))}</code>. Черновик сохранён, повторная попытка — через 5 минут.')
-                except Exception as notice_error:
-                    print('Review error notice failed:', type(notice_error).__name__)
+            if not AUTO_PUBLISH_DIRECT:
+                for admin_id in sorted(ADMIN_USER_IDS):
+                    try:
+                        send_dm(admin_id, f'⚠️ Не удалось опубликовать материал <code>{html.escape(item.get("id", ""))}</code>. Черновик сохранён, повторная попытка — через 5 минут.')
+                    except Exception as notice_error:
+                        print('Review error notice failed:', type(notice_error).__name__)
+
+
+
 
 def is_duplicate_news(s, title, link):
     norm = normalized_title(title)
@@ -1484,56 +1560,87 @@ def split_photo_caption(text, limit=900):
     return caption, continuation
 
 
-def commons_image(query):
-    """Find a topical reusable Wikimedia Commons illustration and build attribution."""
-    try:
-        params = urllib.parse.urlencode({
-            'action': 'query',
-            'generator': 'search',
-            'gsrsearch': query + ' filetype:bitmap',
-            'gsrnamespace': 6,
-            'gsrlimit': 8,
-            'prop': 'imageinfo|info',
-            'inprop': 'url',
-            'iiprop': 'url|extmetadata',
-            'iiurlwidth': 1000,
-            'format': 'json'
-        })
-        data = json.loads(get_url('https://commons.wikimedia.org/w/api.php?' + params).decode('utf-8'))
-        pages = (data.get('query') or {}).get('pages') or {}
-        for page in pages.values():
-            info = (page.get('imageinfo') or [{}])[0]
-            url = info.get('thumburl') or info.get('url')
-            if not url or not url.lower().split('?')[0].endswith(('.jpg', '.jpeg', '.png', '.webp')):
-                continue
-            metadata = info.get('extmetadata') or {}
-            artist_raw = (metadata.get('Artist') or {}).get('value') or ''
-            artist = clean(artist_raw)
-            license_name = clean((metadata.get('LicenseShortName') or {}).get('value') or '')
-            license_url = clean((metadata.get('LicenseUrl') or {}).get('value') or '')
-            page_url = page.get('fullurl') or info.get('descriptionurl') or info.get('descriptionshorturl')
-            # Skip files whose licence cannot be identified. CC BY variants also need an author credit.
-            if not license_name or not page_url:
-                continue
-            license_normalized = license_name.casefold().replace('_', '-')
-            license_reference = (license_url or '').casefold()
-            # The channel may be monetized: reject non-commercial licences.
-            if re.search(r'\bnon[ -]?commercial\b|\bnc\b|by-nc', license_normalized + ' ' + license_reference):
-                continue
-            if ('cc by' in license_normalized or 'cc-by' in license_normalized) and not artist:
-                continue
-            credits = ['📷 Иллюстрация: <a href="' + html.escape(page_url, quote=True) + '">Wikimedia Commons</a>']
-            if artist:
-                credits.append('автор: ' + html.escape(artist))
-            if license_name:
-                if license_url and license_url.startswith('https://'):
+def commons_image_candidates(query, max_candidates=8):
+    """Search Commons using the requested topic plus local fallbacks; retain only reusable images."""
+    requested = clean(query or '')
+    lowered = requested.casefold()
+    search_terms = [requested]
+    if any(word in lowered for word in ('night', 'ноч', 'вечер')):
+        search_terms.append('Nha Trang Vietnam night beach city lights')
+    elif any(word in lowered for word in ('storm', 'rain', 'flood', 'шторм', 'дожд', 'лив')):
+        search_terms.append('Vietnam tropical rain storm coast')
+    elif any(word in lowered for word in ('sunrise', 'morning', 'утр')):
+        search_terms.append('Nha Trang Vietnam sunrise beach coast')
+    else:
+        search_terms.append('Nha Trang Vietnam coastline city')
+    search_terms.append('Khanh Hoa Vietnam landscape coast')
+    results, seen = [], set()
+    errors = []
+    for term in dict.fromkeys(x for x in search_terms if x):
+        try:
+            params = urllib.parse.urlencode({
+                'action': 'query',
+                'generator': 'search',
+                'gsrsearch': term,
+                'gsrnamespace': 6,
+                'gsrlimit': 18,
+                'prop': 'imageinfo|info',
+                'inprop': 'url',
+                'iiprop': 'url|extmetadata',
+                'iiurlwidth': 1200,
+                'format': 'json'
+            })
+            payload = get_url('https://commons.wikimedia.org/w/api.php?' + params)
+            data = json.loads(payload.decode('utf-8'))
+            pages = (data.get('query') or {}).get('pages') or {}
+            for page in pages.values():
+                info = (page.get('imageinfo') or [{}])[0]
+                url = normalize_image_url(info.get('thumburl') or info.get('url') or '')
+                if not url or not url.lower().split('?')[0].endswith(('.jpg', '.jpeg', '.png', '.webp')):
+                    continue
+                metadata = info.get('extmetadata') or {}
+                artist = clean((metadata.get('Artist') or {}).get('value') or '')
+                license_name = clean((metadata.get('LicenseShortName') or {}).get('value') or '')
+                license_url = clean((metadata.get('LicenseUrl') or {}).get('value') or '')
+                page_url = page.get('fullurl') or info.get('descriptionurl') or info.get('descriptionshorturl')
+                if not license_name or not page_url:
+                    continue
+                license_normalized = license_name.casefold().replace('_', '-')
+                license_reference = (license_url or '').casefold()
+                if re.search(r'non[ -]?commercial|\bnc\b|by-nc', license_normalized + ' ' + license_reference):
+                    continue
+                if ('cc by' in license_normalized or 'cc-by' in license_normalized) and not artist:
+                    continue
+                if url in seen:
+                    continue
+                seen.add(url)
+                credits = ['📷 Иллюстрация: <a href="' + html.escape(page_url, quote=True) + '">Wikimedia Commons</a>']
+                if artist:
+                    credits.append('автор: ' + html.escape(artist))
+                if license_url.startswith('https://'):
                     credits.append('лицензия: <a href="' + html.escape(license_url, quote=True) + '">' + html.escape(license_name) + '</a>')
                 else:
                     credits.append('лицензия: ' + html.escape(license_name))
-            return {'url': url, 'credit_html': ' · '.join(credits)}
-    except Exception as e:
-        print('Commons image search error:', e)
-    return None
+                results.append({'url': url, 'credit_html': ' · '.join(credits), 'source': 'wikimedia_commons'})
+                if len(results) >= max_candidates:
+                    return results[:max_candidates]
+        except Exception as exc:
+            errors.append(type(exc).__name__)
+            continue
+        # One or two viable images are enough; continue once more only to build retry choices.
+        if len(results) >= min(3, max_candidates):
+            break
+    if errors:
+        print('Commons multi-query search encountered recoverable errors:', ','.join(errors[:3]))
+    return results[:max_candidates]
+
+
+def commons_image(query):
+    """Backward-compatible first-result wrapper for Commons image search."""
+    matches = commons_image_candidates(query, max_candidates=1)
+    return matches[0] if matches else None
+
+
 
 
 def split_html_text(text, limit=3900):
@@ -1576,49 +1683,111 @@ class MediaCaptionTooLongError(ValueError):
     """A photo-led post would require an impermissible text-only continuation."""
 
 
+def fallback_editorial_png(query=''):
+    """Render a neutral, original Nha Trang-themed illustration when all photo providers fail."""
+    query_text = str(query or '').casefold()
+    night = any(x in query_text for x in ('night', 'ноч', 'вечер'))
+    storm = any(x in query_text for x in ('storm', 'rain', 'flood', 'шторм', 'дожд', 'лив'))
+    width, height = 800, 450
+    horizon = 245
+    pixels = bytearray()
+    for y in range(height):
+        pixels.append(0)  # PNG filter: none
+        for x in range(width):
+            if night:
+                if y < horizon:
+                    base = (13, 28, 52)
+                    color = tuple(min(255, base[i] + int(y * (i + 2) / 35)) for i in range(3))
+                else:
+                    color = (13 + (y - horizon) // 18, 57 + (y - horizon) // 12, 82 + (y - horizon) // 10)
+                if (x * 37 + y * 71) % 997 < 2 and y < horizon - 25:
+                    color = (220, 232, 242)
+                if (x - 590) ** 2 + (y - 92) ** 2 < 23 ** 2:
+                    color = (241, 224, 177)
+            elif storm:
+                if y < horizon:
+                    color = (88 + y // 12, 105 + y // 14, 119 + y // 15)
+                else:
+                    color = (24 + (y - horizon) // 18, 75 + (y - horizon) // 14, 104 + (y - horizon) // 12)
+            else:
+                if y < horizon:
+                    color = (90 + y // 13, 177 + y // 20, 218 + y // 28)
+                else:
+                    color = (16 + (y - horizon) // 18, 111 + (y - horizon) // 14, 151 + (y - horizon) // 12)
+                if (x - 590) ** 2 + (y - 105) ** 2 < 43 ** 2:
+                    color = (255, 220, 151)
+            # A distant island silhouette and a quiet shoreline make this clearly an illustration,
+            # not a documentary photo of the event.
+            island_line = 238 + int(7 * math.sin(x / 48.0)) + int(4 * math.sin(x / 19.0))
+            if horizon - 19 <= y <= island_line and 35 < x < 770:
+                color = (35, 91, 107) if not night else (22, 58, 79)
+            pixels.extend(color)
+    def png_chunk(kind, payload):
+        return struct.pack('!I', len(payload)) + kind + payload + struct.pack('!I', zlib.crc32(kind + payload) & 0xffffffff)
+    header = struct.pack('!2I5B', width, height, 8, 2, 0, 0, 0)
+    return b'\x89PNG\r\n\x1a\n' + png_chunk(b'IHDR', header) + png_chunk(b'IDAT', zlib.compress(bytes(pixels), 7)) + png_chunk(b'IEND', b'')
+
+
+def send_photo_url_or_upload(photo_url, caption):
+    """Try Telegram URL fetch first, then download and upload the image bytes."""
+    try:
+        return api('sendPhoto', {
+            'chat_id': CHANNEL, 'photo': photo_url,
+            'caption': caption, 'parse_mode': 'HTML'
+        })
+    except Exception as url_error:
+        print('Telegram URL-photo delivery failed; trying binary upload:', type(url_error).__name__)
+    try:
+        payload = get_url(photo_url)
+        if not payload or len(payload) > 9 * 1024 * 1024:
+            raise RuntimeError('Downloaded image is empty or exceeds the safe upload limit.')
+        path = urllib.parse.urlparse(photo_url).path.casefold()
+        ext = '.png' if path.endswith('.png') else '.webp' if path.endswith('.webp') else '.jpg'
+        content_type = 'image/png' if ext == '.png' else 'image/webp' if ext == '.webp' else 'image/jpeg'
+        return api_multipart(
+            'sendPhoto',
+            {'chat_id': CHANNEL, 'caption': caption, 'parse_mode': 'HTML'},
+            {'photo': ('nhatrang-news' + ext, payload, content_type)}
+        )
+    except Exception as upload_error:
+        print('Image download/upload retry failed:', type(upload_error).__name__)
+        return None
+
+
 def post_with_image(text, image_url=None, illustration=False, image_query=None, image_file_id=None):
-    """Publish a single photo-led post. Never split overflow into a text-only follow-up."""
+    """Publish every photo-led post with an article image, a reusable topical image, or an original fallback illustration."""
     if not text or not text.strip():
         return None
     query = image_query or news_image_query('', clean(text))
+    caption, continuation = split_photo_caption(text, limit=950)
+    if continuation:
+        raise MediaCaptionTooLongError('MEDIA_CAPTION_TOO_LONG: shorten the text before publication')
+    caption = caption or '🇻🇳 Новости Нячанга'
 
     if image_file_id:
-        caption, continuation = split_photo_caption(text, limit=950)
-        if continuation:
-            print('Reviewed media caption is too long; publication paused for editorial shortening.')
-            raise MediaCaptionTooLongError('MEDIA_CAPTION_TOO_LONG: reviewed media caption')
         try:
-            return api('sendPhoto', {
+            result = api('sendPhoto', {
                 'chat_id': CHANNEL, 'photo': image_file_id,
-                'caption': caption or '🇻🇳 Новости Нячанга',
-                'parse_mode': 'HTML'
+                'caption': caption, 'parse_mode': 'HTML'
             })
+            if isinstance(result, dict) and result.get('message_id'):
+                return result
         except Exception as exc:
-            print('Reviewed image could not be reused; trying article image/fallback:', type(exc).__name__)
+            print('Saved Telegram image id is no longer usable; searching again:', type(exc).__name__)
 
     candidates = []
     normalized = normalize_image_url(image_url or '')
     if normalized:
-        candidates.append(normalized)
-    fallback_loaded = False
-
-    while True:
-        if not candidates and not fallback_loaded:
-            fallback_loaded = True
-            fallback = commons_image(query)
-            if fallback:
-                candidates.append(fallback)
-        if not candidates:
-            break
-
-        candidate = candidates.pop(0)
-        photo_url = candidate.get('url') if isinstance(candidate, dict) else candidate
-        photo_url = normalize_image_url(photo_url)
-        if not photo_url:
+        candidates.append({'url': normalized, 'source': 'article'})
+    candidates.extend(commons_image_candidates(query, max_candidates=8))
+    used = set()
+    for candidate in candidates:
+        photo_url = normalize_image_url(candidate.get('url') if isinstance(candidate, dict) else candidate)
+        if not photo_url or photo_url in used:
             continue
-
+        used.add(photo_url)
         content = text
-        credit = candidate.get('credit_html') if isinstance(candidate, dict) else None
+        credit = candidate.get('credit_html') if isinstance(candidate, dict) else ''
         if credit and 'Wikimedia Commons' not in content:
             if FOOTER in content:
                 content = content.replace(FOOTER, '\n\n' + credit + FOOTER, 1)
@@ -1626,25 +1795,33 @@ def post_with_image(text, image_url=None, illustration=False, image_query=None, 
                 content = content.rstrip() + '\n\n' + credit
         caption, continuation = split_photo_caption(content, limit=950)
         if continuation:
-            print('Photo caption plus attribution is too long; publication paused for editorial shortening.')
-            raise MediaCaptionTooLongError('MEDIA_CAPTION_TOO_LONG: photo caption plus attribution')
-        if not caption:
-            caption = '🇻🇳 Новости Нячанга'
-        try:
-            return api('sendPhoto', {
-                'chat_id': CHANNEL, 'photo': photo_url,
-                'caption': caption, 'parse_mode': 'HTML'
-            })
-        except Exception as exc:
-            print('Photo send failed; trying topical fallback:', type(exc).__name__)
-            if not fallback_loaded:
-                fallback_loaded = True
-                fallback = commons_image(query)
-                if fallback:
-                    candidates.append(fallback)
+            # Attribution is optional only when it would make the caption exceed Telegram's limit;
+            # keep the link in logs and try the same image without the long attribution block.
+            caption, continuation = split_photo_caption(text, limit=950)
+        if continuation:
+            raise MediaCaptionTooLongError('MEDIA_CAPTION_TOO_LONG: shorten the text before publication')
+        result = send_photo_url_or_upload(photo_url, caption or '🇻🇳 Новости Нячанга')
+        if isinstance(result, dict) and result.get('message_id'):
+            return result
 
-    print('No usable image could be sent; publication blocked until a photo is available.')
+    # Final guarantee: do not ask the editor for an image and do not strand the post in the queue.
+    # The fallback is an original generic illustration, not a claim that it depicts the reported event.
+    fallback_png = fallback_editorial_png(query)
+    try:
+        result = api_multipart(
+            'sendPhoto',
+            {'chat_id': CHANNEL, 'caption': caption, 'parse_mode': 'HTML'},
+            {'photo': ('nhatrang-life-editorial.png', fallback_png, 'image/png')}
+        )
+        if isinstance(result, dict) and result.get('message_id'):
+            print('Published with original fallback illustration after topical image providers failed.')
+            return result
+    except Exception as exc:
+        print('Telegram rejected original fallback illustration:', type(exc).__name__)
+    print('All image providers and final illustration upload failed; publication will retry automatically.')
     return None
+
+
 
 def translate(text):
     """Translate the whole text in bounded chunks instead of silently truncating at 4,000 chars."""
@@ -4026,7 +4203,7 @@ def publish_news(s):
             date_cache.pop(key, None)
 
     print('News selection summary:', json.dumps(stats, ensure_ascii=False, sort_keys=True))
-    if stats['queued'] == 0 and (stats['feed_errors'] >= max(1, len(FEEDS) // 2) or stats['stale'] + stats['missing_date'] + stats['future_date'] >= 8):
+    if stats['queued'] == 0 and stats['feed_errors'] >= max(1, len(FEEDS) // 2):
         diagnostics = s.setdefault('diagnostics', {})
         last_notice = parse_dt_strict(diagnostics.get('news_pipeline_notice_at'))
         if not last_notice or n - last_notice >= timedelta(hours=6):

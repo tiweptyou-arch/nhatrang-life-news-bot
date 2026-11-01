@@ -1624,9 +1624,9 @@ class NewsQualityTests(unittest.TestCase):
             "link": "https://publisher.example/road",
             "image_query": "Nha Trang Vietnam road traffic"
         }
-        with patch.object(bot, "AUTO_PUBLISH_DIRECT", True), \\
-             patch.object(bot, "now", return_value=current), \\
-             patch.object(bot, "send_review_preview") as preview_mock, \\
+        with patch.object(bot, "AUTO_PUBLISH_DIRECT", True), \
+             patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "send_review_preview") as preview_mock, \
              patch.object(bot, "send_dm") as dm_mock:
             self.assertTrue(bot.queue_review_item(state, candidate))
         scheduled = state["pending_news_review"]
@@ -1646,9 +1646,9 @@ class NewsQualityTests(unittest.TestCase):
             "planned_at": (current - timedelta(minutes=30)).isoformat()
         }
         state = {"pending_news_review": {}, "review_queue": [old_item], "review_editing": {}}
-        with patch.object(bot, "AUTO_PUBLISH_DIRECT", True), \\
-             patch.object(bot, "now", return_value=current), \\
-             patch.object(bot, "send_review_preview") as preview_mock, \\
+        with patch.object(bot, "AUTO_PUBLISH_DIRECT", True), \
+             patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "send_review_preview") as preview_mock, \
              patch.object(bot, "send_dm") as dm_mock:
             self.assertTrue(bot.promote_next_review_item(state))
         self.assertEqual(state["pending_news_review"]["status"], "scheduled")
@@ -1668,9 +1668,9 @@ class NewsQualityTests(unittest.TestCase):
             "pending_news_review": item, "review_queue": [], "daily_counts": {},
             "published_news": [], "paused": False, "pause_until": ""
         }
-        with patch.object(bot, "AUTO_PUBLISH_DIRECT", True), \\
-             patch.object(bot, "now", return_value=current), \\
-             patch.object(bot, "is_paused", return_value=False), \\
+        with patch.object(bot, "AUTO_PUBLISH_DIRECT", True), \
+             patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "is_paused", return_value=False), \
              patch.object(bot, "publish_review_item", return_value={"message_id": 123}) as publish_mock:
             bot.process_news_review(state)
         publish_mock.assert_called_once_with(state, item)
@@ -1685,9 +1685,9 @@ class NewsQualityTests(unittest.TestCase):
             "planned_at": (current - timedelta(hours=2)).isoformat()
         }
         state = {"pending_news_review": item, "review_queue": [], "paused": False, "pause_until": ""}
-        with patch.object(bot, "AUTO_PUBLISH_DIRECT", True), \\
-             patch.object(bot, "now", return_value=current), \\
-             patch.object(bot, "is_paused", return_value=False), \\
+        with patch.object(bot, "AUTO_PUBLISH_DIRECT", True), \
+             patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "is_paused", return_value=False), \
              patch.object(bot, "publish_review_item") as publish_mock:
             bot.process_news_review(state)
         self.assertEqual(item["status"], "expired")
@@ -1701,7 +1701,7 @@ class NewsQualityTests(unittest.TestCase):
         self.assertEqual(int.from_bytes(image[20:24], "big"), 450)
 
     def test_post_with_image_uses_original_illustration_when_photo_search_is_unavailable(self):
-        with patch.object(bot, "commons_image_candidates", return_value=[]), \\
+        with patch.object(bot, "commons_image_candidates", return_value=[]), \
              patch.object(bot, "api_multipart", return_value={"message_id": 456}) as upload:
             result = bot.post_with_image(
                 "<b>Погода в Нячанге</b>\\n\\nСегодня переменная облачность.",

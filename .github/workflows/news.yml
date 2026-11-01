@@ -64,6 +64,7 @@ jobs:
       MAX_DAILY_NEWS: '6'
       MAX_AI_CALLS_PER_DAY: '40'
       URGENT_AUTO_PUBLISH: 'true'
+      AUTO_PUBLISH_DIRECT: 'true'
     steps:
       - name: Checkout main
         uses: actions/checkout@v4

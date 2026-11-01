@@ -1119,13 +1119,15 @@ class NewsQualityTests(unittest.TestCase):
             "❤️ — да", "🙏 — да", "😱 — да", "👍 — да", "🤣 — да"
         ])
 
-    def test_no_photo_means_no_public_text_only_fallback(self):
-        post = "<b>Заголовок</b>\n\nПроверенный текст новости."
-        with patch.object(bot, "commons_image", return_value=None), \
+    def test_image_search_uses_original_illustration_instead_of_text_only_fallback(self):
+        post = "<b>Заголовок</b>\\n\\nПроверенный текст новости."
+        with patch.object(bot, "commons_image_candidates", return_value=[]), \
+             patch.object(bot, "api_multipart", return_value={"message_id": 999}) as upload_mock, \
              patch.object(bot, "api") as api_mock, \
              patch.object(bot, "post_text") as text_mock:
             result = bot.post_with_image(post, image_url=None, image_query="Nha Trang road")
-        self.assertIsNone(result)
+        self.assertEqual(result["message_id"], 999)
+        upload_mock.assert_called_once()
         api_mock.assert_not_called()
         text_mock.assert_not_called()
 
@@ -1611,6 +1613,108 @@ class NewsQualityTests(unittest.TestCase):
         title = "Во время учений в Кханьхоа возможны отключения электричества"
         description = "Жителей предупредили о временном отключении электричества."
         self.assertFalse(bot.is_non_actionable_exercise(title, description))
+
+
+
+    def test_direct_mode_queues_without_private_preview_and_uses_persistent_schedule(self):
+        current = datetime(2026, 11, 1, 10, 0, tzinfo=bot.TZ)
+        state = {"pending_news_review": {}, "review_queue": [], "review_editing": {}}
+        candidate = {
+            "kind": "news", "kind_label": "Новость Нячанга",
+            "title": "Road repair update", "source_title": "Road repair update",
+            "body": "The city announced road repair works in Nha Trang.",
+            "link": "https://publisher.example/road",
+            "image_query": "Nha Trang Vietnam road traffic"
+        }
+        with patch.object(bot, "AUTO_PUBLISH_DIRECT", True), \
+             patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "send_review_preview") as preview_mock, \
+             patch.object(bot, "send_dm") as dm_mock:
+            self.assertTrue(bot.queue_review_item(state, candidate))
+        scheduled = state["pending_news_review"]
+        self.assertEqual(scheduled["status"], "scheduled")
+        self.assertEqual(scheduled["schedule_backend"], "supabase")
+        self.assertEqual(bot.parse_dt_strict(scheduled["planned_at"]), current + timedelta(minutes=5))
+        self.assertEqual(state["review_queue"], [])
+        preview_mock.assert_not_called()
+        dm_mock.assert_not_called()
+
+    def test_direct_mode_promotes_legacy_needs_image_item_without_asking_admin(self):
+        current = datetime(2026, 11, 1, 10, 0, tzinfo=bot.TZ)
+        old_item = {
+            "id": "legacy-image-missing", "kind": "morning_greeting",
+            "status": "needs_image", "headline": "☀️ Доброе утро!",
+            "body": "Желаем хорошего дня.", "image_query": "Nha Trang sunrise",
+            "planned_at": (current - timedelta(minutes=30)).isoformat()
+        }
+        state = {"pending_news_review": {}, "review_queue": [old_item], "review_editing": {}}
+        with patch.object(bot, "AUTO_PUBLISH_DIRECT", True), \
+             patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "send_review_preview") as preview_mock, \
+             patch.object(bot, "send_dm") as dm_mock:
+            self.assertTrue(bot.promote_next_review_item(state))
+        self.assertEqual(state["pending_news_review"]["status"], "scheduled")
+        self.assertEqual(state["pending_news_review"]["planned_at"], (current - timedelta(minutes=30)).isoformat())
+        preview_mock.assert_not_called()
+        dm_mock.assert_not_called()
+
+    def test_direct_mode_processes_legacy_needs_image_item_at_scheduled_time(self):
+        current = datetime(2026, 11, 1, 10, 30, tzinfo=bot.TZ)
+        item = {
+            "id": "legacy-image-missing", "kind": "morning_greeting",
+            "status": "needs_image", "headline": "☀️ Доброе утро!",
+            "body": "Желаем хорошего дня.",
+            "planned_at": (current - timedelta(minutes=1)).isoformat()
+        }
+        state = {
+            "pending_news_review": item, "review_queue": [], "daily_counts": {},
+            "published_news": [], "paused": False, "pause_until": ""
+        }
+        with patch.object(bot, "AUTO_PUBLISH_DIRECT", True), \
+             patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "is_paused", return_value=False), \
+             patch.object(bot, "publish_review_item", return_value={"message_id": 123}) as publish_mock:
+            bot.process_news_review(state)
+        publish_mock.assert_called_once_with(state, item)
+
+
+    def test_direct_mode_skips_expired_greeting_instead_of_publishing_it_late(self):
+        current = datetime(2026, 11, 1, 10, 30, tzinfo=bot.TZ)
+        item = {
+            "id": "old-morning-post", "kind": "morning_greeting",
+            "status": "needs_image", "slot_key": "review_morning",
+            "headline": "☀️ Доброе утро!", "body": "Желаем хорошего дня.",
+            "planned_at": (current - timedelta(hours=2)).isoformat()
+        }
+        state = {"pending_news_review": item, "review_queue": [], "paused": False, "pause_until": ""}
+        with patch.object(bot, "AUTO_PUBLISH_DIRECT", True), \
+             patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "is_paused", return_value=False), \
+             patch.object(bot, "publish_review_item") as publish_mock:
+            bot.process_news_review(state)
+        self.assertEqual(item["status"], "expired")
+        self.assertEqual(state["pending_news_review"], {})
+        publish_mock.assert_not_called()
+
+    def test_original_fallback_illustration_is_a_valid_png(self):
+        image = bot.fallback_editorial_png("Nha Trang Vietnam night city lights")
+        self.assertTrue(image.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertEqual(int.from_bytes(image[16:20], "big"), 800)
+        self.assertEqual(int.from_bytes(image[20:24], "big"), 450)
+
+    def test_post_with_image_uses_original_illustration_when_photo_search_is_unavailable(self):
+        with patch.object(bot, "commons_image_candidates", return_value=[]), \
+             patch.object(bot, "api_multipart", return_value={"message_id": 456}) as upload:
+            result = bot.post_with_image(
+                "<b>Погода в Нячанге</b>\\n\\nСегодня переменная облачность.",
+                image_query="Nha Trang Vietnam sunny morning coast"
+            )
+        self.assertEqual(result["message_id"], 456)
+        upload.assert_called_once()
+        self.assertEqual(upload.call_args.args[0], "sendPhoto")
+        fallback_bytes = upload.call_args.args[2]["photo"][1]
+        self.assertTrue(fallback_bytes.startswith(b"\x89PNG\r\n\x1a\n"))
+
 
 if __name__ == "__main__":
     unittest.main()

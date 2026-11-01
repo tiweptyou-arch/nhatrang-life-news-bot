@@ -1005,7 +1005,7 @@ def promote_next_review_item(s):
         item = queue.pop(0)
         planned = parse_dt_strict(item.get('planned_at'))
         minimum = now() + timedelta(minutes=5)
-        if not planned or planned < minimum:
+        if not planned:
             item['planned_at'] = iso(minimum)
         item['status'] = 'scheduled'
         item['schedule_backend'] = 'supabase'
@@ -1350,6 +1350,14 @@ def process_news_review(s):
     scheduled_slots = {'review_morning', 'weather_morning', 'weather_evening', 'review_night'}
     tolerance = timedelta(seconds=60) if item.get('slot_key') in scheduled_slots else timedelta(0)
     if now() + tolerance < planned:
+        return
+
+    # Do not publish an old greeting or yesterday's night game after its useful window.
+    if item.get('slot_key') in {'review_morning', 'review_night'} and now() > planned + timedelta(minutes=75):
+        item['status'] = 'expired'
+        s['pending_news_review'] = {}
+        print('Expired out-of-window engagement post; skipped:', item.get('id'), item.get('slot_key'))
+        promote_next_review_item(s)
         return
 
     kind = str(item.get('kind') or '')
@@ -3815,7 +3823,7 @@ def weather_post(s, period):
             'reaction_line':'','image_query':image,'urgent':False,'forecast_date':target_date.isoformat(),
             'forecast_retrieved_at':data.get('retrieved_at'),'forecast_provider':data.get('provider'),
             'forecast_latitude':12.2388,'forecast_longitude':109.1967,'idempotency_key':key+':'+target_date.isoformat()
-        },planned_at=target if n<target else n+timedelta(minutes=15),slot_key=key)
+        },planned_at=target if n<target else n+timedelta(minutes=5),slot_key=key)
         if queued: mark_slot(s,key)
     except Exception as exc:
         d=s.setdefault('diagnostics',{}); d['last_weather_error_at']=iso(n);d['last_weather_error']=type(exc).__name__

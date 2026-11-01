@@ -1702,6 +1702,20 @@ class NewsQualityTests(unittest.TestCase):
         self.assertEqual(int.from_bytes(image[16:20], "big"), 800)
         self.assertEqual(int.from_bytes(image[20:24], "big"), 450)
 
+    def test_long_commons_attribution_is_never_removed_to_fit_photo_caption(self):
+        post = "<b>Заголовок</b>\\n\\n" + ("Содержательная информация. " * 32)
+        candidate = {
+            "url": "https://upload.wikimedia.org/example.jpg",
+            "credit_html": "📷 Иллюстрация: Wikimedia Commons · автор: " + ("Автор " * 30) + " · лицензия: CC BY-SA 4.0"
+        }
+        with patch.object(bot, "commons_image_candidates", return_value=[candidate]), \
+             patch.object(bot, "send_photo_url_or_upload") as photo_mock, \
+             patch.object(bot, "api_multipart", return_value={"message_id": 789}) as fallback_mock:
+            result = bot.post_with_image(post, image_query="Nha Trang")
+        self.assertEqual(result["message_id"], 789)
+        photo_mock.assert_not_called()
+        fallback_mock.assert_called_once()
+
     def test_post_with_image_uses_original_illustration_when_photo_search_is_unavailable(self):
         with patch.object(bot, "commons_image_candidates", return_value=[]), \
              patch.object(bot, "api_multipart", return_value={"message_id": 456}) as upload:

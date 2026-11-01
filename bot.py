@@ -3823,7 +3823,7 @@ def weather_post(s, period):
             'reaction_line':'','image_query':image,'urgent':False,'forecast_date':target_date.isoformat(),
             'forecast_retrieved_at':data.get('retrieved_at'),'forecast_provider':data.get('provider'),
             'forecast_latitude':12.2388,'forecast_longitude':109.1967,'idempotency_key':key+':'+target_date.isoformat()
-        },planned_at=target if n<target else n+timedelta(minutes=5),slot_key=key)
+        },planned_at=target if n<target else n+timedelta(minutes=15),slot_key=key)
         if queued: mark_slot(s,key)
     except Exception as exc:
         d=s.setdefault('diagnostics',{}); d['last_weather_error_at']=iso(n);d['last_weather_error']=type(exc).__name__

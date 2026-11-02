@@ -617,27 +617,25 @@ class NewsQualityTests(unittest.TestCase):
         self.assertEqual(state["pending_news_review"], {})
         self.assertEqual(state["published_news"][0]["link"], "https://publisher.example/road-repair")
 
-    def test_review_timer_publishes_at_due_time_and_marks_routine_slot(self):
+    def test_old_daily_weather_forecasts_are_removed_instead_of_published(self):
         current = datetime(2026, 10, 26, 8, 0, tzinfo=bot.TZ)
         item = {
             "id": "rv-weather-1", "kind": "weather_morning", "status": "pending_review",
             "planned_at": (current - timedelta(seconds=1)).isoformat(),
             "slot_key": "weather_morning"
         }
-        state = {"pending_news_review": item, "paused": False, "pause_until": "", "last_slots": {}}
-
-        def fake_publish(saved_state, queued_item):
-            saved_state["pending_news_review"] = {}
-            return {"message_id": 991}
-
+        evening = {"id": "rv-weather-2", "kind": "weather_evening", "status": "pending_review"}
+        state = {
+            "pending_news_review": item, "review_queue": [evening],
+            "paused": False, "pause_until": "", "last_slots": {}
+        }
         with patch.object(bot, "now", return_value=current), \
-             patch.object(bot, "is_paused", return_value=False), \
-             patch.object(bot, "publish_review_item", side_effect=fake_publish) as publish_mock, \
-             patch.object(bot, "mark_slot") as mark_mock:
+             patch.object(bot, "publish_review_item") as publish_mock:
             bot.process_news_review(state)
-        publish_mock.assert_called_once_with(state, item)
-        mark_mock.assert_called_once_with(state, "weather_morning")
+        publish_mock.assert_not_called()
+        self.assertEqual(item["status"], "cancelled_routine_weather")
         self.assertEqual(state["pending_news_review"], {})
+        self.assertEqual(state["review_queue"], [])
 
     def test_rejected_review_is_never_queued_again_from_same_source(self):
         uid = 111111111

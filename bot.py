@@ -1490,6 +1490,17 @@ def retry_active_review_preview(s):
 def process_news_review(s):
     """Publish the due internal schedule item; private previews are bypassed in direct mode."""
     item = s.get('pending_news_review') or {}
+    # Suppress forecast slots created by older bot versions before they can surface after deploy.
+    obsolete_weather = {'weather_morning', 'weather_evening'}
+    old_queue = s.get('review_queue') or []
+    s['review_queue'] = [entry for entry in old_queue if entry.get('kind') not in obsolete_weather]
+    if item and item.get('kind') in obsolete_weather:
+        delete_review_previews(item)
+        item['status'] = 'cancelled_routine_weather'
+        s['pending_news_review'] = {}
+        s['review_editing'] = {}
+        print('Cancelled obsolete routine weather forecast:', item.get('id', ''))
+        item = {}
     if AUTO_PUBLISH_DIRECT:
         if not item:
             promote_next_review_item(s)

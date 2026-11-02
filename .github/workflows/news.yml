@@ -10,8 +10,8 @@ on:
         required: true
         type: boolean
         default: false
-      test_weather_now:
-        description: 'Publish one live weather test post now (main only)'
+      preview_weather_now:
+        description: 'Send one weather test draft privately to the editor (main only)'
         required: true
         type: boolean
         default: false
@@ -42,15 +42,17 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Install image card processing
+        run: python -m pip install Pillow
       - name: Compile Python
-        run: python -m py_compile bot.py
+        run: python -m py_compile bot.py imagegen.py
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
 
   run-bot:
     name: Scheduled production run
     needs: test
-    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.run_bot == true || inputs.test_weather_now == true) && github.ref == 'refs/heads/main') }}
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.run_bot == true || inputs.preview_weather_now == true) && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -64,12 +66,19 @@ jobs:
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      IMAGE_PROVIDER: 'openai'
+      OPENAI_IMAGE_MODEL: 'gpt-image-2.5-flare'
+      OPENAI_IMAGE_QUALITY: 'low'
       WEATHERAPI_KEY: ${{ secrets.WEATHERAPI_KEY }}
-      MAX_DAILY_POSTS: '6'
+      MAX_DAILY_POSTS: '10'
       MAX_DAILY_NEWS: '3'
       MAX_DAILY_ADS: '1'
       MAX_AI_CALLS_PER_DAY: '40'
-      # Every public item must first reach the editor as a private preview.
+      MAX_IMAGE_GENERATIONS_PER_DAY: '8'
+      MAX_IMAGE_SPEND_USD_PER_DAY: '0.25'
+      MAX_IMAGE_SPEND_USD_PER_MONTH: '7.0'
+      # The Telegram API adapter also blocks writes to every non-editor chat.
       AUTO_PUBLISH_DIRECT: 'false'
     steps:
       - name: Checkout main
@@ -84,9 +93,9 @@ jobs:
         run: python -m pip install Pillow
       - name: Compile production code
         run: python -m py_compile bot.py
-      - name: Publish one weather test post
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_weather_now == true }}
-        run: python bot.py --test-weather-now
+      - name: Prepare one private weather test draft
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.preview_weather_now == true }}
+        run: python bot.py --preview-weather-now
       - name: Run news and weather pipeline
-        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_bot == true && inputs.test_weather_now != true) }}
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_bot == true && inputs.preview_weather_now != true) }}
         run: python bot.py

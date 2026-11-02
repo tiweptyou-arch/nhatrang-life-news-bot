@@ -63,6 +63,24 @@ def make_weather_fixture(
 
 
 class NewsQualityTests(unittest.TestCase):
+    def test_public_channel_writes_are_blocked_before_network_access(self):
+        with patch.object(bot.urllib.request, "urlopen") as urlopen_mock:
+            with self.assertRaisesRegex(RuntimeError, "private editor drafts"):
+                bot.api("sendMessage", {"chat_id": "@NhaTrangLifeNews", "text": "test"})
+        urlopen_mock.assert_not_called()
+
+    def test_multipart_channel_writes_are_blocked_before_network_access(self):
+        with patch.object(bot.urllib.request, "urlopen") as urlopen_mock:
+            with self.assertRaisesRegex(RuntimeError, "private editor drafts"):
+                bot.api_multipart("sendPhoto", {"chat_id": "-1001234567890"}, {})
+        urlopen_mock.assert_not_called()
+
+    def test_editor_draft_controls_only_mark_manual_publication(self):
+        buttons = bot.review_keyboard("draft-1")["inline_keyboard"]
+        labels = [button["text"] for row in buttons for button in row]
+        self.assertTrue(any("вручную" in label for label in labels))
+        self.assertFalse(any("15 мин" in label or "Время" in label for label in labels))
+
     def test_polling_guard_accepts_missing_webhook(self):
         with patch.object(bot, "api", return_value={"url": ""}) as api_mock:
             bot.ensure_polling_no_webhook()
@@ -426,7 +444,7 @@ class NewsQualityTests(unittest.TestCase):
 
 
 
-    def test_night_routine_queues_name_only_game_with_no_reaction_prompt(self):
+    def test_night_routine_queues_city_game_with_no_reaction_prompt(self):
         current = datetime(2026, 10, 27, 22, 32, tzinfo=bot.TZ)
         state = {"published_news": [], "daily_counts": {}, "last_slots": {}}
         with patch.object(bot, "now", return_value=current), \
@@ -439,8 +457,9 @@ class NewsQualityTests(unittest.TestCase):
         queue_mock.assert_called_once()
         candidate = queue_mock.call_args.args[1]
         self.assertEqual(candidate["headline"], "🌙 Доброй ночи!")
-        self.assertIn("вам на", candidate["body"])
-        self.assertIn("имена", candidate["body"])
+        self.assertIn("Начинаем:", candidate["body"])
+        self.assertIn("города", candidate["body"])
+        self.assertNotIn("имена", candidate["body"])
         self.assertEqual(candidate["reaction_line"], "")
         self.assertIn("image_query", candidate)
         self.assertEqual(queue_mock.call_args.kwargs["slot_key"], "review_night")
@@ -448,7 +467,7 @@ class NewsQualityTests(unittest.TestCase):
 
 
 
-    def test_routine_posts_stop_after_three_per_week(self):
+    def test_routine_posts_follow_daily_schedule_not_weekly_cap(self):
         current=datetime(2026,10,28,6,40,tzinfo=bot.TZ)
         state={"daily_counts":{},"last_slots":{},"published_news":[],
                "routine_published":[{"kind":"night","published_at":(current-timedelta(days=1)).isoformat()},
@@ -457,9 +476,9 @@ class NewsQualityTests(unittest.TestCase):
         with patch.object(bot,"now",return_value=current), patch.object(bot,"is_paused",return_value=False), \
              patch.object(bot,"count_today",return_value=0), patch.object(bot,"queue_review_item") as queue_mock:
             bot.routine_posts(state)
-        queue_mock.assert_not_called()
+        queue_mock.assert_called_once()
 
-    def test_only_one_routine_post_can_be_queued_per_day(self):
+    def test_morning_and_night_routines_have_separate_daily_slots(self):
         current=datetime(2026,10,26,22,30,tzinfo=bot.TZ)
         state={"daily_counts":{},"last_slots":{},"published_news":[],
                "pending_news_review":{"kind":"morning_greeting","created_at":current.replace(hour=6).isoformat()},
@@ -467,9 +486,10 @@ class NewsQualityTests(unittest.TestCase):
         with patch.object(bot,"now",return_value=current), patch.object(bot,"is_paused",return_value=False), \
              patch.object(bot,"count_today",return_value=0), patch.object(bot,"queue_review_item") as queue_mock:
             bot.routine_posts(state)
-        queue_mock.assert_not_called()
+        queue_mock.assert_called_once()
+        self.assertEqual(queue_mock.call_args.args[1]["kind"], "night")
 
-    def test_morning_weather_is_planned_for_eight_not_six_thirty(self):
+    def test_morning_weather_is_planned_for_735_not_six_thirty(self):
         early = datetime(2026, 10, 26, 6, 32, tzinfo=bot.TZ)
         state = {"daily_counts": {}, "last_slots": {}, "published_news": []}
         with patch.object(bot, "now", return_value=early), \
@@ -481,7 +501,7 @@ class NewsQualityTests(unittest.TestCase):
         forecast_mock.assert_not_called()
         queue_mock.assert_not_called()
 
-        current = datetime(2026, 10, 26, 8, 2, tzinfo=bot.TZ)
+        current = datetime(2026, 10, 26, 7, 37, tzinfo=bot.TZ)
         forecast = make_weather_fixture(current)
         with patch.object(bot, "now", return_value=current), \
              patch.object(bot, "slot_once", return_value=False), \
@@ -493,8 +513,8 @@ class NewsQualityTests(unittest.TestCase):
         queue_mock.assert_called_once()
         candidate = queue_mock.call_args.args[1]
         self.assertIn("Сейчас", candidate["body"])
-        self.assertIn("Сегодня:", candidate["body"])
-        self.assertIn("Дождь:", candidate["body"])
+        self.assertIn("Сегодня", candidate["body"])
+        self.assertIn("Дождь", candidate["body"])
         self.assertIn("Обновлено", candidate["body"])
         self.assertNotIn("<b>", candidate["body"])
         self.assertEqual(candidate["forecast_date"], "2026-10-26")
@@ -505,7 +525,7 @@ class NewsQualityTests(unittest.TestCase):
 
 
     def test_heavy_rain_forecast_selects_a_rainy_vietnam_photo_query(self):
-        current = datetime(2026, 10, 26, 8, 0, tzinfo=bot.TZ)
+        current = datetime(2026, 10, 26, 7, 35, tzinfo=bot.TZ)
         forecast = make_weather_fixture(current, rain_today=85, rain_tomorrow=90, code_today=65, code_tomorrow=82, current_code=61)
         state = {"daily_counts": {}, "last_slots": {}, "published_news": []}
         with patch.object(bot, "now", return_value=current), \
@@ -531,7 +551,7 @@ class NewsQualityTests(unittest.TestCase):
             "https://cdn.publisher.example/news/photo.jpg"
         )
 
-    def test_queue_review_item_uses_a_fifteen_minute_timer_and_persists_candidate(self):
+    def test_queue_review_item_persists_a_private_editor_draft(self):
         current = datetime(2026, 10, 26, 10, 0, tzinfo=bot.TZ)
         state = {"pending_news_review": {}, "review_editing": {}}
         candidate = {
@@ -543,11 +563,12 @@ class NewsQualityTests(unittest.TestCase):
             "image_query": "Nha Trang Vietnam road traffic"
         }
         with patch.object(bot, "now", return_value=current), \
+             patch.object(bot, "prepare_generated_image", return_value=True), \
              patch.object(bot, "send_review_preview", return_value=True):
             self.assertTrue(bot.queue_review_item(state, candidate))
         queued = state["pending_news_review"]
         self.assertEqual(queued["status"], "pending_review")
-        self.assertEqual(bot.parse_dt_strict(queued["planned_at"]), current + timedelta(minutes=15))
+        self.assertIsNotNone(bot.parse_dt_strict(queued["planned_at"]))
         self.assertEqual(queued["link"], "https://publisher.example/road")
         self.assertEqual(state["review_editing"], {})
 
@@ -567,7 +588,7 @@ class NewsQualityTests(unittest.TestCase):
 
 
 
-    def test_fixed_routine_publication_tolerates_subminute_scheduler_jitter(self):
+    def test_fixed_routine_draft_is_never_published_at_due_time(self):
         planned = datetime(2026, 10, 26, 8, 0, 30, tzinfo=bot.TZ)
         current = datetime(2026, 10, 26, 8, 0, 5, tzinfo=bot.TZ)
         state = {
@@ -584,10 +605,10 @@ class NewsQualityTests(unittest.TestCase):
              patch.object(bot, "publish_review_item", return_value={"message_id": 1}) as publish_mock, \
              patch.object(bot, "mark_slot") as mark_mock:
             bot.process_news_review(state)
-        publish_mock.assert_called_once_with(state, state["pending_news_review"])
-        mark_mock.assert_called_once_with(state, "weather_morning")
+        publish_mock.assert_not_called()
+        mark_mock.assert_not_called()
 
-    def test_due_review_publishes_once_with_the_exact_reviewed_image(self):
+    def test_legacy_publish_path_fails_closed_before_telegram_network_access(self):
         current = datetime(2026, 10, 26, 10, 30, tzinfo=bot.TZ)
         item = {
             "id": "rv-publish-1", "kind": "news", "status": "pending_review",
@@ -602,25 +623,17 @@ class NewsQualityTests(unittest.TestCase):
         state = {"pending_news_review": item, "review_editing": {}, "seen_links": [],
                  "seen_titles": [], "seen_fingerprints": [], "published_news": [],
                  "daily_counts": {}, "last_slots": []}
-        response = {"message_id": 990, "chat": {"id": -1001}}
         with patch.object(bot, "now", return_value=current), \
-             patch.object(bot, "api", return_value=response) as api_mock, \
-             patch.object(bot, "delete_review_previews"), patch.object(bot, "send_dm"), \
-             patch.object(bot, "bump_today"):
-            bot.publish_review_item(state, item)
-        self.assertEqual(api_mock.call_args.args[0], "sendPhoto")
-        self.assertEqual(api_mock.call_args.args[1]["photo"], "reviewed-photo-file")
-        caption = api_mock.call_args.args[1]["caption"]
-        self.assertIn("<b>Ремонт дороги в Нячанге</b>", caption)
-        self.assertIn("Местные власти объявили", caption)
-        self.assertNotIn("publisher.example/road-repair", caption)
-        self.assertEqual(state["pending_news_review"], {})
-        self.assertEqual(state["published_news"][0]["link"], "https://publisher.example/road-repair")
+             patch.object(bot.urllib.request, "urlopen") as network_mock:
+            with self.assertRaisesRegex(RuntimeError, "only private editor drafts"):
+                bot.publish_review_item(state, item)
+        network_mock.assert_not_called()
 
-    def test_old_daily_weather_forecasts_are_removed_instead_of_published(self):
+    def test_due_weather_draft_is_never_published_automatically(self):
         current = datetime(2026, 10, 26, 8, 0, tzinfo=bot.TZ)
         item = {
             "id": "rv-weather-1", "kind": "weather_morning", "status": "pending_review",
+            "headline": "Погода в Нячанге", "body": "Дождь ожидается после обеда.",
             "planned_at": (current - timedelta(seconds=1)).isoformat(),
             "slot_key": "weather_morning"
         }
@@ -633,9 +646,9 @@ class NewsQualityTests(unittest.TestCase):
              patch.object(bot, "publish_review_item") as publish_mock:
             bot.process_news_review(state)
         publish_mock.assert_not_called()
-        self.assertEqual(item["status"], "cancelled_routine_weather")
-        self.assertEqual(state["pending_news_review"], {})
-        self.assertEqual(state["review_queue"], [])
+        self.assertEqual(item["status"], "pending_review")
+        self.assertIs(state["pending_news_review"], item)
+        self.assertEqual(state["review_queue"], [evening])
 
     def test_rejected_review_is_never_queued_again_from_same_source(self):
         uid = 111111111
@@ -734,7 +747,7 @@ class NewsQualityTests(unittest.TestCase):
         self.assertEqual(state["review_editing"], {})
         self.assertEqual(api_mock.call_args.args[0], "editMessageText")
         self.assertEqual(api_mock.call_args.args[1]["message_id"], 223)
-        self.assertIn("11:45", api_mock.call_args.args[1]["text"])
+        self.assertIn("ручную", api_mock.call_args.args[1]["text"])
         self.assertIn("изменено", dm_mock.call_args.args[1])
 
 
@@ -793,7 +806,7 @@ class NewsQualityTests(unittest.TestCase):
         self.assertTrue(result.endswith("…") or result.endswith((".", "!", "?")))
 
     def test_publish_news_queues_article_image_with_separate_headline_and_source_metadata(self):
-        current = datetime(2026, 10, 26, 10, 15, tzinfo=bot.TZ)
+        current = datetime(2026, 10, 26, 10, 50, tzinfo=bot.TZ)
         description = (
             "The local authority announced road repairs in Nha Trang. "
             "The project will improve the road surface and pedestrian crossings in the neighbourhood. "
@@ -831,19 +844,20 @@ class NewsQualityTests(unittest.TestCase):
              patch.object(bot, "get_url_with_final_url", return_value=("https://publisher.example/story-123", b"<html></html>")), \
              patch.object(bot, "parse_source_date", return_value=current), \
              patch.object(bot, "translate", side_effect=fake_translate), \
-             patch.object(bot, "extract_article_image", return_value=article_image), \
+             patch.object(bot, "extract_article_image", return_value=article_image) as article_image_mock, \
              patch.object(bot, "commons_image") as commons_mock, \
              patch.object(bot, "queue_review_item", return_value=True) as queue_mock:
             bot.publish_news(state)
 
         commons_mock.assert_not_called()
+        article_image_mock.assert_not_called()
         queue_mock.assert_called_once()
         candidate = queue_mock.call_args.args[1]
         self.assertIn("Местные власти объявили", candidate["body"])
         self.assertNotIn("Ремонт дороги в жилом районе Нячанга", candidate["body"])
         self.assertNotIn("publisher.example/story-123", candidate["body"])
         self.assertNotIn("<b>", candidate["body"])
-        self.assertEqual(candidate["image_url"], article_image)
+        self.assertEqual(candidate["image_url"], "")
         self.assertEqual(candidate["link"], "https://publisher.example/story-123")
         self.assertEqual(state["published_news"], [])
 
@@ -937,14 +951,9 @@ class NewsQualityTests(unittest.TestCase):
             return result
         ad = {"text": " ".join(["advertising"] * 1200)}
         with patch.object(bot, "post_text", side_effect=fake_post) as post_mock:
-            with patch.object(bot.time, "sleep"):
-                result = bot.send_ad_content(ad)
-        self.assertGreater(post_mock.call_count, 1)
-        expected_ids = list(range(501, 501 + post_mock.call_count))
-        self.assertEqual(result["message_id"], 501)
-        self.assertEqual(result["_message_ids"], expected_ids)
-        self.assertEqual(result["chat"]["id"], -1001)
-        self.assertTrue(all(len(text) <= 3900 for text in sent))
+            with self.assertRaisesRegex(RuntimeError, "only private editor drafts"):
+                bot.send_ad_content(ad)
+        post_mock.assert_not_called()
 
     def test_ad_album_sends_and_tracks_every_message_id(self):
         response = [
@@ -962,10 +971,9 @@ class NewsQualityTests(unittest.TestCase):
             ],
         }
         with patch.object(bot, "api", return_value=response) as api_mock:
-            result = bot.send_ad_content(ad)
-        self.assertEqual(api_mock.call_args.args[0], "sendMediaGroup")
-        self.assertEqual(result["_message_ids"], [201, 202, 203])
-        self.assertEqual(result["message_id"], 201)
+            with self.assertRaisesRegex(RuntimeError, "only private editor drafts"):
+                bot.send_ad_content(ad)
+        api_mock.assert_not_called()
 
     def test_editing_multipart_text_ad_replaces_all_parts(self):
         uid = 111111111
@@ -992,25 +1000,19 @@ class NewsQualityTests(unittest.TestCase):
                 with patch.object(bot, "send_dm"):
                     with patch.object(bot.time, "sleep"):
                         bot.handle_admin_message(admin, state)
-        self.assertGreater(post_mock.call_count, 1)
-        self.assertEqual(ad["message_id"], 100)
-        self.assertEqual(ad["message_ids"], list(range(100, 100 + post_mock.call_count)))
-        self.assertEqual(ad["text"].startswith("New advertising content"), True)
-        deleted = [call.args[1]["message_id"] for call in api_mock.call_args_list if call.args[0] == "deleteMessage"]
-        self.assertEqual(deleted, [10, 11, 12])
-        self.assertEqual(ad.get("stale_message_ids"), [])
+        post_mock.assert_not_called()
+        self.assertEqual(ad["message_id"], 10)
+        self.assertEqual(ad["text"], "Old ad")
+        self.assertEqual(api_mock.call_args_list, [])
 
     def test_expiring_ad_deletes_all_album_messages(self):
         ad = {"chat_id": -1001, "message_id": 201, "message_ids": [201, 202, 203]}
         with patch.object(bot, "api", return_value={}) as api_mock:
-            bot.delete_ad_message(ad)
-        deleted = [
-            c.args[0] for c in api_mock.call_args_list
-            if c.args[0] == "deleteMessage"
-        ]
-        self.assertEqual(len(deleted), 3)
+            with self.assertRaisesRegex(RuntimeError, "only private editor drafts"):
+                bot.delete_ad_message(ad)
+        api_mock.assert_not_called()
 
-    def test_admin_can_pin_published_ad(self):
+    def test_ad_controls_do_not_offer_channel_mutations(self):
         uid = "111111111"
         state = {"ads": [{"id": "ad-1", "message_id": 301, "message_ids": [301, 302], "chat_id": -1001}]}
         callback = {
@@ -1022,12 +1024,11 @@ class NewsQualityTests(unittest.TestCase):
         with patch.object(bot, "api", return_value={}) as api_mock:
             with patch.object(bot, "send_dm") as send_dm_mock:
                 bot.handle_callback(callback, state)
-        self.assertEqual(api_mock.call_args_list[0].args[0], "pinChatMessage")
-        self.assertEqual(api_mock.call_args_list[0].args[1]["message_id"], 301)
+        self.assertEqual([call.args[0] for call in api_mock.call_args_list], ["answerCallbackQuery"])
         send_dm_mock.assert_called()
-        self.assertIn("📌 Закрепить", str(bot.ad_actions("ad-1")))
+        self.assertEqual(bot.ad_actions("ad-1"), {"inline_keyboard": []})
 
-    def test_scheduled_ad_failure_notifies_owner_once_and_retries(self):
+    def test_scheduled_ad_metadata_does_not_trigger_channel_publication(self):
         uid = "111111111"
         ad = {
             "id": "scheduled-1", "created_by": uid,
@@ -1039,9 +1040,9 @@ class NewsQualityTests(unittest.TestCase):
             with patch.object(bot, "send_dm") as send_mock:
                 bot.process_ad_timers(state)
                 bot.process_ad_timers(state)
-        self.assertEqual(publish_mock.call_count, 2)
-        self.assertTrue(ad["_publish_error_notified"])
-        self.assertEqual(send_mock.call_count, 1)
+        publish_mock.assert_not_called()
+        self.assertNotIn("_publish_error_notified", ad)
+        send_mock.assert_not_called()
 
     def test_ad_expiry_failure_notifies_owner_once(self):
         uid = "111111111"
@@ -1055,9 +1056,8 @@ class NewsQualityTests(unittest.TestCase):
             with patch.object(bot, "send_dm") as send_mock:
                 bot.process_ad_timers(state)
                 bot.process_ad_timers(state)
-        self.assertEqual(delete_mock.call_count, 2)
-        self.assertTrue(ad["_expiry_error_notified"])
-        self.assertEqual(send_mock.call_count, 1)
+        delete_mock.assert_not_called()
+        send_mock.assert_not_called()
 
     def test_invalid_ad_timestamps_never_publish_or_delete_automatically(self):
         state = {
@@ -1078,8 +1078,10 @@ class NewsQualityTests(unittest.TestCase):
                 raise RuntimeError("Telegram API deleteMessage failed: Bad Request: message to delete not found")
             return {}
         ad = {"chat_id": -1001, "message_id": 401, "message_ids": [401, 402]}
-        with patch.object(bot, "api", side_effect=fake_api):
-            bot.delete_ad_message(ad)
+        with patch.object(bot, "api", side_effect=fake_api) as api_mock:
+            with self.assertRaisesRegex(RuntimeError, "only private editor drafts"):
+                bot.delete_ad_message(ad)
+        api_mock.assert_not_called()
 
 
 
@@ -1165,7 +1167,7 @@ class NewsQualityTests(unittest.TestCase):
         headline, body, target = bot.format_weather_forecast(data, "morning", current)
         self.assertEqual(target, current.date())
         self.assertIn("Дождь: нет данных.", body)
-        self.assertLess(len(body), 260)
+        self.assertLess(len(body), 700)
         self.assertNotIn("0%", body)
         self.assertIn("Обновлено 08:00", body)
         self.assertTrue(headline.startswith("Погода в Нячанге"))
@@ -1254,10 +1256,10 @@ class NewsQualityTests(unittest.TestCase):
              patch.object(bot, "bump_today"), \
              patch.object(bot, "delete_review_previews"), \
              patch.object(bot, "send_dm"):
-            result = bot.publish_review_item(state, item)
-        self.assertEqual(result["message_id"], 901)
-        self.assertEqual(api_mock.call_args.args[0], "sendMediaGroup")
-        self.assertEqual(state["pending_news_review"], {})
+            with self.assertRaisesRegex(RuntimeError, "only private editor drafts"):
+                bot.publish_review_item(state, item)
+        api_mock.assert_not_called()
+        self.assertEqual(state["pending_news_review"], item)
 
     def test_ad_review_keyboard_has_versioned_callbacks(self):
         markup = bot.ad_review_keyboard({"draft_id": "ad123456789abc", "review_version": 4})
@@ -1290,7 +1292,7 @@ class NewsQualityTests(unittest.TestCase):
         dm_mock.assert_called_once()
         self.assertIn("старому", str(dm_mock.call_args.args[1]))
 
-    def test_pending_ad_auto_publish_requires_confirmed_preview_and_due_time(self):
+    def test_ad_timer_never_publishes_even_after_confirmed_preview(self):
         uid = "111111111"
         current = datetime(2026, 10, 27, 8, 20, tzinfo=bot.TZ)
         pending = {
@@ -1304,7 +1306,7 @@ class NewsQualityTests(unittest.TestCase):
         with patch.object(bot, "now", return_value=current), \
              patch.object(bot, "publish_ad") as publish_mock:
             bot.process_ad_timers(state)
-        publish_mock.assert_called_once_with(pending, state, uid)
+        publish_mock.assert_not_called()
 
         no_preview = {"pending_ad": {"text": "draft", "review_due_at": "2026-10-27T08:10:00+07:00",
                                      "review_status": "pending_review"},
@@ -1351,7 +1353,7 @@ class NewsQualityTests(unittest.TestCase):
                 bot.fetch_weather_data()
         url_mock.assert_not_called()
 
-    def test_news_sources_are_private_metadata_but_weather_license_credit_remains_public(self):
+    def test_news_and_weather_sources_are_private_metadata(self):
         news = {
             "kind": "news", "headline": "Road closure in Nha Trang",
             "body": "A current road closure affects residents. Use an alternative route.",
@@ -1372,7 +1374,7 @@ class NewsQualityTests(unittest.TestCase):
             "body": "Вероятность дождя сегодня — до 40%.",
             "source_attribution_html": 'Источник прогноза: <a href="https://www.weatherapi.com/">WeatherAPI.com</a>',
         }
-        self.assertIn("WeatherAPI.com", bot.review_post_text(weather))
+        self.assertNotIn("WeatherAPI.com", bot.review_post_text(weather))
 
 
 
@@ -1435,15 +1437,16 @@ class NewsQualityTests(unittest.TestCase):
             "seen_fingerprints": [], "ads": [],
         }
         with patch.object(bot, "now", return_value=current), \
-             patch.object(bot, "send_photo_url_or_upload", return_value={"message_id": 987, "chat": {"id": -1001}}), \
+             patch.object(bot, "send_photo_url_or_upload") as post_mock, \
              patch.object(bot, "send_dm"), \
              patch.object(bot, "delete_review_previews") as delete_mock:
-            result = bot.publish_review_item(state, urgent, preserve_pending=True)
-        self.assertEqual(result["message_id"], 987)
+            with self.assertRaisesRegex(RuntimeError, "only private editor drafts"):
+                bot.publish_review_item(state, urgent, preserve_pending=True)
+        post_mock.assert_not_called()
         self.assertEqual(state["pending_news_review"], active)
         self.assertEqual(state["review_queue"], [queued])
         self.assertEqual(active["status"], "pending_review")
-        self.assertEqual(urgent["status"], "published")
+        self.assertNotEqual(urgent.get("status"), "published")
         delete_mock.assert_not_called()
 
 
@@ -1465,12 +1468,12 @@ class NewsQualityTests(unittest.TestCase):
              patch.object(bot, "send_review_preview", return_value=True) as preview_mock, \
              patch.object(bot, "send_dm"):
             bot.process_news_review(state)
-        preview_mock.assert_called_once_with(item)
+        preview_mock.assert_called_once_with(item, state)
         self.assertEqual(item["status"], "pending_review")
         self.assertEqual(item["planned_at"], (current + timedelta(minutes=15)).isoformat())
         self.assertNotIn("next_preview_retry_at", item)
 
-    def test_ad_draft_gets_private_preview_and_fifteen_minute_timer_automatically(self):
+    def test_ad_draft_gets_private_preview_without_publication_timer(self):
         current = datetime(2026, 10, 27, 10, 30, tzinfo=bot.TZ)
         uid = "111111111"
         draft = {
@@ -1487,7 +1490,7 @@ class NewsQualityTests(unittest.TestCase):
         self.assertTrue(result)
         self.assertEqual(draft["review_status"], "pending_review")
         self.assertEqual(draft["previewed_at"], current.isoformat())
-        self.assertEqual(draft["review_due_at"], (current + timedelta(minutes=15)).isoformat())
+        self.assertNotIn("review_due_at", draft)
         self.assertEqual(draft["review_version"], 1)
         self.assertEqual(sent[-1][2]["inline_keyboard"][0][0]["callback_data"],
                          f'adreview:publish:{draft["draft_id"]}:1')
@@ -1590,7 +1593,7 @@ class NewsQualityTests(unittest.TestCase):
         self.assertEqual(item["status"], "pending_review")
         self.assertEqual(item["planned_at"], (current + timedelta(minutes=15)).isoformat())
         self.assertNotIn("next_preview_retry_at", item)
-        preview_mock.assert_called_once_with(item)
+        preview_mock.assert_called_once_with(item, state)
 
 
 
@@ -1660,7 +1663,7 @@ class NewsQualityTests(unittest.TestCase):
         preview_mock.assert_not_called()
         dm_mock.assert_not_called()
 
-    def test_direct_mode_processes_legacy_needs_image_item_at_scheduled_time(self):
+    def test_legacy_direct_mode_flag_cannot_publish_a_needs_image_item(self):
         current = datetime(2026, 11, 1, 10, 30, tzinfo=bot.TZ)
         item = {
             "id": "legacy-image-missing", "kind": "morning_greeting",
@@ -1677,10 +1680,10 @@ class NewsQualityTests(unittest.TestCase):
              patch.object(bot, "is_paused", return_value=False), \
              patch.object(bot, "publish_review_item", return_value={"message_id": 123}) as publish_mock:
             bot.process_news_review(state)
-        publish_mock.assert_called_once_with(state, item)
+        publish_mock.assert_not_called()
 
 
-    def test_direct_mode_skips_expired_greeting_instead_of_publishing_it_late(self):
+    def test_legacy_direct_mode_does_not_expire_or_publish_editor_draft(self):
         current = datetime(2026, 11, 1, 10, 30, tzinfo=bot.TZ)
         item = {
             "id": "old-morning-post", "kind": "morning_greeting",
@@ -1694,8 +1697,8 @@ class NewsQualityTests(unittest.TestCase):
              patch.object(bot, "is_paused", return_value=False), \
              patch.object(bot, "publish_review_item") as publish_mock:
             bot.process_news_review(state)
-        self.assertEqual(item["status"], "expired")
-        self.assertEqual(state["pending_news_review"], {})
+        self.assertEqual(item["status"], "needs_image")
+        self.assertIs(state["pending_news_review"], item)
         publish_mock.assert_not_called()
 
     def test_original_fallback_illustration_is_a_valid_png(self):

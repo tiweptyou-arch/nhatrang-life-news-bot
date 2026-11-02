@@ -1,9 +1,10 @@
-import os, re, json, html, time, hashlib, math, struct, zlib, urllib.request, urllib.parse, sys
+import os, re, json, html, time, hashlib, math, struct, zlib, urllib.request, urllib.parse, sys, base64
 from io import BytesIO
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
 from zoneinfo import ZoneInfo
+import imagegen
 
 TOKEN = os.environ['TELEGRAM_BOT_TOKEN']
 CHANNEL = os.environ.get('TELEGRAM_CHAT_ID', '@NhaTrangLifeNews')
@@ -13,7 +14,7 @@ ADMIN_USER_IDS = {x.strip() for x in os.environ.get('ADMIN_USER_IDS', '').split(
 if ADMIN_USER_ID: ADMIN_USER_IDS.add(ADMIN_USER_ID)
 TZ = ZoneInfo('Asia/Ho_Chi_Minh')
 STATE_FILE = os.environ.get('BOT_STATE_FILE', 'bot_state.json')
-MAX_DAILY_POSTS = int(os.environ.get('MAX_DAILY_POSTS', '6'))
+MAX_DAILY_POSTS = int(os.environ.get('MAX_DAILY_POSTS', '10'))
 MAX_DAILY_NEWS = int(os.environ.get('MAX_DAILY_NEWS', '3'))
 MAX_DAILY_ADS = int(os.environ.get('MAX_DAILY_ADS', '1'))
 # Retained only so old configuration cannot enable an unreviewed publication path.
@@ -21,6 +22,9 @@ AUTO_PUBLISH_DIRECT = False
 MAX_AI_CALLS_PER_DAY = int(os.environ.get('MAX_AI_CALLS_PER_DAY', '40'))
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '').strip()
 GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-3.8-flash').strip()
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '').strip()
+MAX_IMAGE_GENERATIONS_PER_DAY = int(os.environ.get('MAX_IMAGE_GENERATIONS_PER_DAY', '8'))
+MAX_IMAGE_SPEND_USD_PER_DAY = float(os.environ.get('MAX_IMAGE_SPEND_USD_PER_DAY', '0.25'))
 WEATHERAPI_KEY = os.environ.get('WEATHERAPI_KEY', '').strip()
 SUPABASE_URL = os.environ.get('SUPABASE_URL', '').strip().rstrip('/')
 SUPABASE_SERVICE_ROLE_KEY = (os.environ.get('SUPABASE_SECRET_KEY', '').strip() or os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '').strip())
@@ -170,8 +174,28 @@ def get_url_with_final_url(url):
         return response.geturl(), response.read()
 
 
+def _assert_editor_private_target(method, data):
+    """Fail closed: Telegram writes are allowed only to configured editor DMs."""
+    write_prefixes = ('send', 'editMessage', 'deleteMessage', 'unpin', 'setChat', 'deleteChat')
+    write_methods = {
+        'forwardMessage', 'forwardMessages', 'copyMessage', 'copyMessages', 'stopPoll',
+        'pinChatMessage', 'banChatMember', 'unbanChatMember', 'restrictChatMember',
+        'promoteChatMember', 'setChatPermissions', 'createForumTopic', 'editForumTopic',
+        'closeForumTopic', 'reopenForumTopic', 'deleteForumTopic', 'approveChatJoinRequest',
+        'declineChatJoinRequest'
+    }
+    if method.startswith(write_prefixes) or method in write_methods:
+        target = str((data or {}).get('chat_id', ''))
+        if not target or target not in ADMIN_USER_IDS:
+            raise RuntimeError(
+                f'Telegram {method} blocked: only private editor drafts are allowed; '
+                'publish manually from Telegram.'
+            )
+
+
 def api(method, data=None):
     """Call Telegram without putting the secret bot token in exception messages or logs."""
+    _assert_editor_private_target(method, data)
     url = f'https://api.telegram.org/bot{TOKEN}/{method}'
     body = urllib.parse.urlencode(data or {}).encode() if data is not None else None
     req = urllib.request.Request(url, data=body, headers={'User-Agent': 'Mozilla/5.0'})
@@ -188,6 +212,7 @@ def api(method, data=None):
 
 def api_multipart(method, data=None, files=None):
     """Upload binary media to Telegram; secrets and request URLs are never exposed in logs."""
+    _assert_editor_private_target(method, data)
     boundary = '----NhaTrangLife' + hashlib.sha256(str(time.time_ns()).encode()).hexdigest()[:24]
     pieces = []
     for key, value in (data or {}).items():
@@ -237,11 +262,7 @@ def main_menu():
 
 
 def ad_actions(ad_id):
-    return {'inline_keyboard': [[
-        {'text': '📌 Закрепить', 'callback_data': f'ad_pin:{ad_id}'},
-        {'text': '📍 Открепить', 'callback_data': f'ad_unpin:{ad_id}'},
-        {'text': '🗑 Удалить сейчас', 'callback_data': f'ad_delete:{ad_id}'}
-    ]]}
+    return {'inline_keyboard': []}
 
 
 def new_ad_draft_id(uid):
@@ -252,9 +273,8 @@ def ad_review_keyboard(ad):
     draft_id = str(ad.get('draft_id') or 'missing')
     version = int(ad.get('review_version', 1))
     return {'inline_keyboard': [
-        [{'text': '✅ Опубликовать сейчас', 'callback_data': f'adreview:publish:{draft_id}:{version}'}],
+        [{'text': '✅ Отметить: опубликовано вручную', 'callback_data': f'adreview:publish:{draft_id}:{version}'}],
         [{'text': '✏️ Изменить черновик', 'callback_data': f'adreview:edit:{draft_id}:{version}'}],
-        [{'text': '🕒 Ещё 15 минут', 'callback_data': f'adreview:delay15:{draft_id}:{version}'}],
         [{'text': '🗑 Отменить рекламу', 'callback_data': f'adreview:reject:{draft_id}:{version}'}]
     ]}
 
@@ -364,7 +384,7 @@ def load_state():
         'rejected_news_links': [], 'rejected_news_fingerprints': [], 'rejected_news_titles': [],
         'date_checked_links': {}, 'weather_snapshot': {}, 'weather_alert_state': {},
         'weather_image_library': {}, 'weather_image_recent': {},
-        'ai_usage_daily': {}, 'diagnostics': {}
+        'generated_image_cache': {}, 'image_usage': {}, 'ai_usage_daily': {}, 'diagnostics': {}
     }
     for key, value in defaults.items():
         s.setdefault(key, value)
@@ -378,7 +398,7 @@ def load_state():
     for key in (
         'daily_counts', 'last_slots', 'pending_ad', 'pending_manual_post', 'pending_news_review',
         'review_editing', 'date_checked_links', 'weather_snapshot', 'weather_alert_state',
-        'weather_image_library', 'weather_image_recent', 'ai_usage_daily', 'diagnostics'
+        'weather_image_library', 'weather_image_recent', 'generated_image_cache', 'image_usage', 'ai_usage_daily', 'diagnostics'
     ):
         if not isinstance(s.get(key), dict):
             raise RuntimeError(f'Поле {key} в состоянии имеет неверный формат; сохранение остановлено.')
@@ -690,21 +710,15 @@ def review_keyboard(item_id, version=1):
     """Short versioned inline controls for private draft review."""
     suffix = f':{int(version)}'
     return {'inline_keyboard': [
-        [{'text': '✅ Опубликовать сейчас', 'callback_data': f'review:publish:{item_id}{suffix}'}],
+        [{'text': '✅ Отметить: опубликовано вручную', 'callback_data': f'review:publish:{item_id}{suffix}'}],
         [
             {'text': '✏️ Заголовок', 'callback_data': f'review:headline:{item_id}{suffix}'},
             {'text': '📝 Текст', 'callback_data': f'review:body:{item_id}{suffix}'}
         ],
         [
             {'text': '🖼 Фото', 'callback_data': f'review:photo:{item_id}{suffix}'},
-            {'text': '🕒 Время', 'callback_data': f'review:time:{item_id}{suffix}'}
+            {'text': '🗑 Отклонить', 'callback_data': f'review:reject:{item_id}{suffix}'}
         ],
-        [
-            {'text': '+15 мин', 'callback_data': f'review:delay15:{item_id}{suffix}'},
-            {'text': '+30 мин', 'callback_data': f'review:delay30:{item_id}{suffix}'},
-            {'text': '+60 мин', 'callback_data': f'review:delay60:{item_id}{suffix}'}
-        ],
-        [{'text': '🗑 Отклонить', 'callback_data': f'review:reject:{item_id}{suffix}'}]
     ]}
 
 
@@ -746,23 +760,7 @@ def review_post_text(item):
     reaction = sanitize_reaction_line(item.get('reaction_line', ''))
     if reaction:
         parts.append(html.escape(reaction))
-    source_attribution = item.get('source_attribution_html') or ''
-    if source_attribution:
-        # Weather API license attribution remains public because the provider requires credit.
-        parts.append(source_attribution)
-    credit = item.get('image_credit_html') or ''
-    if credit:
-        parts.append(credit)
-    if item.get('kind') == 'news' and item.get('show_public_source'):
-        source_url = item.get('source_url') or item.get('link') or ''
-        if source_url:
-            source_name = clean(item.get('source_name') or source_name_from_url(source_url))
-            source_date = parse_dt_strict(item.get('source_published_at'))
-            date_label = ' · ' + source_date.strftime('%d.%m.%Y %H:%M') if source_date else ''
-            parts.append(
-                'Источник: <a href="' + html.escape(source_url, quote=True) + '">' +
-                html.escape(source_name) + '</a>' + date_label + ' · время Нячанга'
-            )
+    # Source and licensing metadata is shown only in the private editor status, never in post text.
     parts.append(footer().strip())
     return '\n\n'.join(part for part in parts if part)
 
@@ -780,7 +778,6 @@ def delete_review_previews(item):
 
 
 def review_status_text(item):
-    planned = parse_dt_strict(item.get('planned_at')) or (now() + timedelta(minutes=15))
     headline = html.escape(item.get('headline') or item.get('title') or 'без заголовка')
     source_block = ''
     source_url = item.get('source_url') or (item.get('link') if item.get('kind') == 'news' else '')
@@ -796,21 +793,24 @@ def review_status_text(item):
             f'\nИсточник для проверки: <a href="{safe_url}">{source_name}</a>'
             f'\nДата источника: {date_text} · проверка: {basis}{score_text}'
         )
+    elif item.get('forecast_provider'):
+        provider = html.escape(clean(item.get('forecast_provider')))
+        retrieved = html.escape(clean(item.get('forecast_retrieved_at') or 'не указано'))
+        source_block = f'\nПогодный API для проверки: {provider}\nПолучено: {retrieved}'
+    image_credit = item.get('image_credit_html') or ''
+    if image_credit:
+        source_block += '\nИзображение и лицензия: ' + image_credit
     if item.get('status') == 'needs_edit' and item.get('needs_edit_reason') == 'caption_too_long':
-        timing = '⚠️ Автопубликация остановлена: текст не помещается в подпись к фото/видео. Нажми «Текст», сократи его и сохрани новую версию.'
+        timing = '⚠️ Текст не помещается в подпись к фото/видео. Сократи его и сохрани новую версию.'
     else:
-        timing = (
-            f'План публикации: <b>{planned.strftime("%d.%m.%Y в %H:%M")}</b> по времени Нячанга. '
-            'Если ничего не менять, материал выйдет по таймеру.'
-        )
+        timing = 'Проверь черновик. Бот отправляет материалы только тебе и не публикует их в канал.'
     return (
         f'<b>Черновик: {html.escape(item.get("kind_label", "новость"))}</b>\n'
         f'<b>{headline}</b>\n\n'
         f'{timing}\n'
         f'Версия: <code>{int(item.get("version", 1))}</code> · ID: <code>{html.escape(str(item.get("id", "")))}</code>'
         f'{source_block}\n\n'
-        'Можно поменять заголовок, текст, фото или время; любая правка обновляет предпросмотр и запускает 15 минут заново. '
-        '«Отклонить» гарантирует, что материал не выйдет.'
+        'Можно поменять заголовок, текст или фото. «Отметить: опубликовано вручную» только фиксирует публикацию, сделанную тобой в Telegram.'
     )
 
 
@@ -864,6 +864,7 @@ def make_weather_card(item):
 
 def publish_weather_alert(s, item):
     """Publish a confirmed severe weather change immediately, outside the editorial queue."""
+    _assert_editor_private_target('sendPhoto', {'chat_id': CHANNEL})
     caption, continuation = split_photo_caption(review_post_text(item), limit=950)
     if continuation:
         raise RuntimeError('Срочное погодное сообщение превышает лимит подписи Telegram.')
@@ -890,7 +891,7 @@ def publish_weather_alert(s, item):
 
 
 def publish_weather_test_now(s):
-    """Send one explicitly requested live forecast card for a manual workflow test."""
+    """Create one live forecast draft for the editor; never send it to the public channel."""
     data = fetch_weather_data()
     n = now()
     current = data.get('current') or {}
@@ -949,10 +950,12 @@ def publish_weather_test_now(s):
         'image_credit_html': (image or {}).get('credit_html', ''),
         'idempotency_key': 'weather_test:' + n.strftime('%Y%m%d%H%M')
     }
-    result = publish_weather_alert(s, item)
+    queued = queue_review_item(s, item)
     save_state(s)
-    print('One-time weather test published:', result['message_id'])
-    return result
+    if not queued:
+        raise RuntimeError('Weather test draft was not queued or was already created.')
+    print('One-time weather test draft sent to configured editor(s).')
+    return {'queued': True, 'idempotency_key': item['idempotency_key']}
 
 
 def apply_review_photo(item, file_id):
@@ -973,20 +976,20 @@ def apply_review_photo(item, file_id):
 
 
 def hold_item_for_text_edit(item):
-    """Stop the publication timer when the complete post cannot fit one photo/video caption."""
+    """Hold a draft that cannot fit a Telegram photo/video caption until its text is edited."""
     item['status'] = 'needs_edit'
     item['needs_edit_reason'] = 'caption_too_long'
     for admin_id in sorted(ADMIN_USER_IDS):
         try:
             send_dm(
                 admin_id,
-                f'⚠️ Материал «{html.escape((item.get("headline") or item.get("title") or "без заголовка")[:140])}» не помещается в подпись к фото/видео. Автопубликация остановлена. Нажми «Текст», сократи текст и сохрани новую версию; ничего не опубликовано.'
+                f'⚠️ Черновик «{html.escape((item.get("headline") or item.get("title") or "без заголовка")[:140])}» не помещается в подпись к фото/видео. Сократи текст и сохрани новую версию.'
             )
         except Exception:
             pass
     return None
 
-def send_review_preview(item):
+def send_review_preview(item, s=None):
     """Send the complete image/video/album preview and inline controls to every editor."""
     admins = sorted(ADMIN_USER_IDS)
     if not admins:
@@ -998,6 +1001,12 @@ def send_review_preview(item):
     item['image_file_id'] = item.get('image_file_id') or ''
     delivered = set()
     full_text = review_post_text(item)
+    if s is not None and not item.get('image_file_id') and not any(
+        entry.get('file_id') and entry.get('type') in ('photo', 'video')
+        for entry in item.get('media_items', [])
+    ) and item.get('media_type') != 'video':
+        if not prepare_generated_image(s, item):
+            raise RuntimeError('Generated image is not available; add a photo or configure OPENAI_API_KEY.')
     media_items = [
         entry for entry in (item.get('media_items') or [])
         if entry.get('type') in ('photo', 'video') and entry.get('file_id')
@@ -1046,18 +1055,17 @@ def send_review_preview(item):
                         if image_fallback_attempted:
                             raise RuntimeError('No usable photo or video available for preview.')
                         image_fallback_attempted = True
-                        fallback = commons_image(item.get('image_query') or news_image_query(item.get('headline') or item.get('title', ''), item.get('body', '')))
-                        if not fallback:
-                            raise RuntimeError('No suitable image could be found.')
-                        if isinstance(fallback, dict):
-                            item['image_url'] = fallback.get('url') or ''
-                            item['image_credit_html'] = fallback.get('credit_html') or ''
+                        generated = item.get('_generated_image_b64')
+                        if not generated and s is not None and prepare_generated_image(s, item):
+                            generated = item.get('_generated_image_b64')
+                            media_id = item.get('image_file_id') or ''
+                            media_url = normalize_image_url(item.get('image_url') or '')
+                            if media_id or media_url:
+                                continue
+                        if generated:
+                            media_id = '__generated_image__'
                         else:
-                            item['image_url'] = fallback
-                            item['image_credit_html'] = ''
-                        media_id = normalize_image_url(item.get('image_url') or '')
-                        media_type = 'photo'
-                        continue
+                            raise RuntimeError('A generated or editor-supplied image is required for this draft.')
 
                     full_text = review_post_text(item)
                     caption_limit = 950
@@ -1066,7 +1074,14 @@ def send_review_preview(item):
                         caption = '🇻🇳 Новости Нячанга'
                     method = 'sendVideo' if media_type == 'video' else 'sendPhoto'
                     field = 'video' if media_type == 'video' else 'photo'
-                    if item.get('kind') == 'weather_update' and not item.get('weather_card_ready'):
+                    if media_id == '__generated_image__':
+                        photo_bytes = base64.b64decode(item['_generated_image_b64'])
+                        sent = api_multipart('sendPhoto', {
+                            'chat_id': admin_id, 'caption': caption, 'parse_mode': 'HTML'
+                        }, {'photo': ('nhatrang-editorial.jpg', photo_bytes, 'image/jpeg')})
+                        item.pop('_generated_image_b64', None)
+                        media_id = ''
+                    elif item.get('kind') == 'weather_update' and not item.get('weather_card_ready'):
                         card = make_weather_card(item)
                         sent = api_multipart('sendPhoto', {
                             'chat_id': admin_id, 'caption': caption, 'parse_mode': 'HTML'
@@ -1085,6 +1100,8 @@ def send_review_preview(item):
                         or item.get('image_file_id') or ''
                     )
                     item['media_type'] = media_type
+                    if s is not None:
+                        cache_generated_image(s, item)
                     item['preview_messages'].append({
                         'chat_id': admin_id, 'message_id': sent['message_id']
                     })
@@ -1139,6 +1156,77 @@ def queue_photo_keyboard(item_id):
     return {'inline_keyboard': [[{'text': '📷 Добавить фото вручную', 'callback_data': f'queuephoto:{item_id}'}]]}
 
 
+def prepare_generated_image(s, item):
+    """Generate/cache one clean background for each post, then add its Russian title locally."""
+    if item.get('_generated_image_b64') or (item.get('image_generated') and item.get('image_file_id')):
+        return True
+    user_media = bool(item.get('image_file_id') or any(
+        entry.get('type') == 'photo' and entry.get('file_id') for entry in item.get('media_items', [])
+    ))
+    if user_media or item.get('media_type') == 'video':
+        return True
+    item['image_url'] = ''  # Don't silently use scraped or random Internet photos.
+    prompt = imagegen.prompt_for(item)
+    cache_key = hashlib.sha256((
+        prompt + '|' + imagegen.title_for(item) + '|' + json.dumps(item.get('weather_hours') or [], ensure_ascii=False, sort_keys=True)
+    ).encode('utf-8')).hexdigest()
+    item['generated_image_cache_key'] = cache_key
+    cached = s.setdefault('generated_image_cache', {}).get(cache_key) or {}
+    if cached.get('file_id'):
+        item['image_file_id'] = cached['file_id']
+        item['image_generated'] = True
+        return True
+    if not OPENAI_API_KEY:
+        item['image_hold_reason'] = 'missing_openai_api_key'
+        return False
+
+    today = now().date().isoformat()
+    month = today[:7]
+    usage = s.setdefault('image_usage', {})
+    daily_count = int(usage.get('daily_count', 0)) if usage.get('day') == today else 0
+    daily_usd = float(usage.get('daily_usd', 0)) if usage.get('day') == today else 0.0
+    monthly_usd = float(usage.get('monthly_usd', 0)) if usage.get('month') == month else 0.0
+    if daily_count >= MAX_IMAGE_GENERATIONS_PER_DAY or daily_usd >= MAX_IMAGE_SPEND_USD_PER_DAY:
+        item['image_hold_reason'] = 'daily_image_budget_reached'
+        return False
+    if monthly_usd >= float(os.environ.get('MAX_IMAGE_SPEND_USD_PER_MONTH', '7.0')):
+        item['image_hold_reason'] = 'monthly_image_budget_reached'
+        return False
+
+    usage['day'], usage['month'] = today, month
+    usage['daily_count'] = daily_count + 1  # Count attempts to prevent paid retries from a failing provider.
+    try:
+        image_bytes, cost = imagegen.generate(prompt, api_key=OPENAI_API_KEY)
+        image = imagegen.render_card(image_bytes, imagegen.title_for(item), item.get('weather_hours'))
+        output = BytesIO()
+        image.save(output, format='JPEG', quality=88, optimize=True)
+        item['_generated_image_b64'] = base64.b64encode(output.getvalue()).decode('ascii')
+        item['image_generated'] = True
+        item['image_generation_cost_usd'] = round(cost, 6)
+        usage['daily_usd'] = round(daily_usd + cost, 6)
+        usage['monthly_usd'] = round(monthly_usd + cost, 6)
+        return True
+    except Exception as exc:
+        item['image_hold_reason'] = 'image_generation_failed'
+        diagnostics = s.setdefault('diagnostics', {})
+        diagnostics['last_image_error_at'] = iso(now())
+        diagnostics['last_image_error'] = type(exc).__name__
+        print('Editorial image generation failed:', type(exc).__name__)
+        return False
+
+
+def cache_generated_image(s, item):
+    key = item.get('generated_image_cache_key')
+    file_id = item.get('image_file_id')
+    if key and file_id:
+        cache = s.setdefault('generated_image_cache', {})
+        cache[key] = {'file_id': file_id, 'cached_at': iso(now())}
+        if len(cache) > 500:
+            oldest = sorted(cache, key=lambda entry: cache[entry].get('cached_at', ''))
+            for expired in oldest[:len(cache) - 500]:
+                cache.pop(expired, None)
+
+
 def review_priority(item):
     """Weather/safety first, then fixed engagement rubrics, then routine news and manual tips."""
     kind = str(item.get('kind') or '')
@@ -1154,7 +1242,7 @@ def review_priority(item):
 
 
 def promote_next_review_item(s):
-    """Promote the next item; production direct mode never waits for a private preview."""
+    """Promote the next queued item as a private editor preview."""
     if s.get('pending_news_review'):
         return True
     queue = s.setdefault('review_queue', [])
@@ -1180,7 +1268,7 @@ def promote_next_review_item(s):
         )
         s['pending_news_review'] = item
         s['review_editing'] = {}
-        print('Scheduled for automatic channel publication:', item.get('id'), 'at', item.get('planned_at'))
+        print('Legacy timer migrated to editor draft:', item.get('id'))
         return True
 
     for item in list(queue):
@@ -1195,7 +1283,7 @@ def promote_next_review_item(s):
         if review_caption_too_long(item):
             item['status'] = 'needs_edit'
             item['needs_edit_reason'] = 'caption_too_long'
-        if send_review_preview(item):
+        if send_review_preview(item, s):
             planned = parse_dt_strict(item.get('planned_at')) or now()
             item['planned_at'] = iso(max(planned, now() + timedelta(minutes=15)))
             if item.get('status') != 'needs_edit':
@@ -1208,7 +1296,7 @@ def promote_next_review_item(s):
             s['review_editing'] = {}
             for admin_id in sorted(ADMIN_USER_IDS):
                 try:
-                    send_dm(admin_id, f'📬 В очереди появился следующий материал: <b>{html.escape(item.get("kind_label", "публикация"))}</b>. Автовыпуск через 15 минут после предпросмотра.')
+                    send_dm(admin_id, f'📬 В очереди появился следующий черновик: <b>{html.escape(item.get("kind_label", "публикация"))}</b>. Опубликовать его можно вручную.')
                 except Exception:
                     pass
             print('Promoted review queue item:', item.get('id'))
@@ -1220,7 +1308,7 @@ def promote_next_review_item(s):
                 try:
                     send_dm(
                         admin_id,
-                        f'⚠️ Не удалось показать предпросмотр <code>{html.escape(str(item.get("id", "")))}</code>. Материал сохранён в очереди; автопубликация остановлена до успешного предпросмотра.',
+                        f'⚠️ Не удалось показать предпросмотр <code>{html.escape(str(item.get("id", "")))}</code>. Материал сохранён в очереди и не будет опубликован ботом.',
                         queue_photo_keyboard(str(item.get('id', '')))
                     )
                 except Exception:
@@ -1282,24 +1370,23 @@ def queue_review_item(s, item, planned_at=None, slot_key=None):
         item['schedule_backend'] = 'supabase'
         s.setdefault('review_queue', []).append(item)
         promote_next_review_item(s)
-        print('Added to internal send-later queue:', item_id, 'planned_at=', item['planned_at'], 'kind=', item.get('kind'))
+        print('Added to private editor draft queue:', item_id, 'kind=', item.get('kind'))
         return True
 
-    if not item['image_url'] and not item['image_file_id']:
-        fallback = commons_image(item['image_query'])
-        if not fallback:
-            item['status'] = 'needs_image'
-            s.setdefault('review_queue', []).append(item)
-            for admin_id in sorted(ADMIN_USER_IDS):
-                try:
-                    send_dm(admin_id,
-                        f'🖼 Для материала «{html.escape(item["headline"][:120])}» не найдено подходящее фото. Он сохранён без публикации. Пришли собственное изображение кнопкой ниже.',
-                        queue_photo_keyboard(item_id))
-                except Exception:
-                    pass
-            return True
-        item['image_url'] = normalize_image_url(fallback.get('url') or '') or ''
-        item['image_credit_html'] = fallback.get('credit_html') or ''
+    if not prepare_generated_image(s, item):
+        item['status'] = 'needs_image'
+        s.setdefault('review_queue', []).append(item)
+        reason = item.get('image_hold_reason') or 'image_unavailable'
+        message = (
+            f'🖼 Для черновика «{html.escape(item["headline"][:120])}» пока нет сгенерированной картинки '
+            f'({html.escape(reason)}). Добавь OPENAI_API_KEY в GitHub Secrets или прикрепи своё фото.'
+        )
+        for admin_id in sorted(ADMIN_USER_IDS):
+            try:
+                send_dm(admin_id, message, queue_photo_keyboard(item_id))
+            except Exception:
+                pass
+        return True
 
     if review_caption_too_long(item):
         item['status'] = 'needs_edit'
@@ -1310,7 +1397,7 @@ def queue_review_item(s, item, planned_at=None, slot_key=None):
         print('Queued for later review:', item_id, 'kind=', item.get('kind'))
         return True
 
-    if not send_review_preview(item):
+    if not send_review_preview(item, s):
         delete_review_previews(item)
         item['status'] = 'needs_preview'
         item['preview_failure_notified'] = True
@@ -1337,6 +1424,7 @@ def queue_review_item(s, item, planned_at=None, slot_key=None):
 
 def publish_review_item(s, item, preserve_pending=False):
     """Publish one image-led item after verifying that its full caption fits one media message."""
+    _assert_editor_private_target('sendPhoto', {'chat_id': CHANNEL})
     post_text_value = review_post_text(item)
     if review_caption_too_long(item):
         return hold_item_for_text_edit(item)
@@ -1450,7 +1538,7 @@ def retry_active_review_preview(s):
     delete_review_previews(item)
     item['preview_messages'] = []
     item['review_status_messages'] = []
-    if send_review_preview(item):
+    if send_review_preview(item, s):
         if review_caption_too_long(item):
             item['status'] = 'needs_edit'
             item['needs_edit_reason'] = 'caption_too_long'
@@ -1488,118 +1576,28 @@ def retry_active_review_preview(s):
 
 
 def process_news_review(s):
-    """Publish the due internal schedule item; private previews are bypassed in direct mode."""
+    """Deliver editor drafts and maintain the queue; publication is always manual."""
     item = s.get('pending_news_review') or {}
-    # Suppress forecast slots created by older bot versions before they can surface after deploy.
-    obsolete_weather = {'weather_morning', 'weather_evening'}
-    old_queue = s.get('review_queue') or []
-    s['review_queue'] = [entry for entry in old_queue if entry.get('kind') not in obsolete_weather]
-    if item and item.get('kind') in obsolete_weather:
-        delete_review_previews(item)
-        item['status'] = 'cancelled_routine_weather'
-        s['pending_news_review'] = {}
-        s['review_editing'] = {}
-        print('Cancelled obsolete routine weather forecast:', item.get('id', ''))
-        item = {}
-    if AUTO_PUBLISH_DIRECT:
-        if not item:
-            promote_next_review_item(s)
-            item = s.get('pending_news_review') or {}
-        if item and item.get('status') in ('needs_preview', 'needs_image', 'pending_review'):
-            item['status'] = 'scheduled'
-            item['schedule_backend'] = 'supabase'
-    else:
-        if item and item.get('status') == 'needs_preview':
-            retry_active_review_preview(s)
-            item = s.get('pending_news_review') or {}
-        if not item:
-            promote_next_review_item(s)
-            item = s.get('pending_news_review') or {}
-    if not item or item.get('status') not in ('pending_review', 'scheduled'):
-        return
-    planned = parse_dt_strict(item.get('planned_at'))
-    if not planned:
-        print('Scheduled item has an invalid planned timestamp; leaving it queued:', item.get('id'))
-        return
-
-    scheduled_slots = {'review_morning', 'weather_morning', 'weather_evening', 'review_night'}
-    tolerance = timedelta(seconds=60) if item.get('slot_key') in scheduled_slots else timedelta(0)
-    if now() + tolerance < planned:
-        return
-
-    # Do not publish an old greeting or yesterday's night game after its useful window.
-    if item.get('slot_key') in {'review_morning', 'review_night'} and now() > planned + timedelta(minutes=75):
-        item['status'] = 'expired'
-        s['pending_news_review'] = {}
-        print('Expired out-of-window engagement post; skipped:', item.get('id'), item.get('slot_key'))
+    if not item:
         promote_next_review_item(s)
+        item = s.get('pending_news_review') or {}
+    if not item:
         return
-
-    kind = str(item.get('kind') or '')
-    priority_weather = kind.startswith('weather') or bool(item.get('urgent'))
-    if kind == 'news' and not item.get('urgent'):
-        last_news = parse_dt_strict(s.get('last_news_published_at'))
-        if last_news and timedelta(0) <= now() - last_news < timedelta(hours=2):
-            item['planned_at'] = iso(last_news + timedelta(hours=2))
-            for ref in item.get('review_status_messages', []):
-                try:
-                    api('editMessageText', {
-                        'chat_id': ref['chat_id'], 'message_id': ref['message_id'],
-                        'text': review_status_text(item), 'parse_mode': 'HTML',
-                        'reply_markup': json.dumps(review_keyboard(item['id'], item.get('version', 1)), ensure_ascii=False)
-                    })
-                except Exception as exc:
-                    print('News-spacing status update failed:', type(exc).__name__)
-            for admin_id in sorted(ADMIN_USER_IDS):
-                try: send_dm(admin_id, f'🕒 Новость <code>{html.escape(item.get("id", ""))}</code> перенесена: между обычными новостями выдерживается минимум 2 часа.')
-                except Exception: pass
-            return
-    if is_paused(s) and not priority_weather:
-        later = top_pause_until(s)
-        planned = later if later > now() else now() + timedelta(minutes=5)
-        item['planned_at'] = iso(planned)
-        if not AUTO_PUBLISH_DIRECT:
-            for admin_id in sorted(ADMIN_USER_IDS):
-                try:
-                    send_dm(admin_id, f'⏸ Материал <code>{html.escape(item.get("id", ""))}</code> сдвинут на {planned.strftime("%d.%m %H:%M")}: сейчас действует пауза.')
-                except Exception as exc:
-                    print('Review pause notice failed:', type(exc).__name__)
-        return
-    if count_today(s) >= MAX_DAILY_POSTS and not priority_weather:
-        item['status'] = 'held_daily_limit'
-        delete_review_previews(item)
-        s['pending_news_review'] = {}
-        s['review_editing'] = {}
-        if not AUTO_PUBLISH_DIRECT:
-            for admin_id in sorted(ADMIN_USER_IDS):
-                try:
-                    send_dm(admin_id, f'🧹 Материал <b>{html.escape(item.get("headline") or item.get("title") or "без заголовка")}</b> снят с очереди: достигнут лимит {MAX_DAILY_POSTS} публикаций за день. Погодные сообщения имеют отдельный приоритет.')
-                except Exception:
-                    pass
-        promote_next_review_item(s)
-        return
-    try:
-        publish_result = publish_review_item(s, item)
-        if not publish_result:
-            if item.get('status') == 'needs_edit':
-                return
-            raise RuntimeError('Публикация не подтверждена; материал остался в очереди.')
-        if item.get('slot_key'):
-            mark_slot(s, item['slot_key'])
-        promote_next_review_item(s)
-    except Exception as exc:
-        print('Scheduled publication failed:', type(exc).__name__, str(exc)[:220])
-        item['last_publish_error_at'] = iso(now())
-        item['planned_at'] = iso(now() + timedelta(minutes=5))
-        if not item.get('publish_error_notified'):
-            item['publish_error_notified'] = True
-            if not AUTO_PUBLISH_DIRECT:
-                for admin_id in sorted(ADMIN_USER_IDS):
-                    try:
-                        send_dm(admin_id, f'⚠️ Не удалось опубликовать материал <code>{html.escape(item.get("id", ""))}</code>. Черновик сохранён, повторная попытка — через 5 минут.')
-                    except Exception as notice_error:
-                        print('Review error notice failed:', type(notice_error).__name__)
-
+    if item.get('status') in ('needs_preview', 'needs_image'):
+        retry_active_review_preview(s)
+        item = s.get('pending_news_review') or {}
+    if item and item.get('status') == 'scheduled':
+        # Migrate legacy timer items into an editor-owned draft state.
+        item['status'] = 'pending_review'
+        item.pop('planned_at', None)
+        item.pop('schedule_backend', None)
+    if item and item.get('status') != 'needs_edit' and review_caption_too_long(item):
+        item['status'] = 'needs_edit'
+        item['needs_edit_reason'] = 'caption_too_long'
+        if not item.get('length_warning_sent'):
+            hold_item_for_text_edit(item)
+            item['length_warning_sent'] = True
+    # Deliberately do not inspect planned_at or call a publish method here.
 
 
 
@@ -2267,6 +2265,7 @@ def validate_ad_draft(ad):
 
 
 def send_ad_content(ad):
+    _assert_editor_private_target('sendMessage', {'chat_id': CHANNEL})
     validate_ad_draft(ad)
     caption = (ad.get('text') or '').strip()
     if ad.get('type') == 'album':
@@ -2623,7 +2622,7 @@ def handle_admin_album(messages, s):
 
 
 def show_ad_preview(s, uid):
-    """Render an ad draft in the private chat and start the 15-minute timer only after delivery."""
+    """Render an ad draft privately; publication and channel cleanup stay manual."""
     ad = s.get('pending_ad') or {}
     if not ad or ad.get('awaiting_content') or not (ad.get('text') or ad.get('file_id') or ad.get('media_items')):
         send_dm(uid, 'Сначала создай черновик через /ad 1/24 и отправь содержимое.')
@@ -2673,7 +2672,7 @@ def show_ad_preview(s, uid):
     except Exception as exc:
         print('Ad preview delivery failed:', type(exc).__name__)
         try:
-            send_dm(uid, '⚠️ Предпросмотр рекламы не доставлен. Таймер не запущен и автопубликации не будет. Проверь содержимое или попробуй снова через /preview.')
+            send_dm(uid, '⚠️ Предпросмотр рекламы не доставлен. Проверь содержимое или попробуй снова через /preview.')
         except Exception:
             pass
         return False
@@ -2681,7 +2680,6 @@ def show_ad_preview(s, uid):
     ad.setdefault('draft_id', new_ad_draft_id(uid))
     ad['review_version'] = int(ad.get('review_version', 0)) + 1
     ad['previewed_at'] = iso(now())
-    ad['review_due_at'] = iso(now() + timedelta(minutes=15))
     ad['created_by'] = uid
     ad['review_status'] = 'pending_review'
     s['pending_ad'] = ad
@@ -2689,8 +2687,8 @@ def show_ad_preview(s, uid):
         uid,
         f'<b>Предпросмотр рекламы готов</b>\n'
         f'Формат: {html.escape(str(ad.get("format", "1/24")))}\n'
-        'Если ничего не менять, реклама выйдет через 15 минут — при наличии коммерчески разрешённого погодного API. '
-        'Можно опубликовать сразу, отредактировать черновик или отменить.',
+        'Проверь и опубликуй вручную в Telegram, если материал подходит. '
+        'Кнопка отметки только сохраняет статус в боте.',
         ad_review_keyboard(ad)
     )
     if not controls or not controls.get('message_id'):
@@ -2699,7 +2697,7 @@ def show_ad_preview(s, uid):
         ad.pop('review_status', None)
         s['pending_ad'] = ad
         try:
-            send_dm(uid, '⚠️ Не удалось доставить кнопки управления рекламой. Таймер не запущен и публикации не будет. Попробуй снова через /preview.')
+            send_dm(uid, '⚠️ Не удалось доставить кнопки управления черновиком. Попробуй снова через /preview.')
         except Exception:
             pass
         return False
@@ -2830,6 +2828,11 @@ def handle_admin_message(msg, s):
             item['headline'] = headline
             item['title'] = headline
             item['reaction_line'] = ''
+            if item.get('image_generated'):
+                item.pop('image_file_id', None)
+                item.pop('generated_image_cache_key', None)
+                item['image_url'] = ''
+                item['image_query'] = news_image_query(headline, item.get('body', ''))
         elif mode == 'photo':
             if not msg.get('photo'):
                 send_dm(uid, 'Для замены изображения пришли именно фото. Для отмены — /cancelreview.')
@@ -2867,7 +2870,7 @@ def handle_admin_message(msg, s):
         item['preview_messages'] = []
         item['review_status_messages'] = []
         s['review_editing'] = {}
-        if send_review_preview(item):
+        if send_review_preview(item, s):
             s['pending_news_review'] = item
             send_dm(uid, 'Изменения сохранены. Таймер проверки обновлён: публикация состоится через 15 минут, если материал не отклонить.')
         else:
@@ -2907,11 +2910,66 @@ def handle_admin_message(msg, s):
     cmd = parts[0].split('@')[0].lower() if parts else ''
     arg = parts[1].strip() if len(parts)>1 else ''
     if cmd in ('/start','/menu','/help'):
-        send_dm(uid, '<b>Панель Нячанг Лайф</b>\\nВыбери действие кнопками ниже.\\n\\nРеклама: /ad 1/24 → отправь содержимое → /preview → /publish.\\nДругие команды: /ads, /status, /pause, /resume, /cancel.', main_menu())
+        send_dm(uid, '<b>Панель Нячанг Лайф</b>\nБот готовит материалы только для личной проверки; канал публикуешь ты.\n\n/today — подборка на день\n/news — поиск новостей\n/weather — погодный черновик\n/morning, /night — интерактивы\n/status, /reviewqueue, /settings — состояние редакции\n/suggest — добавить материал вручную\n/pause, /resume, /cancel — управление.', main_menu())
+    elif cmd == '/today':
+        publish_news(s, force=True)
+        weather_period = 'evening' if now().hour >= 18 else 'morning'
+        weather_data = fetch_weather_data()
+        weather_item = make_weather_draft(
+            weather_data, weather_period, now(), 'manual-today-weather:' + now().strftime('%Y%m%d%H'), 'weather_manual'
+        )
+        queue_review_item(s, weather_item)
+        process_news_review(s)
+        after = len(s.get('review_queue') or []) + int(bool(s.get('pending_news_review')))
+        send_dm(uid, f'Готово. В редакционной очереди сейчас {after} материал(а/ов); новые черновики появятся в этом чате. Публикация в канал остаётся ручной.', main_menu())
+    elif cmd == '/news':
+        publish_news(s, force=True)
+        process_news_review(s)
+        send_dm(uid, 'Поиск новостей завершён. Если найден подходящий материал, предпросмотр придёт отдельным сообщением. Бот не публикует его в канал.', main_menu())
+    elif cmd == '/weather':
+        try:
+            period = 'evening' if now().hour >= 18 else 'morning'
+            data = fetch_weather_data()
+            weather_item = make_weather_draft(
+                data, period, now(), 'manual-weather:' + now().strftime('%Y%m%d%H'), 'weather_manual'
+            )
+            queued = queue_review_item(s, weather_item)
+            process_news_review(s)
+            if not queued:
+                send_dm(uid, 'Такой погодный черновик уже есть в редакционной очереди.', main_menu())
+        except Exception as exc:
+            send_dm(uid, f'Не удалось подготовить прогноз: {html.escape(type(exc).__name__)}. Проверь WEATHERAPI_KEY и журнал Actions.', main_menu())
+    elif cmd == '/morning':
+        current_day = now().date().isoformat()
+        item = {
+            'kind': 'morning_greeting', 'kind_label': 'Доброе утро',
+            'headline': '☀️ Доброе утро!', 'title': '☀️ Доброе утро!',
+            'body': 'Желаем вам хорошего дня!\n\nВыспались?\n👍 — да!\n😴 — ещё сплю\n😭 — нет…',
+            'image_query': 'Nha Trang Vietnam sunrise morning coast palm trees',
+            'idempotency_key': 'morning-greeting:' + current_day, 'urgent': False
+        }
+        if queue_review_item(s, item):
+            process_news_review(s)
+        else:
+            send_dm(uid, 'Утренний черновик за сегодня уже подготовлен.', main_menu())
+    elif cmd == '/night':
+        cities = ['Нячанг', 'Дананг', 'Ханой', 'Хошимин', 'Фантьет', 'Далат', 'Вунгтау', 'Куинён']
+        offset = int(now().strftime('%j')) % len(cities)
+        last_city = s.get('last_night_city', '')
+        city = next(cities[(offset + step) % len(cities)] for step in range(len(cities)) if cities[(offset + step) % len(cities)] != last_city)
+        item = {
+            'kind': 'night', 'kind_label': 'Доброй ночи',
+            'headline': '🌙 Доброй ночи!', 'title': '🌙 Доброй ночи!',
+            'body': f'Начинаем: {city}.\n\nНазывайте города на последнюю букву — «{city[-1].casefold()}». Мягкий знак можно пропустить.',
+            'image_query': 'Nha Trang Vietnam night city lights beach promenade',
+            'idempotency_key': 'night-game:' + now().date().isoformat(), 'urgent': False
+        }
+        if queue_review_item(s, item):
+            s['last_night_city'] = city
+            process_news_review(s)
+        else:
+            send_dm(uid, 'Ночной интерактив на сегодня уже подготовлен.', main_menu())
     elif cmd=='/ad':
-        if not WEATHERAPI_KEY:
-            send_dm(uid, 'Создание/публикация рекламы заблокированы, пока не настроен WEATHERAPI_KEY. Добавь его в GitHub Actions Secrets и повтори /ads.')
-            return
         if count_ads_on_date(s,now().date())>=MAX_DAILY_ADS:
             send_dm(uid,f'На сегодня уже запланирована или опубликована реклама (лимит: {MAX_DAILY_ADS}). Черновик не перезаписан.',main_menu()); return
         if (s.get('pending_manual_post') or {}).get('awaiting_content'):
@@ -2926,7 +2984,7 @@ def handle_admin_message(msg, s):
         if not (1<=top_hours<=72 and top_hours<=life_hours<=720):
             send_dm(uid,'Допустимо: время в топе 1–72 часа, срок жизни не меньше времени в топе и не больше 720 часов.'); return
         s['pending_ad']={'draft_id':new_ad_draft_id(uid),'review_version':0,'format':f'{top_hours}/{life_hours}','top_hours':top_hours,'life_hours':life_hours,'created_by':uid,'awaiting_content':True}
-        send_dm(uid,f'Пришли следующим сообщением рекламный текст, фото или видео.\\nФормат: <b>{top_hours}/{life_hours}</b>.\\nПервые {top_hours} ч. бот не будет публиковать обычные новости и рубрики; реклама удалится через {life_hours} ч.\\n/cancel — отмена.', main_menu())
+        send_dm(uid,f'Пришли рекламный текст, фото или видео для личного предпросмотра. Формат: <b>{top_hours}/{life_hours}</b> (справочная пометка); публикация выполняется вручную в Telegram.\\n/cancel — отмена.', main_menu())
 
     elif cmd=='/preview':
         show_ad_preview(s, uid)
@@ -2940,37 +2998,15 @@ def handle_admin_message(msg, s):
         if not ad.get('previewed_at'):
             send_dm(uid, 'Сначала открой приватный предпросмотр командой /preview. Реклама не публикуется без проверки.')
             return
-        try:
-            publish_ad(ad, s, uid)
-        except Exception as e:
-            print('Manual ad publication failed:', type(e).__name__)
-            send_dm(uid, f'Не удалось опубликовать рекламу: {html.escape(str(e)[:250])}. Черновик сохранён; проверь /settings.')
+        ad['status'] = 'published_manually'
+        ad['published_manually_at'] = iso(now())
+        ad['marked_published_by'] = uid
+        ad['awaiting_content'] = False
+        s.setdefault('ads', []).append(ad.copy())
+        s['pending_ad'] = {}
+        send_dm(uid, '✅ Рекламный материал отмечен как опубликованный вручную. Бот не отправлял его в канал.', main_menu())
     elif cmd=='/schedule':
-        ad=s.get('pending_ad') or {}
-        if not ad or ad.get('awaiting_content') or not (ad.get('text') or ad.get('file_id') or ad.get('media_items')):
-            send_dm(uid,'Сначала подготовь черновик через /ad 1/24.'); return
-        if not ad.get('previewed_at'):
-            send_dm(uid, 'Перед расписанием сначала посмотри рекламу через /preview. Это нужно, чтобы случайно не поставить неверный материал.')
-            return
-        try:
-            validate_ad_draft(ad)
-        except ValueError as e:
-            send_dm(uid, html.escape(str(e)))
-            return
-        try:
-            when=datetime.strptime(arg,'%Y-%m-%d %H:%M').replace(tzinfo=TZ)
-        except ValueError:
-            send_dm(uid,'Формат: /schedule 2026-10-25 14:30'); return
-        if when<=now():
-            send_dm(uid,'Время должно быть в будущем.'); return
-        if count_ads_on_date(s,when.date(),exclude=ad)>=MAX_DAILY_ADS:
-            send_dm(uid,f'На {when:%d.%m.%Y} уже запланирована или опубликована реклама (лимит: {MAX_DAILY_ADS}).'); return
-        gap_end=ad_weather_gap_end(when)
-        if gap_end:
-            send_dm(uid,f'Выбери время не ближе трёх часов к прогнозу погоды. Ближайшее допустимое время: {gap_end:%d.%m.%Y %H:%M} (Нячанг).'); return
-        ad['scheduled_at']=iso(when); ad['awaiting_content']=False; ad['created_by']=uid; ad['id']=str(int(time.time())); ad.pop('review_due_at',None); ad['review_status']='scheduled'
-        s['ads'].append(ad); s['pending_ad']={}
-        send_dm(uid,f'Реклама запланирована на {when.strftime("%d.%m.%Y %H:%M")} по времени Нячанга. ID: <code>{ad["id"]}</code>.')
+        send_dm(uid, 'Бот не планирует и не отправляет посты в канал. Используй встроенную отложенную публикацию Telegram вручную.', main_menu())
     elif cmd=='/togglepause':
         s['paused']=not s.get('paused',False); s['pause_until']=iso(now()+timedelta(days=3650)) if s['paused'] else ''
         send_dm(uid, 'Пауза включена: обычные посты остановлены.' if s['paused'] else 'Ручная пауза снята: продолжение по расписанию, если нет рекламного окна.', main_menu())
@@ -3033,52 +3069,9 @@ def handle_admin_message(msg, s):
             if a.get('message_id') and not a.get('deleted'):
                 send_dm(uid, f'Реклама ID <code>{a.get("id","?")}</code> · удаление: {parse_dt(a["expires_at"]).strftime("%d.%m %H:%M") if a.get("expires_at") else "не задано"} · закрепление можно проверить кнопкой ниже.', ad_actions(a.get('id','?')))
     elif cmd=='/editad':
-        if '|' not in arg:
-            send_dm(uid,'Формат: <code>/editad ID | новый текст</code>'); return
-        target,new_text=arg.split('|',1); target=target.strip(); new_text=new_text.strip()
-        ad=next((a for a in s['ads'] if a.get('id')==target and not a.get('deleted') and a.get('message_id')),None)
-        if not ad:
-            send_dm(uid,'Не нашёл активный рекламный пост с таким ID. Посмотри /ads.'); return
-        new_text=html.escape(new_text)
-        if ad.get('type') not in ('photo', 'video', 'document', 'album') and (
-            len(ad.get('message_ids') or [ad.get('message_id')]) > 1 or len((new_text + footer()).strip()) > 3900
-        ):
-            old_ids = list(ad.get('message_ids') or [ad.get('message_id')])
-            old_ids.extend(ad.get('stale_message_ids') or [])
-            old_ids = list(dict.fromkeys(mid for mid in old_ids if mid))
-            replacement = dict(ad); replacement['text'] = new_text
-            try:
-                result = send_ad_content(replacement)
-            except Exception as e:
-                send_dm(uid, f'Не удалось заменить рекламный текст: {html.escape(str(e)[:350])}')
-                return
-            try:
-                delete_ad_message({'chat_id': ad.get('chat_id', CHANNEL), 'message_ids': old_ids})
-                ad['stale_message_ids'] = []
-            except Exception as e:
-                ad['stale_message_ids'] = old_ids
-                print('Old ad text cleanup will retry:', ad.get('id'), type(e).__name__)
-            ad['message_id'] = result['message_id']; ad['message_ids'] = result.get('_message_ids') or [result['message_id']]
-            ad['chat_id'] = result['chat']['id']; ad['text'] = new_text
-            send_dm(uid, f'Текст рекламы {target} обновлён. Если запись была закреплена, проверь закрепление через /ads.')
-            return
-        if ad.get('type') in ('photo','video','document','album'):
-            caption=(new_text+footer()).strip()
-            if len(caption)>1024:
-                send_dm(uid,'Подпись слишком длинная: максимум 1024 символа вместе с футером.'); return
-            api('editMessageCaption',{'chat_id':ad.get('chat_id',CHANNEL),'message_id':ad['message_id'],'caption':caption,'parse_mode':'HTML'})
-        else:
-            api('editMessageText',{'chat_id':ad.get('chat_id',CHANNEL),'message_id':ad['message_id'],'text':(new_text+footer()).strip(),'parse_mode':'HTML','disable_web_page_preview':'true'})
-        ad['text']=new_text; send_dm(uid,f'Текст рекламного поста {target} обновлён.')
+        send_dm(uid, 'Бот не редактирует сообщения канала. Измени пост вручную в Telegram.', main_menu())
     elif cmd in ('/cancelad','/delete'):
-        target=arg.strip()
-        ad=next((a for a in s['ads'] if a.get('id')==target and not a.get('deleted')),None)
-        if not ad:
-            send_dm(uid,'Не нашёл активную рекламу с таким ID. Посмотри /ads.'); return
-        if ad.get('message_id') or ad.get('message_ids'):
-            delete_ad_message(ad)
-        ad['deleted']=True; ad['deleted_at']=iso(now())
-        send_dm(uid,f'Реклама {target} удалена/отменена.')
+        send_dm(uid, 'Бот не удаляет и не меняет сообщения канала. Если пост уже опубликован, управляй им вручную в Telegram.', main_menu())
     elif cmd=='/pause':
         s['paused']=True; s['pause_until']=iso(now()+timedelta(days=3650)); send_dm(uid,'Обычные публикации остановлены. Реклама и проверка сроков продолжат обрабатываться.')
     elif cmd=='/resume':
@@ -3118,18 +3111,19 @@ def handle_admin_message(msg, s):
         ]
         if diagnostics.get('last_weather_error'):
             lines.append(f'Последняя ошибка: {html.escape(str(diagnostics.get("last_weather_error")))}')
-        lines.append('Плановые прогнозы: 08:00 на сегодня и 18:00 на завтра. Проверка существенных изменений — каждые 30 минут.')
+        lines.append('Черновики прогноза: 07:35 и 19:30. Существенные изменения проверяются раз в час; посты появляются только в личной редакционной очереди.')
         if not WEATHERAPI_KEY:
-            lines.append('Для размещения рекламы подключи бесплатный WEATHERAPI_KEY; ключ добавляется только в GitHub Secrets.')
+            lines.append('WEATHERAPI_KEY не настроен: погодные черновики не будут сформированы.')
         send_dm(uid, '\n'.join(lines), main_menu())
     elif cmd == '/settings':
         lines = [
             '<b>Настройки бота</b>',
-            f'Максимум публикаций в день: {MAX_DAILY_POSTS}',
-            f'Максимум обычных новостей в день: {MAX_DAILY_NEWS}',
-            f'Максимум рекламы в день: {MAX_DAILY_ADS} · интервал от прогноза: 3 часа',
+            'Публикация в канал: только вручную редактором',
+            f'Черновиков новостей в день: максимум {MAX_DAILY_NEWS}',
+            f'Лимит рекламных черновиков: {MAX_DAILY_ADS} в день',
             'Разрешённые реакции: ❤️ 🙏 😱 👍 🤣',
             f'ИИ-редактор: {"подключён" if GEMINI_API_KEY else "не подключён (правиловый резервный режим)"}',
+            f'Генерация изображений: {"OpenAI подключён" if OPENAI_API_KEY else "нет OPENAI_API_KEY; черновики ждут фото"}',
             f'Приватное хранилище: {"Supabase настроен" if supabase_state_configured() else "не настроено"}',
             f'Погодный API для коммерческого режима: {"WeatherAPI.com подключён" if WEATHERAPI_KEY else "не подключён"}',
             'Часовой пояс: Asia/Ho_Chi_Minh (UTC+7)',
@@ -3161,6 +3155,7 @@ def handle_admin_message(msg, s):
             send_dm(uid,'Неизвестная команда. Напиши /menu.')
 
 def publish_ad(ad,s,uid=None):
+    _assert_editor_private_target('sendMessage', {'chat_id': CHANNEL})
     if not WEATHERAPI_KEY:
         raise ValueError('Перед размещением рекламы настрой secret WEATHERAPI_KEY: бесплатный Open-Meteo endpoint предназначен для некоммерческого режима. WeatherAPI.com предлагает бесплатный тариф с коммерческим использованием.')
     if count_today(s)>=MAX_DAILY_POSTS:
@@ -3189,6 +3184,7 @@ def publish_ad(ad,s,uid=None):
 
 def delete_ad_message(ad):
     chat_id = ad.get('chat_id', CHANNEL)
+    _assert_editor_private_target('deleteMessage', {'chat_id': chat_id})
     message_ids = list(ad.get('message_ids') or ([ad['message_id']] if ad.get('message_id') else []))
     message_ids.extend(ad.get('stale_message_ids') or [])
     message_ids = list(dict.fromkeys(message_ids))
@@ -3209,83 +3205,8 @@ def delete_ad_message(ad):
         raise RuntimeError('; '.join(errors))
 
 def process_ad_timers(s):
-    # The pending ad is a private draft. It is auto-published only after an explicit preview
-    # and a complete 15-minute review window; no preview, no automatic publication.
-    pending = s.get('pending_ad') or {}
-    due_at = parse_dt_strict(pending.get('review_due_at'))
-    if (
-        pending and not pending.get('awaiting_content')
-        and pending.get('previewed_at')
-        and pending.get('review_status') == 'pending_review'
-        and due_at is not None and due_at <= now()
-        and not pending.get('scheduled_at')
-    ):
-        creator = pending.get('created_by') or next(iter(sorted(ADMIN_USER_IDS)), '')
-        try:
-            publish_ad(pending, s, creator or None)
-        except Exception as exc:
-            print('Pending ad auto-publication failed:', type(exc).__name__)
-            pending['review_due_at'] = iso(now() + timedelta(minutes=5))
-            if not pending.get('_publish_error_notified'):
-                pending['_publish_error_notified'] = True
-                if creator:
-                    try:
-                        send_dm(creator,
-                            f'⚠️ Не удалось автоматически опубликовать рекламу: {html.escape(str(exc)[:220])}. '
-                            'Черновик сохранён, повторная попытка — через 5 минут. Исправь настройки или отмени черновик.')
-                    except Exception:
-                        pass
-    for ad in s['ads']:
-        if ad.get('deleted'):
-            continue
-        if ad.get('stale_message_ids'):
-            try:
-                delete_ad_message({
-                    'chat_id': ad.get('chat_id', CHANNEL),
-                    'message_ids': ad.get('stale_message_ids')
-                })
-                ad['stale_message_ids'] = []
-            except Exception as e:
-                print('Stale ad-message cleanup will retry:', ad.get('id'), type(e).__name__)
-        if ad.get('scheduled_at') and not ad.get('message_id'):
-            scheduled_at = parse_dt_strict(ad.get('scheduled_at'))
-            if scheduled_at is None:
-                if not ad.get('_invalid_schedule_logged'):
-                    print('Scheduled ad has an invalid timestamp; not publishing:', ad.get('id'))
-                    ad['_invalid_schedule_logged'] = True
-            elif scheduled_at <= now():
-                try:
-                    publish_ad(ad, s)
-                except Exception as e:
-                    print('Scheduled ad error', ad.get('id'), type(e).__name__, e)
-                    creator = ad.get('created_by')
-                    if creator and not ad.get('_publish_error_notified'):
-                        try:
-                            send_dm(creator, f'Не удалось опубликовать запланированную рекламу <code>{html.escape(str(ad.get("id", "?")))}</code>. Бот повторит попытку: {html.escape(str(e)[:300])}')
-                        except Exception as notify_error:
-                            print('Could not notify ad owner:', type(notify_error).__name__)
-                        ad['_publish_error_notified'] = True
-        if ad.get('message_id') and ad.get('expires_at'):
-            expires_at = parse_dt_strict(ad.get('expires_at'))
-            if expires_at is None:
-                if not ad.get('_invalid_expiry_logged'):
-                    print('Ad has an invalid expiry timestamp; not deleting automatically:', ad.get('id'))
-                    ad['_invalid_expiry_logged'] = True
-            elif expires_at <= now():
-                try:
-                    delete_ad_message(ad)
-                    ad['deleted'] = True
-                    ad['deleted_at'] = iso(now())
-                    print('Deleted expired ad', ad.get('id'))
-                except Exception as e:
-                    print('Ad deletion error', ad.get('id'), type(e).__name__, e)
-                    creator = ad.get('created_by')
-                    if creator and not ad.get('_expiry_error_notified'):
-                        try:
-                            send_dm(creator, f'Не удалось автоматически удалить рекламу <code>{html.escape(str(ad.get("id", "?")))}</code>. Бот продолжит повторять попытки: {html.escape(str(e)[:300])}')
-                        except Exception as notify_error:
-                            print('Could not notify ad owner about expiry:', type(notify_error).__name__)
-                        ad['_expiry_error_notified'] = True
+    """Retain legacy ad records, but never publish, edit, pin, or delete channel content."""
+    return
 
 
 def handle_callback(q, s):
@@ -3372,12 +3293,29 @@ def handle_callback(q, s):
                 send_dm(uid, '🗑 Черновик отклонён. Он не будет опубликован; бот перейдёт к следующему материалу.')
                 promote_next_review_item(s)
             elif action == 'publish':
-                try:
-                    publish_review_item(s, item)
-                    promote_next_review_item(s)
-                except Exception as exc:
-                    print('Immediate review publication failed:', type(exc).__name__)
-                    send_dm(uid, f'Не удалось опубликовать черновик. Он сохранён для повтора: {html.escape(str(exc)[:180])}')
+                item['status'] = 'published_manually'
+                item['published_manually_at'] = iso(now())
+                item['marked_published_by'] = uid
+                if item.get('kind') == 'news':
+                    link = item.get('link') or ''
+                    source_title = item.get('source_title') or item.get('title') or ''
+                    if link:
+                        s['seen_links'] = (s.get('seen_links', []) + [link])[-1000:]
+                    if source_title:
+                        s['seen_titles'] = (s.get('seen_titles', []) + [source_title])[-500:]
+                        s['seen_fingerprints'] = (s.get('seen_fingerprints', []) + [title_fingerprint(source_title)])[-1000:]
+                    s['published_news'] = (s.get('published_news', []) + [{
+                        'title': item.get('headline') or source_title,
+                        'summary': clean_multiline(item.get('body', '')),
+                        'link': link, 'published_at': item['published_manually_at'],
+                        'source_published_at': item.get('source_published_at') or item['published_manually_at'],
+                        'urgent': bool(item.get('urgent'))
+                    }])[-100:]
+                delete_review_previews(item)
+                s['pending_news_review'] = {}
+                s['review_editing'] = {}
+                send_dm(uid, '✅ Отметил как опубликованное вручную. Бот не отправлял сообщение в канал.')
+                promote_next_review_item(s)
             else:
                 send_dm(uid, 'Неизвестное действие. Открой /menu и используй последние кнопки.')
 
@@ -3398,11 +3336,13 @@ def handle_callback(q, s):
             ):
                 send_dm(uid, 'Эта кнопка относится к старому или завершённому рекламному черновику. Открой /ads и используй последние кнопки.', main_menu())
             elif action == 'publish':
-                try:
-                    publish_ad(pending, s, uid)
-                except Exception as exc:
-                    pending['review_due_at'] = iso(now() + timedelta(minutes=5))
-                    send_dm(uid, f'⚠️ Реклама пока не опубликована: {html.escape(str(exc)[:220])}. Черновик сохранён. Проверь /settings.', main_menu())
+                pending['status'] = 'published_manually'
+                pending['published_manually_at'] = iso(now())
+                pending['marked_published_by'] = uid
+                pending['awaiting_content'] = False
+                s.setdefault('ads', []).append(pending.copy())
+                s['pending_ad'] = {}
+                send_dm(uid, '✅ Отметил рекламный материал как опубликованный вручную. Бот не отправлял его в канал.', main_menu())
             elif action == 'edit':
                 pending['awaiting_content'] = True
                 pending['review_version'] = int(pending.get('review_version', 0)) + 1
@@ -3458,37 +3398,8 @@ def handle_callback(q, s):
                     'mode': 'queued_photo', 'version': int(item.get('version', 1))
                 }
                 send_dm(uid, f'🖼 Пришли фото для материала «{html.escape((item.get("headline") or item.get("title") or "")[:120])}». После загрузки оно попадёт в предпросмотр. Для отмены — /cancelreview.', main_menu())
-        elif data.startswith('ad_delete:'):
-            target=data.split(':',1)[1]
-            ad=next((a for a in s['ads'] if str(a.get('id'))==target and not a.get('deleted')),None)
-            if not ad:
-                send_dm(uid,'Реклама не найдена или уже удалена.',main_menu()); return
-            delete_ad_message(ad); ad['deleted']=True; ad['deleted_at']=iso(now()); send_dm(uid,f'Реклама {target} удалена и откреплена, если была закреплена.',main_menu())
-        elif data.startswith('ad_pin:'):
-            target = data.split(':', 1)[1]
-            ad = next((a for a in s['ads'] if str(a.get('id')) == target and not a.get('deleted') and a.get('message_id')), None)
-            if not ad:
-                send_dm(uid, 'Реклама не найдена или ещё не опубликована.', main_menu())
-                return
-            mid = (ad.get('message_ids') or [ad.get('message_id')])[0]
-            try:
-                api('pinChatMessage', {'chat_id': ad.get('chat_id', CHANNEL), 'message_id': mid, 'disable_notification': 'true'})
-                send_dm(uid, f'Реклама {target} закреплена. Проверь, что у бота есть право закреплять сообщения.', main_menu())
-            except Exception as e:
-                print('Pin action failed:', type(e).__name__)
-                send_dm(uid, 'Не удалось закрепить рекламу. Проверь права администратора бота в канале.', main_menu())
-        elif data.startswith('ad_unpin:'):
-            target=data.split(':',1)[1]
-            ad=next((a for a in s['ads'] if str(a.get('id'))==target and not a.get('deleted')),None)
-            if not ad:
-                send_dm(uid,'Реклама не найдена или уже удалена.',main_menu()); return
-            for mid in (ad.get('message_ids') or [ad.get('message_id')]):
-                if mid:
-                    try:
-                        api('unpinChatMessage',{'chat_id':ad.get('chat_id',CHANNEL),'message_id':mid})
-                    except Exception as e:
-                        print('Unpin action:', type(e).__name__)
-            send_dm(uid,f'Команда открепления выполнена для рекламы {target}.',main_menu())
+        elif data.startswith(('ad_delete:', 'ad_pin:', 'ad_unpin:')):
+            send_dm(uid, 'Бот не меняет сообщения канала. Управляй постом вручную в Telegram.', main_menu())
     except Exception as e:
         send_dm(uid,'Не удалось выполнить действие. Проверь права бота и журнал GitHub Actions.')
         print('Callback error:', type(e).__name__)
@@ -3569,7 +3480,7 @@ def mark_slot(s,key): s['last_slots'][key]=now().date().isoformat()
 def next_routine_target(current_time=None):
     """Return the next fixed daily rubric time in Nha Trang timezone."""
     current_time = current_time or now()
-    targets = [(6, 30), (8, 0), (18, 0), (22, 30)]
+    targets = [(6, 30), (7, 35), (10, 30), (13, 30), (16, 0), (18, 30), (19, 30), (22, 30)]
     candidates = []
     for day_offset in (0, 1):
         day = current_time.date() + timedelta(days=day_offset)
@@ -3593,12 +3504,9 @@ def routine_posts(s):
     if is_paused(s) or count_today(s) >= MAX_DAILY_POSTS:
         return
     n = now()
-    week_start=n.date()-timedelta(days=n.weekday())
-    recent=[entry for entry in s.get('routine_published',[]) if parse_dt_strict(entry.get('published_at')) and parse_dt_strict(entry.get('published_at')).date()>=week_start]
     routine_items=[s.get('pending_news_review') or {}]+list(s.get('review_queue') or [])
-    today_queued=any(item and item.get('kind') in ('morning_greeting','night') and str(item.get('created_at','')).startswith(n.date().isoformat()) for item in routine_items)
-    if len(recent)>=3 or today_queued:
-        return
+    morning_queued=any(item and item.get('kind')=='morning_greeting' and str(item.get('created_at','')).startswith(n.date().isoformat()) for item in routine_items)
+    night_queued=any(item and item.get('kind')=='night' and str(item.get('created_at','')).startswith(n.date().isoformat()) for item in routine_items)
 
     # Exact morning-engagement slot from the channel brief; don't emit it outside its catch-up window.
     morning_key = 'review_morning'
@@ -3606,6 +3514,7 @@ def routine_posts(s):
     if (
         morning_target - timedelta(minutes=15) <= n <= morning_target + timedelta(minutes=75)
         and not slot_once(s, morning_key)
+        and not morning_queued
     ):
         morning_item = {
             'kind': 'morning_greeting',
@@ -3617,7 +3526,7 @@ def routine_posts(s):
                 'Выспались?\n'
                 '👍 — да!\n'
                 '😴 — ещё сплю\n'
-                '😭 — нет, совсем не выспался'
+                '😭 — нет…'
             ),
             'reaction_line': '',
             'image_query': 'Nha Trang Vietnam sunrise morning coast palm trees real photograph',
@@ -3635,19 +3544,18 @@ def routine_posts(s):
     if not (
         night_target - timedelta(minutes=15) <= n <= night_target + timedelta(minutes=75)
         and not slot_once(s, night_key)
+        and not night_queued
     ):
         return
-    starts = [
-        ('Михаил', 'л'), ('Екатерина', 'а'), ('Дмитрий', 'й'),
-        ('Мария', 'я'), ('Александр', 'р'), ('Анна', 'а'),
-        ('Никита', 'а'), ('Илья', 'я'), ('Ольга', 'а')
-    ]
-    name, letter = starts[int(n.strftime('%j')) % len(starts)]
+    cities = ['Нячанг', 'Дананг', 'Ханой', 'Хошимин', 'Фантьет', 'Далат', 'Вунгтау', 'Куинён']
+    last_city = s.get('last_night_city', '')
+    offset = int(n.strftime('%j')) % len(cities)
+    city = next(cities[(offset + step) % len(cities)] for step in range(len(cities)) if cities[(offset + step) % len(cities)] != last_city)
+    next_letter = city[-1].casefold()
     headline = '🌙 Доброй ночи!'
     body = (
-        'Перед сном сыграем в слова. Называем только имена.\n\n'
-        f'Начинаем: {html.escape(name)}, вам на «{html.escape(letter)}»!\n\n'
-        'Пишите имя на последнюю букву предыдущего имени. Города, предметы и фамилии сегодня не принимаются.'
+        f'Начинаем: {html.escape(city)}.\n\n'
+        f'Называйте города на последнюю букву — «{html.escape(next_letter)}». Мягкий знак можно пропустить.'
     )
     queued = queue_review_item(s, {
         'kind': 'night',
@@ -3662,6 +3570,7 @@ def routine_posts(s):
     }, planned_at=night_target if n < night_target else n + timedelta(minutes=15), slot_key=night_key)
     if queued:
         mark_slot(s, night_key)
+        s['last_night_city'] = city
 
 def map_weatherapi_code(code):
     """Map provider condition codes to WMO-like categories for consistent summaries/alerts."""
@@ -3814,54 +3723,91 @@ def weather_period_summary(data, target_date, start_hour, end_hour):
 
 
 def format_weather_forecast(data, period, current_time):
-    """Render the short public forecast: temperature, rain probability, wind and update time."""
-    target = current_time.date() if period == 'morning' else current_time.date()+timedelta(days=1)
-    idx=weather_daily_index(data,target)
-    cur=data.get('current') or {}
-    parts=[]
-    lo=_weather_daily(data,'temperature_2m_min',idx); hi=_weather_daily(data,'temperature_2m_max',idx)
-    code=_weather_daily(data,'weather_code',idx); daily_rain=_weather_daily(data,'precipitation_probability_max',idx)
-    if period=='morning':
-        temp=_numeric(cur.get('temperature_2m')); feels=_numeric(cur.get('apparent_temperature'))
+    """Render compact morning details or a short 12-hour evening outlook."""
+    target = current_time.date()
+    idx = weather_daily_index(data, target)
+    current = data.get('current') or {}
+    hourly = data.get('hourly') or {}
+    times = hourly.get('time') or []
+    temps = hourly.get('temperature_2m') or []
+    rains = hourly.get('precipitation_probability') or []
+    codes = hourly.get('weather_code') or []
+    winds = hourly.get('wind_speed_10m') or []
+    parts = []
+    if period == 'morning':
+        temp = _numeric(current.get('temperature_2m'))
+        feels = _numeric(current.get('apparent_temperature'))
+        condition = weather_condition_name(current.get('weather_code'))
         if temp is not None:
-            line=f'Сейчас {round(temp)}°C'
-            if feels is not None: line+=f', ощущается как {round(feels)}°C'
-            line+=f', {weather_condition_name(cur.get("weather_code"))}.'
-            parts.append(line)
-        label='Сегодня'
+            line = f'Сейчас {round(temp)}°C'
+            if feels is not None:
+                line += f', по ощущениям {round(feels)}°C'
+            parts.append(line + ', ' + condition + '.')
+        low = _weather_daily(data, 'temperature_2m_min', idx)
+        high = _weather_daily(data, 'temperature_2m_max', idx)
+        if low is not None and high is not None:
+            parts.append(f'Сегодня {round(low)}–{round(high)}°C.')
+        selected = []
+        for target_hour in (7, 9, 12, 15, 18, 21):
+            candidates = []
+            for i, raw in enumerate(times):
+                dt = _weather_time(str(raw))
+                if not dt or dt.date() != target or abs(dt.hour - target_hour) > 1:
+                    continue
+                rain = _numeric(rains[i]) if i < len(rains) else None
+                t = _numeric(temps[i]) if i < len(temps) else None
+                code = codes[i] if i < len(codes) else None
+                if t is not None:
+                    candidates.append((abs(dt.hour - target_hour), dt, t, rain, code))
+            if candidates:
+                _distance, dt, t, rain, code = min(candidates, key=lambda row: row[0])
+                rain_text = f', дождь {round(rain)}%' if rain is not None else ''
+                selected.append(f'{dt:%H:%M} · {round(t)}°C · {weather_condition_name(code)}{rain_text}')
+        if selected:
+            parts.append('По часам:\n' + '\n'.join('• ' + row for row in selected))
+        peak = _weather_daily(data, 'precipitation_probability_max', idx)
+        gust = _weather_daily(data, 'wind_gusts_10m_max', idx)
+        summary = []
+        if peak is not None:
+            summary.append(f'Дождь за день — до {round(peak)}%')
+        else:
+            summary.append('Дождь: нет данных')
+        if gust is not None:
+            summary.append(f'порывы до {round(gust)} км/ч')
+        if summary:
+            parts.append('. '.join(summary) + '.')
+        parts.append('Вы сегодня за прогулку? 👍 — гулять; ❤️ — к морю; 🙏 — спокойно.')
+        headline = 'Погода в Нячанге: сегодня'
     else:
-        label='Завтра'
-    if lo is not None and hi is not None:
-        parts.append(f'{label}: {round(lo)}–{round(hi)}°C, {weather_condition_name(code)}.')
-    elif code is not None:
-        parts.append(f'{label}: {weather_condition_name(code)}.')
-
-    hourly=data.get('hourly') or {}
-    rain_rows=[]
-    for i,raw_time in enumerate(hourly.get('time') or []):
-        dt=_weather_time(str(raw_time)); values=hourly.get('precipitation_probability') or []
-        value=_numeric(values[i]) if i<len(values) else None
-        if dt and dt.date()==target and value is not None: rain_rows.append((dt,value))
-    peak=max((value for _,value in rain_rows),default=daily_rain)
-    likely=[dt for dt,value in rain_rows if peak is not None and value>=max(20,peak-10)]
-    if likely:
-        span=max(likely)-min(likely)
-        window='в течение дня' if span>=timedelta(hours=12) else (f'{min(likely):%H:%M}–{(max(likely)+timedelta(hours=1)):%H:%M}' if len(likely)>1 else f'около {likely[0]:%H:%M}')
-        parts.append(f'Дождь: до {round(peak)}%, вероятнее {window}.')
-    else:
-        parts.append('Дождь: нет данных.' if peak is None else f'Дождь: до {round(peak)}%.')
-    wind=_weather_daily(data,'wind_gusts_10m_max',idx)
-    if wind is not None: parts.append(f'Порывы ветра до {round(wind)} км/ч.')
-    if period=='evening':
-        night=[]; temps=hourly.get('temperature_2m') or []
-        for i,raw_time in enumerate(hourly.get('time') or []):
-            dt=_weather_time(str(raw_time)); value=_numeric(temps[i]) if i<len(temps) else None
-            if dt and dt.date()==target and dt.hour<6 and value is not None: night.append(value)
-        if night: parts.append(f'Ночью около {round(min(night))}°C.')
-    updated=_weather_time(data.get('retrieved_at')) or current_time
-    parts.append(f'Обновлено {updated:%H:%M}, Нячанг.')
-    headline='Погода в Нячанге: прогноз на сегодня' if period=='morning' else 'Погода в Нячанге: прогноз на завтра'
-    return headline,'\n'.join(parts),target
+        end = current_time + timedelta(hours=12)
+        rows = []
+        for i, raw in enumerate(times):
+            dt = _weather_time(str(raw))
+            if not dt or not current_time <= dt < end:
+                continue
+            temp = _numeric(temps[i]) if i < len(temps) else None
+            rain = _numeric(rains[i]) if i < len(rains) else None
+            code = codes[i] if i < len(codes) else None
+            wind = _numeric(winds[i]) if i < len(winds) else None
+            rows.append((dt, temp, rain, code, wind))
+        temps_now = [row[1] for row in rows if row[1] is not None]
+        if temps_now:
+            parts.append(f'Ближайшие 12 часов: {min(temps_now):.0f}–{max(temps_now):.0f}°C.')
+        rain_rows = [row for row in rows if row[2] is not None]
+        if rain_rows:
+            peak = max(row[2] for row in rain_rows)
+            likely = next((row for row in rain_rows if row[2] == peak), None)
+            condition = weather_condition_name(likely[3]) if likely else ''
+            parts.append(f'Дождь — до {round(peak)}%' + (f' около {likely[0]:%H:%M}' if likely else '') + (f', {condition}.' if condition else '.'))
+        else:
+            parts.append('Вероятность дождя: нет данных.')
+        wind_values = [row[4] for row in rows if row[4] is not None]
+        if wind_values:
+            parts.append(f'Ветер до {round(max(wind_values))} км/ч.')
+        headline = 'Погода в Нячанге: ближайшие часы'
+    updated = _weather_time(data.get('retrieved_at')) or current_time
+    parts.append(f'Обновлено {updated:%H:%M}.')
+    return headline, '\n'.join(parts), target
 
 
 WEATHER_IMAGE_CATEGORIES = {
@@ -4060,12 +4006,12 @@ def check_weather_changes(s):
         'idempotency_key': 'weather_update:' + fingerprint_suffix
     }
     try:
-        published = publish_weather_alert(s, item)
+        published = queue_review_item(s, item)
     except Exception as exc:
-        print('Urgent weather publication failed:', type(exc).__name__, str(exc)[:180])
+        print('Urgent weather draft creation failed:', type(exc).__name__, str(exc)[:180])
         for uid in sorted(ADMIN_USER_IDS):
             try:
-                send_dm(uid, f'⚠️ Срочное изменение погоды не удалось опубликовать: {html.escape(type(exc).__name__)}.')
+                send_dm(uid, f'⚠️ Не удалось подготовить черновик срочного погодного сообщения: {html.escape(type(exc).__name__)}.')
             except Exception:
                 pass
         published = None
@@ -4078,41 +4024,67 @@ def check_weather_changes(s):
             try:
                 send_dm(
                     uid,
-                    f'🌧 <b>Обнаружено изменение погоды</b>\n{html.escape(reason)}\nОпубликовано сразу, вне очереди.'
+                    f'🌧 <b>Подготовлен черновик: изменение погоды</b>\n{html.escape(reason)}\nПроверь и опубликуй вручную, если подходит.'
                 )
             except Exception:
                 pass
 
 
 
+def make_weather_draft(data, period, current_time, idempotency_key, kind=None):
+    headline, body, target_date = format_weather_forecast(data, period, current_time)
+    image_category, image_query = weather_image_query(data, target_date)
+    hourly = data.get('hourly') or {}
+    weather_hours = []
+    times = hourly.get('time') or []
+    temperatures = hourly.get('temperature_2m') or []
+    probabilities = hourly.get('precipitation_probability') or []
+    for target_hour in (7, 9, 12, 15, 18, 21):
+        candidates = []
+        for index, raw_time in enumerate(times):
+            dt = _weather_time(str(raw_time))
+            if not dt or dt.date() != target_date or abs(dt.hour - target_hour) > 1:
+                continue
+            temp = _numeric(temperatures[index]) if index < len(temperatures) else None
+            rain = _numeric(probabilities[index]) if index < len(probabilities) else None
+            if temp is not None:
+                candidates.append((abs(dt.hour - target_hour), dt, temp, rain))
+        if candidates:
+            _distance, dt, temp, rain = min(candidates, key=lambda row: row[0])
+            weather_hours.append({
+                'time': dt.strftime('%H:%M'), 'temp': round(temp),
+                'rain': round(rain) if rain is not None else '—'
+            })
+    body += '\n\nПрогноз ориентировочный.'
+    return {
+        'kind': kind or 'weather_' + period,
+        'kind_label': 'Погода на сегодня' if period == 'morning' else 'Погода на ближайшие часы',
+        'headline': headline, 'title': headline, 'body': body,
+        'weather_hours': weather_hours,
+        'image_query': image_query, 'weather_image_category': image_category,
+        'urgent': False, 'forecast_date': target_date.isoformat(),
+        'forecast_retrieved_at': data.get('retrieved_at'),
+        'forecast_provider': data.get('provider'),
+        'forecast_latitude': 12.2388, 'forecast_longitude': 109.1967,
+        'idempotency_key': idempotency_key,
+    }
+
+
 def weather_post(s, period):
-    """Queue a dated forecast with hourly probabilities, observed retrieval time and image."""
+    """Queue a dated forecast with hourly probabilities and observed retrieval time."""
     key='weather_'+period
     if slot_once(s,key) or is_paused(s): return
     n=now()
     if period=='morning':
-        target=n.replace(hour=8,minute=0,second=0,microsecond=0); image='Nha Trang Vietnam sunny morning coast real photograph'
+        target=n.replace(hour=7,minute=35,second=0,microsecond=0); image='Nha Trang Vietnam sunny morning coast real photograph'
     elif period=='evening':
-        target=n.replace(hour=18,minute=0,second=0,microsecond=0); image='Nha Trang Vietnam coastal city evening clouds real photograph'
+        target=n.replace(hour=19,minute=30,second=0,microsecond=0); image='Nha Trang Vietnam coastal city evening clouds real photograph'
     else: return
-    if not target-timedelta(minutes=15)<=n<=target+timedelta(hours=5): return
+    if not target-timedelta(minutes=5)<=n<=target+timedelta(hours=5): return
     try:
-        data=fetch_weather_data(); headline,body,target_date=format_weather_forecast(data,period,n)
-        image_category,image_query=weather_image_query(data,target_date)
-        image_candidate=select_weather_image(s,image_category,image_query)
-        attribution='Источник прогноза: <a href="'+html.escape(data.get('provider_url') or 'https://open-meteo.com/',quote=True)+'">'+html.escape(data.get('provider') or 'погодный API')+'</a> · данные получены '+html.escape(data.get('retrieved_at') or iso(n))
-        if data.get('provider')=='Open-Meteo' and not WEATHERAPI_KEY:
-            attribution+=' · бесплатный тестовый режим; перед размещением рекламы настрой коммерческий источник'
-        queued=queue_review_item(s,{
-            'kind':'weather_'+period,'kind_label':'Погода на сегодня' if period=='morning' else 'Погода на завтра',
-            'headline':headline,'title':headline,'body':body,'source_attribution_html':attribution,
-            'reaction_line':'','image_query':image_query,'weather_image_category':image_category,
-            'image_url':(image_candidate or {}).get('url',''),
-            'image_credit_html':(image_candidate or {}).get('credit_html',''),
-            'urgent':False,'forecast_date':target_date.isoformat(),
-            'forecast_retrieved_at':data.get('retrieved_at'),'forecast_provider':data.get('provider'),
-            'forecast_latitude':12.2388,'forecast_longitude':109.1967,'idempotency_key':key+':'+target_date.isoformat()
-        },planned_at=target if n<target else n+timedelta(minutes=15),slot_key=key)
+        data=fetch_weather_data()
+        item = make_weather_draft(data, period, n, key + ':' + n.date().isoformat())
+        queued=queue_review_item(s, item, planned_at=target if n<target else n+timedelta(minutes=15), slot_key=key)
         if queued: mark_slot(s,key)
     except Exception as exc:
         d=s.setdefault('diagnostics',{}); d['last_weather_error_at']=iso(n);d['last_weather_error']=type(exc).__name__
@@ -4160,11 +4132,15 @@ def source_date_rejection_reason(published_at, current_time=None, urgent=False):
     return ''
 
 
-def publish_news(s):
+def publish_news(s, force=False):
     """Find one high-value local story, verify the source date and queue it for private review."""
     n = now()
-    if routine_target_within(15, n):
+    if not force and routine_target_within(15, n):
         return
+    last_scan = parse_dt_strict(s.get('last_news_scan_at'))
+    if not force and last_scan and timedelta(0) <= n - last_scan < timedelta(minutes=30):
+        return
+    s['last_news_scan_at'] = iso(n)
 
     stats = {
         'feeds_ok': 0, 'feed_errors': 0, 'rss_items': 0, 'relevant': 0,
@@ -4214,7 +4190,7 @@ def publish_news(s):
                     'title': title, 'desc': desc, 'link': link,
                     'urgent': urgent_candidate, 'rss_date': source_published_at,
                     'raw_pub_date': raw_pub_date,
-                    'rss_image': extract_rss_image(rss_item, link)
+                    'rss_image': ''
                 })
         except Exception as exc:
             stats['feed_errors'] += 1
@@ -4253,9 +4229,9 @@ def publish_news(s):
             last_news_at = parse_dt_strict(s.get('last_news_published_at'))
             if last_news_at and timedelta(0) <= n - last_news_at < timedelta(hours=1):
                 continue
-            if n.hour in (0, 1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 17, 18, 22, 23):
+            if not force and n.hour in (0, 1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 17, 18, 22, 23):
                 continue
-            if routine_target_within(25, n):
+            if not force and routine_target_within(25, n):
                 continue
 
         article_page = ''
@@ -4313,7 +4289,6 @@ def publish_news(s):
                 print('Source page unavailable; using RSS fields only:', type(exc).__name__)
 
         if article_page:
-            article_image = extract_article_image(article_page, article_page_url)
             article_text = extract_article_text(article_page)
         source_text = article_text if len(article_text) > len(desc) + 100 else desc
         if not source_text and article_text:
@@ -4404,7 +4379,7 @@ def publish_news(s):
             print('Skipping thin editorial draft:', headline[:120])
             continue
 
-        image_url = normalize_image_url(article_image or rss_image or '', article_page_url) or ''
+        image_url = ''  # All editorial artwork is generated or supplied by the editor.
         if not image_url:
             stats['image_missing'] += 1
         item = {
@@ -4481,6 +4456,8 @@ def main():
     process_news_review(s)
     if not is_paused(s):
         routine_posts(s)
+        weather_post(s, 'morning')
+        weather_post(s, 'evening')
     # Screen stories even during quiet windows so real safety alerts can still bypass review/pause.
     publish_news(s)
     save_state(s)
@@ -4498,7 +4475,7 @@ def main():
 
 
 if __name__=='__main__':
-    if sys.argv[1:] == ['--test-weather-now']:
+    if sys.argv[1:] in (['--test-weather-now'], ['--preview-weather-now']):
         ensure_production_state_backend()
         publish_weather_test_now(load_state())
     else:

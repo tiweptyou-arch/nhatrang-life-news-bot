@@ -1,47 +1,40 @@
-# Deployment guide — Нячанг Лайф | Новости
+# Развёртывание редакционного бота
 
-This repository uses GitHub Actions for scheduled execution and Supabase for persistent private bot state.
+## 1. Supabase
 
-## Before merging the bot update
+Создайте проект Supabase, откройте SQL Editor и выполните [supabase_schema.sql](supabase_schema.sql). Таблица `public.bot_state` содержит очередь, настройки редакции и ссылки на повторно используемые Telegram-файлы. Она должна оставаться закрытой для `anon` и `authenticated`.
 
-### 1. Create the private Supabase table
+## 2. Секреты GitHub Actions
 
-1. Open your own Supabase project.
-2. Open **SQL Editor**.
-3. Paste and run all of `supabase_schema.sql`.
-4. Confirm the table `public.bot_state` exists.
+В репозитории откройте **Settings → Secrets and variables → Actions** и добавьте:
 
-The application stores the current queue, moderation state, ad drafts, delivery offsets, and deduplication state in this table. The public repository seed contains only deduplication history and the last Telegram update offset; it does not include pending draft/ad content.
+| Secret | Значение |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | Токен бота, который редактор использует для получения черновиков |
+| `TELEGRAM_CHAT_ID` | `@NhaTrangLifeNews` (сохранён только для совместимости; публикация блокируется) |
+| `ADMIN_USER_ID` или `ADMIN_USER_IDS` | Числовые Telegram ID редакторов, которым бот пишет в личку |
+| `SUPABASE_URL` | URL проекта Supabase |
+| `SUPABASE_SECRET_KEY` | Серверный secret key Supabase; не использовать публичный anon key |
+| `OPENAI_API_KEY` | API key OpenAI для генерации редакционных изображений |
+| `WEATHERAPI_KEY` | Ключ погодного API, план которого подходит для публикации без строки источника |
+| `GEMINI_API_KEY` | Необязательно: редакционная AI-проверка текста |
 
-### 2. Set GitHub Actions secrets
+Не вставляйте секреты в код, логи, коммиты или сообщения. `OPENAI_API_KEY` может требовать включённого биллинга и верификации организации.
 
-Open the repository **Settings → Secrets and variables → Actions → New repository secret**. Add:
+Для локальной разработки скопируйте `.env.example` в `.env`, заполните секреты и задайте `BOT_STATE_FILE`. Файл `.env` не коммитить.
 
-| Secret | Required | Value |
-|---|---|---|
-| `TELEGRAM_BOT_TOKEN` | Yes | Token for the bot that is admin in the channel |
-| `TELEGRAM_CHAT_ID` | Recommended | `@NhaTrangLifeNews` or the channel's numeric `-100…` ID |
-| `ADMIN_USER_ID` | Yes | Your numeric Telegram user ID (not the @username) |
-| `SUPABASE_URL` | Yes | Project URL from Supabase |
-| `SUPABASE_SECRET_KEY` | Yes | Server-side Supabase secret key; keep it in Secrets only |
-| `WEATHERAPI_KEY` | Yes for production weather and ads | API key from WeatherAPI.com |
-| `GEMINI_API_KEY` | Optional | Enables the constrained Gemini editorial pass |
+## 3. Лимиты изображений
 
-For more than one editor, use `ADMIN_USER_IDS` as a comma-separated list of numeric Telegram IDs. The bot also accepts the legacy `SUPABASE_SERVICE_ROLE_KEY` secret instead of `SUPABASE_SECRET_KEY`.
+Workflow задаёт `IMAGE_PROVIDER=openai`, `OPENAI_IMAGE_MODEL=gpt-image-2.5-flare` и низкое качество. Ограничения по умолчанию: 8 попыток генерации в день, $0.25 в день и $7 в месяц. Их можно настроить переменными `MAX_IMAGE_GENERATIONS_PER_DAY`, `MAX_IMAGE_SPEND_USD_PER_DAY` и `MAX_IMAGE_SPEND_USD_PER_MONTH`.
 
-**Do not paste these values into source code, issues, pull requests, logs, or this chat.**
+Фактическая цена определяется токенами и сохраняется в `image_usage`. Текущие тарифы и возможная верификация меняются; перед запуском проверьте [документацию Images API](https://developers.openai.com/api/docs/guides/image-generation) и [страницу цен](https://developers.openai.com/api/docs/pricing). Если ключ отсутствует, черновик не получает случайное внешнее фото: бот уведомляет редактора, что нужен ключ или ручное фото.
 
-### 3. Merge and enable the scheduled run
+Проверьте условия выбранного погодного плана. В частности, условия бесплатного WeatherAPI.com требуют указывать бренд как источник; если публичная подпись источника не подходит редакции, используйте тариф/поставщика с подходящей лицензией. Для погодных сообщений сохраняйте короткое предупреждение, что прогноз ориентировочный, а опасные условия нужно проверять по официальным уведомлениям.
 
-The PR's test job compiles Python and runs offline unit tests; it does not publish to Telegram. The scheduled production job runs only from `main`, only after tests pass, and uses the Secrets above.
+## 4. GitHub Actions
 
-After the Supabase table and secrets are ready, merge the pull request. GitHub Actions then checks the bot every five minutes. The five-minute job is only a scheduler tick; editorial timers still enforce the 15-minute preview window and scheduled posting windows.
+Расписание workflow запускает проверку каждые пять минут. Это только тик для очереди; новости проверяются не чаще одного раза в 30 минут, а существенные изменения прогноза — раз в час. Обычные сообщения отправляются редактору как черновики. Срочные погодные события тоже требуют ручной публикации.
 
-For a manual production run, open **Actions → Nha Trang News Bot → Run workflow** and set `run_bot` to `true`. Leave it `false` for a tests-only workflow run.
+Для разового погодного теста откройте **Actions → Nha Trang News Bot → Run workflow**, включите только `preview_weather_now` и запустите. Это отправляет черновик в личный Telegram редактора.
 
-## Safety gates
-
-- If Supabase state storage or an editor ID is missing, the production run stops before processing updates.
-- If no commercial-weather key is configured, the production code does not fall back to the non-commercial Open-Meteo endpoint. Weather publication and ad publishing are blocked rather than emitting unlicensed forecast content.
-- If a news item has no usable photo, no successful private preview, or a caption that would need a text-only continuation, it is kept on hold. It is not released on the timer.
-- Regular news remains subject to freshness checks, duplicate filtering, editorial scoring and daily limits. Only narrowly verified urgent reports from trusted sources can bypass the review timer, and the existing editor draft remains intact.
+**Публичная публикация, редактирование, закрепление и удаление сообщений через бота отключены.** Telegram API-обёртка разрешает любые отправляющие методы только для настроенных личных ID редакторов; старые таймеры больше не публикуют материалы.

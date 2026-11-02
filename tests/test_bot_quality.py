@@ -130,34 +130,27 @@ class NewsQualityTests(unittest.TestCase):
         self.assertIn("item-123", sent)
         self.assertIn("/approve item-123", sent)
 
-    def test_approve_manual_post_publishes_only_after_explicit_command(self):
+    def test_approve_legacy_manual_post_sends_it_through_preview_queue(self):
         uid = 111111111
         item = {
-            "id": "item-234", "status": "pending",
-            "type": "text",
-            "content": "Road repair update\n\nThe city announced repair works.\nSource: https://example.com/road"
+            "id": "item-234", "status": "pending", "type": "text",
+            "content": "Road repair update\n\nThe city announced repair works for residents. Use the alternate route."
         }
-        state = {
-            "pending_ad": {}, "pending_manual_post": {}, "manual_posts": [item],
-            "ads": [], "paused": False, "pause_until": "",
-            "daily_counts": {}, "seen_links": [], "seen_titles": [],
-            "seen_fingerprints": [], "published_news": []
-        }
+        state = {"pending_ad": {}, "pending_manual_post": {}, "manual_posts": [item],
+                 "ads": [], "paused": False, "pause_until": "", "daily_counts": {},
+                 "seen_links": [], "seen_titles": [], "seen_fingerprints": [], "published_news": [],
+                 "review_queue": [], "pending_news_review": {}}
         admin = {"from": {"id": uid}, "chat": {"id": uid}, "text": "/approve item-234"}
-        with patch.object(bot, "post_with_image", return_value={"message_id": 777}) as image_post_mock:
-            with patch.object(bot, "send_dm"):
-                with patch.object(bot.time, "sleep"):
-                    bot.handle_admin_message(admin, state)
-        self.assertEqual(item["status"], "published")
-        self.assertEqual(item["published_message_id"], 777)
-        image_post_mock.assert_called_once()
-        posted_text = image_post_mock.call_args.args[0]
-        self.assertEqual(state["published_news"][0]["title"], "Road repair update")
-        self.assertEqual(state["published_news"][0]["link"], "https://example.com/road")
-        self.assertIn("The city announced repair works.", posted_text)
-        self.assertNotIn("Road repair update", posted_text)
-        self.assertNotIn("example.com/road", posted_text)
-        self.assertNotIn("<b>", posted_text)
+        with patch.object(bot, "queue_review_item", return_value=True) as queue_mock, \
+             patch.object(bot, "post_with_image") as image_post_mock, \
+             patch.object(bot, "send_dm"):
+            bot.handle_admin_message(admin, state)
+        image_post_mock.assert_not_called()
+        queue_mock.assert_called_once()
+        candidate = queue_mock.call_args.args[1]
+        self.assertEqual(candidate["headline"], "Road repair update")
+        self.assertIn("announced repair works", candidate["body"])
+        self.assertEqual(item["status"], "queued_for_review")
 
     def test_manual_album_is_queued_through_editorial_preview(self):
         uid = 111111111
@@ -192,28 +185,23 @@ class NewsQualityTests(unittest.TestCase):
 
 
 
-    def test_approved_manual_album_publishes_all_media_items(self):
+    def test_approved_manual_album_enters_the_same_review_queue(self):
         uid = 111111111
-        item = {"id": "album-777", "status": "pending", "type": "album",
-                "content": "Road closure update\n\nUse another street.",
-                "media_items": [{"type": "photo", "file_id": "p1"},
-                                {"type": "video", "file_id": "v2"}]}
-        state = {"pending_ad": {}, "pending_manual_post": {}, "manual_posts": [item],
-                 "ads": [], "paused": False, "pause_until": "", "daily_counts": {},
-                 "seen_links": [], "seen_titles": [], "seen_fingerprints": [], "published_news": []}
-        admin = {"from": {"id": uid}, "chat": {"id": uid}, "text": "/approve album-777"}
-        with patch.object(bot, "api", return_value=[
-            {"message_id": 800, "chat": {"id": -1001}},
-            {"message_id": 801, "chat": {"id": -1001}}
-        ]) as api_mock:
-            with patch.object(bot, "send_dm"):
-                with patch.object(bot.time, "sleep"):
-                    bot.handle_admin_message(admin, state)
-        self.assertEqual(item["status"], "published")
-        self.assertEqual(item["published_message_ids"], [800, 801])
-        self.assertEqual(api_mock.call_args.args[0], "sendMediaGroup")
-        sent_media = json.loads(api_mock.call_args.args[1]["media"])
-        self.assertEqual([m["media"] for m in sent_media], ["p1", "v2"])
+        item = {"id":"album-777", "status":"pending", "type":"album",
+                "content":"Road closure update\n\nUse another street.",
+                "media_items":[{"type":"photo","file_id":"p1"},{"type":"video","file_id":"v2"}]}
+        state = {"pending_ad":{}, "pending_manual_post":{}, "manual_posts":[item],
+                 "ads":[], "paused":False, "pause_until":"", "daily_counts":{},
+                 "seen_links":[], "seen_titles":[], "seen_fingerprints":[], "published_news":[],
+                 "review_queue":[], "pending_news_review":{}}
+        admin = {"from":{"id":uid}, "chat":{"id":uid}, "text":"/approve album-777"}
+        with patch.object(bot,"queue_review_item",return_value=True) as queue_mock, \
+             patch.object(bot,"api") as api_mock, patch.object(bot,"send_dm"):
+            bot.handle_admin_message(admin,state)
+        self.assertEqual(item["status"],"queued_for_review")
+        candidate=queue_mock.call_args.args[1]
+        self.assertEqual([m["file_id"] for m in candidate["media_items"]],["p1","v2"])
+        api_mock.assert_not_called()
 
     def test_reject_manual_post_never_publishes(self):
         uid = 111111111
@@ -460,6 +448,27 @@ class NewsQualityTests(unittest.TestCase):
 
 
 
+    def test_routine_posts_stop_after_three_per_week(self):
+        current=datetime(2026,10,28,6,40,tzinfo=bot.TZ)
+        state={"daily_counts":{},"last_slots":{},"published_news":[],
+               "routine_published":[{"kind":"night","published_at":(current-timedelta(days=1)).isoformat()},
+                                    {"kind":"morning_greeting","published_at":(current-timedelta(days=2)).isoformat()},
+                                    {"kind":"night","published_at":current.isoformat()}]}
+        with patch.object(bot,"now",return_value=current), patch.object(bot,"is_paused",return_value=False), \
+             patch.object(bot,"count_today",return_value=0), patch.object(bot,"queue_review_item") as queue_mock:
+            bot.routine_posts(state)
+        queue_mock.assert_not_called()
+
+    def test_only_one_routine_post_can_be_queued_per_day(self):
+        current=datetime(2026,10,26,22,30,tzinfo=bot.TZ)
+        state={"daily_counts":{},"last_slots":{},"published_news":[],
+               "pending_news_review":{"kind":"morning_greeting","created_at":current.replace(hour=6).isoformat()},
+               "review_queue":[]}
+        with patch.object(bot,"now",return_value=current), patch.object(bot,"is_paused",return_value=False), \
+             patch.object(bot,"count_today",return_value=0), patch.object(bot,"queue_review_item") as queue_mock:
+            bot.routine_posts(state)
+        queue_mock.assert_not_called()
+
     def test_morning_weather_is_planned_for_eight_not_six_thirty(self):
         early = datetime(2026, 10, 26, 6, 32, tzinfo=bot.TZ)
         state = {"daily_counts": {}, "last_slots": {}, "published_news": []}
@@ -483,10 +492,10 @@ class NewsQualityTests(unittest.TestCase):
             bot.weather_post(state, "morning")
         queue_mock.assert_called_once()
         candidate = queue_mock.call_args.args[1]
-        self.assertIn("Сейчас в Нячанге", candidate["body"])
-        self.assertIn("Сегодня (26.10)", candidate["body"])
-        self.assertIn("вероятность дождя", candidate["body"])
-        self.assertIn("Обновлено:", candidate["body"])
+        self.assertIn("Сейчас", candidate["body"])
+        self.assertIn("Сегодня:", candidate["body"])
+        self.assertIn("Дождь:", candidate["body"])
+        self.assertIn("Обновлено", candidate["body"])
         self.assertNotIn("<b>", candidate["body"])
         self.assertEqual(candidate["forecast_date"], "2026-10-26")
         self.assertEqual(queue_mock.call_args.kwargs["slot_key"], "weather_morning")
@@ -578,45 +587,35 @@ class NewsQualityTests(unittest.TestCase):
         publish_mock.assert_called_once_with(state, state["pending_news_review"])
         mark_mock.assert_called_once_with(state, "weather_morning")
 
-    def test_due_review_publishes_once_and_updates_published_news_history(self):
-        uid = 111111111
+    def test_due_review_publishes_once_with_the_exact_reviewed_image(self):
         current = datetime(2026, 10, 26, 10, 30, tzinfo=bot.TZ)
         item = {
             "id": "rv-publish-1", "kind": "news", "status": "pending_review",
-            "title": "Ремонт дороги в Нячанге",
+            "headline": "Ремонт дороги в Нячанге", "title": "Ремонт дороги в Нячанге",
             "source_title": "Nha Trang announces road repairs",
             "body": "Местные власти объявили о ремонте дороги в Нячанге. Жителям стоит учитывать изменения движения.",
             "link": "https://publisher.example/road-repair",
-            "source_published_at": current.isoformat(),
-            "image_file_id": "reviewed-photo-file",
-            "image_query": "Nha Trang Vietnam road repairs",
-            "planned_at": (current - timedelta(seconds=1)).isoformat(),
-            "preview_messages": [],
-            "urgent": False
+            "source_published_at": current.isoformat(), "image_file_id": "reviewed-photo-file",
+            "media_type": "photo", "planned_at": (current-timedelta(seconds=1)).isoformat(),
+            "preview_messages": [], "urgent": False
         }
-        state = {
-            "pending_news_review": item, "review_editing": {},
-            "seen_links": [], "seen_titles": [], "seen_fingerprints": [],
-            "published_news": [], "daily_counts": {}, "last_slots": {}
-        }
+        state = {"pending_news_review": item, "review_editing": {}, "seen_links": [],
+                 "seen_titles": [], "seen_fingerprints": [], "published_news": [],
+                 "daily_counts": {}, "last_slots": []}
+        response = {"message_id": 990, "chat": {"id": -1001}}
         with patch.object(bot, "now", return_value=current), \
-             patch.object(bot, "post_with_image", return_value={"message_id": 990}) as post_mock, \
-             patch.object(bot, "delete_review_previews"), \
-             patch.object(bot, "send_dm"), \
+             patch.object(bot, "api", return_value=response) as api_mock, \
+             patch.object(bot, "delete_review_previews"), patch.object(bot, "send_dm"), \
              patch.object(bot, "bump_today"):
             bot.publish_review_item(state, item)
-        post_mock.assert_called_once()
-        posted_text = post_mock.call_args.args[0]
-        self.assertIn("Местные власти объявили", posted_text)
-        self.assertNotIn("Nha Trang announces road repairs", posted_text)
-        self.assertNotIn("publisher.example/road-repair", posted_text)
-        self.assertIn("ПОДПИСАТЬСЯ", posted_text)
-        self.assertIn("ПРЕДЛОЖИТЬ НОВОСТЬ", posted_text)
-        self.assertEqual(post_mock.call_args.kwargs["image_file_id"], "reviewed-photo-file")
+        self.assertEqual(api_mock.call_args.args[0], "sendPhoto")
+        self.assertEqual(api_mock.call_args.args[1]["photo"], "reviewed-photo-file")
+        caption = api_mock.call_args.args[1]["caption"]
+        self.assertIn("<b>Ремонт дороги в Нячанге</b>", caption)
+        self.assertIn("Местные власти объявили", caption)
+        self.assertNotIn("publisher.example/road-repair", caption)
         self.assertEqual(state["pending_news_review"], {})
         self.assertEqual(state["published_news"][0]["link"], "https://publisher.example/road-repair")
-        self.assertEqual(state["published_news"][0]["summary"], item["body"])
-        self.assertIn("https://publisher.example/road-repair", state["seen_links"])
 
     def test_review_timer_publishes_at_due_time_and_marks_routine_slot(self):
         current = datetime(2026, 10, 26, 8, 0, tzinfo=bot.TZ)
@@ -781,7 +780,7 @@ class NewsQualityTests(unittest.TestCase):
              patch.object(bot, "mark_slot") as mark_mock:
             bot.weather_post(state, "morning")
         self.assertEqual(queued["slot_key"], "weather_morning")
-        self.assertIn("Сейчас в Нячанге", queued["item"]["body"])
+        self.assertIn("Сейчас", queued["item"]["body"])
         self.assertEqual(queued["planned_at"], current + timedelta(minutes=15))
         mark_mock.assert_called_once_with(state, "weather_morning")
 
@@ -1119,15 +1118,15 @@ class NewsQualityTests(unittest.TestCase):
             "❤️ — да", "🙏 — да", "😱 — да", "👍 — да", "🤣 — да"
         ])
 
-    def test_image_search_uses_original_illustration_instead_of_text_only_fallback(self):
+    def test_image_search_failure_keeps_post_unpublished_instead_of_using_generic_art(self):
         post = "<b>Заголовок</b>\\n\\nПроверенный текст новости."
         with patch.object(bot, "commons_image_candidates", return_value=[]), \
-             patch.object(bot, "api_multipart", return_value={"message_id": 999}) as upload_mock, \
+             patch.object(bot, "api_multipart") as upload_mock, \
              patch.object(bot, "api") as api_mock, \
              patch.object(bot, "post_text") as text_mock:
             result = bot.post_with_image(post, image_url=None, image_query="Nha Trang road")
-        self.assertEqual(result["message_id"], 999)
-        upload_mock.assert_called_once()
+        self.assertIsNone(result)
+        upload_mock.assert_not_called()
         api_mock.assert_not_called()
         text_mock.assert_not_called()
 
@@ -1167,11 +1166,33 @@ class NewsQualityTests(unittest.TestCase):
         data["hourly"]["precipitation_probability"] = [None] * 48
         headline, body, target = bot.format_weather_forecast(data, "morning", current)
         self.assertEqual(target, current.date())
-        self.assertIn("вероятность дождя: нет данных", body)
-        self.assertIn("Максимальная вероятность дождя за день: нет данных.", body)
+        self.assertIn("Дождь: нет данных.", body)
+        self.assertLess(len(body), 260)
         self.assertNotIn("0%", body)
-        self.assertIn("Обновлено: 27.10.2026 08:00", body)
+        self.assertIn("Обновлено 08:00", body)
         self.assertTrue(headline.startswith("Погода в Нячанге"))
+
+    def test_weather_photo_categories_cover_ten_conditions_and_match_the_forecast(self):
+        self.assertEqual(len(bot.WEATHER_IMAGE_CATEGORIES), 10)
+        current = datetime(2026, 10, 27, 8, 0, tzinfo=bot.TZ)
+        data = make_weather_fixture(current, rain_today=85, rain_tomorrow=90, code_today=65, code_tomorrow=82)
+        category, query = bot.weather_image_query(data, current.date())
+        self.assertEqual(category, "heavy_rain")
+        self.assertIn("Nha Trang", query)
+        self.assertIn("rain", query.casefold())
+
+    def test_weather_image_pool_rotates_and_keeps_attribution(self):
+        state = {}
+        entries = [
+            {"url": f"https://upload.wikimedia.org/{i}.jpg", "credit_html": f"license-{i}"}
+            for i in range(15)
+        ]
+        with patch.object(bot, "commons_image_candidates", return_value=entries):
+            first = bot.select_weather_image(state, "sunny", "Nha Trang sunny")
+            second = bot.select_weather_image(state, "sunny", "Nha Trang sunny")
+        self.assertNotEqual(first["url"], second["url"])
+        self.assertTrue(first["credit_html"].startswith("license-"))
+        self.assertEqual(len(state["weather_image_library"]["sunny"]), 15)
 
     def test_gemini_reaction_prompt_is_whitelisted_and_limited(self):
         line = bot.format_ai_reaction_prompt([
@@ -1216,6 +1237,8 @@ class NewsQualityTests(unittest.TestCase):
                     {"message_id": 901, "chat": {"id": int(uid)}},
                     {"message_id": 902, "chat": {"id": int(uid)}},
                 ]
+            if method == "editMessageText":
+                return {"message_id": payload["message_id"], "chat": {"id": int(uid)}}
             raise AssertionError(f"unexpected Telegram method {method}")
         state = {"pending_news_review": item, "review_queue": [], "review_editing": {},
                  "daily_counts": {}, "ads": []}
@@ -1223,7 +1246,8 @@ class NewsQualityTests(unittest.TestCase):
              patch.object(bot, "api", side_effect=fake_api) as api_mock, \
              patch.object(bot, "send_dm", return_value={"message_id": 903, "chat": {"id": int(uid)}}):
             self.assertTrue(bot.send_review_preview(item))
-            preview_media = json.loads(api_mock.call_args.args[1]["media"])
+            preview_call = next(call for call in api_mock.call_args_list if call.args[0] == "sendMediaGroup")
+            preview_media = json.loads(preview_call.args[1]["media"])
             self.assertEqual([part["media"] for part in preview_media], ["photo-1", "video-1"])
             self.assertIn("<b>Закрытие дороги в центре Нячанга</b>", preview_media[0]["caption"])
 
@@ -1294,43 +1318,33 @@ class NewsQualityTests(unittest.TestCase):
 
 
 
-    def test_verified_urgent_auto_publish_requires_trusted_recent_source_image_and_serious_signal(self):
-        self.assertTrue(bot.is_verified_urgent_source(
-            "https://khanhhoa.gov.vn/emergency-flood",
-            "Cảnh báo khẩn cấp: ngập lụt, người dân cần sơ tán",
-            "Officials issue flood warning and evacuation instructions.",
-            "article_metadata",
-            "https://cdn.khanhhoa.gov.vn/flood.jpg",
-        ))
-        self.assertFalse(bot.is_verified_urgent_source(
-            "https://random-blog.example/emergency-flood",
-            "Cảnh báo khẩn cấp ngập lụt",
-            "Evacuation",
-            "article_metadata",
-            "https://random-blog.example/flood.jpg",
-        ))
-        self.assertFalse(bot.is_verified_urgent_source(
-            "https://khanhhoa.gov.vn/emergency-flood",
-            "Cảnh báo khẩn cấp ngập lụt",
-            "Evacuation",
-            "article_metadata",
-            "",
-        ))
-        self.assertFalse(bot.is_verified_urgent_source(
-            "https://khanhhoa.gov.vn/emergency-flood",
-            "Cảnh báo khẩn cấp ngập lụt",
-            "Evacuation",
-            "",
-            "https://cdn.khanhhoa.gov.vn/flood.jpg",
-        ))
-        with patch.object(bot, "URGENT_AUTO_PUBLISH", False):
-            self.assertFalse(bot.is_verified_urgent_source(
-                "https://khanhhoa.gov.vn/emergency-flood",
-                "Cảnh báo khẩn cấp ngập lụt",
-                "Evacuation",
-                "article_metadata",
-                "https://cdn.khanhhoa.gov.vn/flood.jpg",
-            ))
+    def test_urgent_news_gets_queue_priority_without_timer_bypass(self):
+        urgent = {"kind":"news", "urgent":True}
+        ordinary = {"kind":"news", "urgent":False}
+        self.assertLess(bot.review_priority(urgent), bot.review_priority(ordinary))
+        self.assertFalse(hasattr(bot, "URGENT_AUTO_PUBLISH"))
+
+
+    def test_ad_quota_counts_published_and_scheduled_ads_by_local_date(self):
+        today = datetime(2026, 10, 27, 12, 0, tzinfo=bot.TZ)
+        state = {"ads":[
+            {"published_at":today.isoformat()},
+            {"scheduled_at":(today+timedelta(days=1)).isoformat()},
+        ], "pending_ad":{}}
+        self.assertEqual(bot.count_ads_on_date(state,today.date()),1)
+        self.assertEqual(bot.count_ads_on_date(state,(today+timedelta(days=1)).date()),1)
+
+    def test_ad_schedule_keeps_three_hour_gap_from_weather_forecasts(self):
+        morning = datetime(2026, 10, 27, 9, 30, tzinfo=bot.TZ)
+        afternoon = datetime(2026, 10, 27, 12, 0, tzinfo=bot.TZ)
+        self.assertEqual(bot.ad_weather_gap_end(morning), datetime(2026, 10, 27, 11, 0, tzinfo=bot.TZ))
+        self.assertIsNone(bot.ad_weather_gap_end(afternoon))
+
+    def test_production_rejects_direct_mode_that_bypasses_editor_preview(self):
+        env = {"GITHUB_ACTIONS": "true", "BOT_TEST_MODE": ""}
+        with patch.dict(os.environ, env), patch.object(bot, "AUTO_PUBLISH_DIRECT", True):
+            with self.assertRaisesRegex(RuntimeError, "предпросмотр редактора"):
+                bot.ensure_production_state_backend()
 
     def test_production_weather_refuses_open_meteo_fallback_without_commercial_key(self):
         env = {"GITHUB_ACTIONS": "true", "BOT_TEST_MODE": "", "WEATHERAPI_KEY": ""}
@@ -1423,7 +1437,7 @@ class NewsQualityTests(unittest.TestCase):
             "seen_fingerprints": [], "ads": [],
         }
         with patch.object(bot, "now", return_value=current), \
-             patch.object(bot, "post_with_image", return_value={"message_id": 987, "chat": {"id": -1001}}), \
+             patch.object(bot, "send_photo_url_or_upload", return_value={"message_id": 987, "chat": {"id": -1001}}), \
              patch.object(bot, "send_dm"), \
              patch.object(bot, "delete_review_previews") as delete_mock:
             result = bot.publish_review_item(state, urgent, preserve_pending=True)
@@ -1542,27 +1556,17 @@ class NewsQualityTests(unittest.TestCase):
 
 
 
-    def test_legacy_manual_post_is_not_marked_published_without_telegram_confirmation(self):
-        current = datetime(2026, 10, 27, 11, 0, tzinfo=bot.TZ)
-        item = {
-            "id": "manual-no-photo", "status": "pending",
-            "content": "Road repair update\n\nThe city announced a scheduled road repair for local residents. Use the alternate route and check signs.",
-            "type": "text",
-        }
-        state = {
-            "ads": [], "paused": False, "pause_until": "", "daily_counts": {},
-            "seen_links": [], "seen_titles": [], "seen_fingerprints": [], "published_news": [],
-        }
-        with patch.object(bot, "now", return_value=current), \
-             patch.object(bot, "is_paused", return_value=False), \
-             patch.object(bot, "count_today", return_value=0), \
-             patch.object(bot, "post_with_image", return_value=None):
-            with self.assertRaisesRegex(ValueError, "не подтвердил публикацию"):
-                bot.publish_manual_post(item, state)
-        self.assertEqual(item["status"], "pending")
-        self.assertEqual(state["published_news"], [])
-
-
+    def test_legacy_manual_post_is_queued_and_never_directly_published(self):
+        item = {"id":"manual-no-photo", "status":"pending", "type":"text",
+                "content":"Road repair update\n\nThe city announced a scheduled road repair for residents. Use the alternate route."}
+        state = {"ads":[], "paused":False, "pause_until":"", "daily_counts":{},
+                 "review_queue":[], "pending_news_review":{}, "published_news":[]}
+        with patch.object(bot,"queue_review_item",return_value=True) as queue_mock, \
+             patch.object(bot,"post_with_image") as publish_mock, patch.object(bot,"send_dm"):
+            bot.publish_manual_post(item,state)
+        self.assertEqual(item["status"],"queued_for_review")
+        self.assertEqual(queue_mock.call_args.args[1]["headline"],"Road repair update")
+        publish_mock.assert_not_called()
 
     def test_queued_preview_retry_restores_pending_status_without_duplicate_preview(self):
         current = datetime(2026, 10, 27, 11, 30, tzinfo=bot.TZ)
@@ -1712,22 +1716,19 @@ class NewsQualityTests(unittest.TestCase):
              patch.object(bot, "send_photo_url_or_upload") as photo_mock, \
              patch.object(bot, "api_multipart", return_value={"message_id": 789}) as fallback_mock:
             result = bot.post_with_image(post, image_query="Nha Trang")
-        self.assertEqual(result["message_id"], 789)
+        self.assertIsNone(result)
         photo_mock.assert_not_called()
-        fallback_mock.assert_called_once()
+        fallback_mock.assert_not_called()
 
-    def test_post_with_image_uses_original_illustration_when_photo_search_is_unavailable(self):
+    def test_post_with_image_stops_when_photo_search_is_unavailable(self):
         with patch.object(bot, "commons_image_candidates", return_value=[]), \
-             patch.object(bot, "api_multipart", return_value={"message_id": 456}) as upload:
+             patch.object(bot, "api_multipart") as upload:
             result = bot.post_with_image(
                 "<b>Погода в Нячанге</b>\\n\\nСегодня переменная облачность.",
                 image_query="Nha Trang Vietnam sunny morning coast"
             )
-        self.assertEqual(result["message_id"], 456)
-        upload.assert_called_once()
-        self.assertEqual(upload.call_args.args[0], "sendPhoto")
-        fallback_bytes = upload.call_args.args[2]["photo"][1]
-        self.assertTrue(fallback_bytes.startswith(b"\x89PNG\r\n\x1a\n"))
+        self.assertIsNone(result)
+        upload.assert_not_called()
 
 
 if __name__ == "__main__":

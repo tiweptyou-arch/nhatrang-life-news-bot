@@ -1,4 +1,5 @@
-import os, re, json, html, time, hashlib, math, struct, zlib, urllib.request, urllib.parse
+import os, re, json, html, time, hashlib, math, struct, zlib, urllib.request, urllib.parse, sys
+from io import BytesIO
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -12,12 +13,11 @@ ADMIN_USER_IDS = {x.strip() for x in os.environ.get('ADMIN_USER_IDS', '').split(
 if ADMIN_USER_ID: ADMIN_USER_IDS.add(ADMIN_USER_ID)
 TZ = ZoneInfo('Asia/Ho_Chi_Minh')
 STATE_FILE = os.environ.get('BOT_STATE_FILE', 'bot_state.json')
-MAX_DAILY_POSTS = int(os.environ.get('MAX_DAILY_POSTS', '10'))
-MAX_DAILY_NEWS = int(os.environ.get('MAX_DAILY_NEWS', '6'))
-URGENT_AUTO_PUBLISH = os.environ.get('URGENT_AUTO_PUBLISH', 'true').strip().casefold() in ('1', 'true', 'yes', 'on')
-# Production now uses the persistent Supabase-backed scheduler and publishes directly to the channel.
-# Set false only to temporarily restore the legacy private-preview workflow.
-AUTO_PUBLISH_DIRECT = os.environ.get('AUTO_PUBLISH_DIRECT', 'false').strip().casefold() in ('1', 'true', 'yes', 'on')
+MAX_DAILY_POSTS = int(os.environ.get('MAX_DAILY_POSTS', '6'))
+MAX_DAILY_NEWS = int(os.environ.get('MAX_DAILY_NEWS', '3'))
+MAX_DAILY_ADS = int(os.environ.get('MAX_DAILY_ADS', '1'))
+# Retained only so old configuration cannot enable an unreviewed publication path.
+AUTO_PUBLISH_DIRECT = False
 MAX_AI_CALLS_PER_DAY = int(os.environ.get('MAX_AI_CALLS_PER_DAY', '40'))
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '').strip()
 GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-3.8-flash').strip()
@@ -272,6 +272,8 @@ def ensure_production_state_backend():
     """GitHub-hosted production runs must not persist private editorial state in the public repo."""
     if os.environ.get('BOT_TEST_MODE') == '1':
         return
+    if os.environ.get('GITHUB_ACTIONS', '').casefold() == 'true' and AUTO_PUBLISH_DIRECT:
+        raise RuntimeError('Прямые публикации отключены: каждый материал должен пройти предпросмотр редактора и 15-минутный таймер.')
     configured = bool(SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY)
     partial = bool(SUPABASE_URL) != bool(SUPABASE_SERVICE_ROLE_KEY)
     if partial:
@@ -357,10 +359,11 @@ def load_state():
         'seen_links': [], 'seen_titles': [], 'seen_fingerprints': [], 'last_update_id': 0, 'pending_ad': {},
         'ads': [], 'paused': False, 'pause_until': '', 'daily_counts': {}, 'last_slots': {},
         'game_history': [], 'last_news_hour': '', 'last_news_published_at': '',
-        'manual_posts': [], 'pending_manual_post': {}, 'published_news': [],
+        'manual_posts': [], 'pending_manual_post': {}, 'published_news': [], 'routine_published': [],
         'pending_news_review': {}, 'review_queue': [], 'review_editing': {},
         'rejected_news_links': [], 'rejected_news_fingerprints': [], 'rejected_news_titles': [],
         'date_checked_links': {}, 'weather_snapshot': {}, 'weather_alert_state': {},
+        'weather_image_library': {}, 'weather_image_recent': {},
         'ai_usage_daily': {}, 'diagnostics': {}
     }
     for key, value in defaults.items():
@@ -368,14 +371,14 @@ def load_state():
     for key in (
         'seen_links', 'seen_titles', 'seen_fingerprints', 'ads', 'published_news', 'game_history',
         'manual_posts', 'rejected_news_links', 'rejected_news_fingerprints', 'rejected_news_titles',
-        'review_queue'
+        'review_queue', 'routine_published'
     ):
         if not isinstance(s.get(key), list):
             raise RuntimeError(f'Поле {key} в состоянии имеет неверный формат; сохранение остановлено.')
     for key in (
         'daily_counts', 'last_slots', 'pending_ad', 'pending_manual_post', 'pending_news_review',
         'review_editing', 'date_checked_links', 'weather_snapshot', 'weather_alert_state',
-        'ai_usage_daily', 'diagnostics'
+        'weather_image_library', 'weather_image_recent', 'ai_usage_daily', 'diagnostics'
     ):
         if not isinstance(s.get(key), dict):
             raise RuntimeError(f'Поле {key} в состоянии имеет неверный формат; сохранение остановлено.')
@@ -820,6 +823,138 @@ def review_caption_too_long(item, limit=950):
     return bool(continuation)
 
 
+def make_weather_card(item):
+    """Render a dark, readable hourly strip over the selected Nha Trang weather photo."""
+    try:
+        from PIL import Image, ImageDraw, ImageEnhance, ImageFont
+    except ImportError as exc:
+        raise RuntimeError('Для погодной карточки не установлен Pillow.') from exc
+    photo_url = normalize_image_url(item.get('image_url') or '')
+    if not photo_url:
+        raise RuntimeError('Для погодной карточки не выбрано фото.')
+    source = Image.open(BytesIO(get_url(photo_url))).convert('RGB')
+    source.thumbnail((1280, 1280))
+    image = ImageEnhance.Brightness(source).enhance(0.72).convert('RGBA')
+    draw = ImageDraw.Draw(image, 'RGBA')
+    width, height = image.size
+    panel_top = int(height * 0.56)
+    draw.rectangle((0, panel_top, width, height), fill=(5, 18, 31, 220))
+    font_path = next((p for p in (
+        '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+        '/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf',
+        '/Library/Fonts/Arial Unicode.ttf',
+    ) if os.path.exists(p)), None)
+    if not font_path:
+        raise RuntimeError('Не найден шрифт с кириллицей для погодной карточки.')
+    title_font = ImageFont.truetype(font_path, max(22, width // 27))
+    row_font = ImageFont.truetype(font_path, max(17, width // 38))
+    xpad = max(20, width // 24)
+    y = panel_top + max(16, height // 38)
+    draw.text((xpad, y), 'НЯЧАНГ · ПРОГНОЗ НА 6 ЧАСОВ', font=title_font, fill=(255, 255, 255, 255))
+    y += title_font.size + max(12, height // 42)
+    rows = item.get('weather_hours') or []
+    for row in rows[:6]:
+        line = f"{row.get('time', '—')}   {row.get('temp', '—')}°   дождь {row.get('rain', '—')}%"
+        draw.text((xpad, y), line, font=row_font, fill=(238, 244, 249, 255))
+        y += row_font.size + max(5, height // 100)
+    output = BytesIO()
+    image.convert('RGB').save(output, format='JPEG', quality=88, optimize=True)
+    return output.getvalue()
+
+
+def publish_weather_alert(s, item):
+    """Publish a confirmed severe weather change immediately, outside the editorial queue."""
+    caption, continuation = split_photo_caption(review_post_text(item), limit=950)
+    if continuation:
+        raise RuntimeError('Срочное погодное сообщение превышает лимит подписи Telegram.')
+    image_url = normalize_image_url(item.get('image_url') or '')
+    if image_url:
+        item['image_url'] = image_url
+        card = make_weather_card(item)
+        sent = api_multipart('sendPhoto', {
+            'chat_id': CHANNEL, 'caption': caption, 'parse_mode': 'HTML'
+        }, {'photo': ('nhatrang-weather.jpg', card, 'image/jpeg')})
+    else:
+        sent = post_text(caption)
+    if not isinstance(sent, dict) or not sent.get('message_id'):
+        raise RuntimeError('Telegram не подтвердил срочную публикацию погоды.')
+    published_at = iso(now())
+    item['status'] = 'published'
+    item['published_at'] = published_at
+    item['telegram_message_id'] = sent['message_id']
+    bump_today(s)
+    weather_state = s.setdefault('weather_alert_state', {})
+    weather_state['last_alert_posted_at'] = published_at
+    weather_state['last_alert_message_id'] = sent['message_id']
+    return sent
+
+
+def publish_weather_test_now(s):
+    """Send one explicitly requested live forecast card for a manual workflow test."""
+    data = fetch_weather_data()
+    n = now()
+    current = data.get('current') or {}
+    temp = _numeric(current.get('temperature_2m'))
+    feels = _numeric(current.get('apparent_temperature'))
+    window = _weather_next_window(data, n)
+    details = []
+    if temp is not None:
+        line = f'Сейчас {round(temp)}°C'
+        if feels is not None:
+            line += f', ощущается как {round(feels)}°C'
+        details.append(line + '.')
+    condition = weather_condition_name(current.get('weather_code'))
+    if condition != 'нет данных':
+        details.append(condition.capitalize() + '.')
+    hourly = data.get('hourly') or {}
+    rain_times = []
+    weather_hours = []
+    times = hourly.get('time') or []
+    temps = hourly.get('temperature_2m') or []
+    rain_values = hourly.get('precipitation_probability') or []
+    for i, raw_time in enumerate(times):
+        dt = _weather_time(str(raw_time))
+        if not dt or not n <= dt < n + timedelta(hours=6):
+            continue
+        hour_temp = _numeric(temps[i]) if i < len(temps) else None
+        hour_rain = _numeric(rain_values[i]) if i < len(rain_values) else None
+        weather_hours.append({
+            'time': dt.strftime('%H:%M'),
+            'temp': round(hour_temp) if hour_temp is not None else '—',
+            'rain': round(hour_rain) if hour_rain is not None else '—',
+        })
+        if hour_rain is not None and hour_rain == window.get('rain_max'):
+            rain_times.append(dt)
+    if window.get('rain_max') is None:
+        details.append('Вероятность дождя: нет данных.')
+    else:
+        peak = f' около {min(rain_times):%H:%M}' if rain_times else ''
+        details.append(f'Дождь в ближайшие 6 ч: до {round(window["rain_max"])}%{peak}.')
+    if window.get('wind_max') is not None:
+        details.append(f'Ветер до {round(window["wind_max"])} км/ч.')
+    if window.get('rain_max') is not None and window['rain_max'] >= 70 or window.get('severe_code') is not None:
+        details.append('К морю лучше выйти до дождя; долгую прогулку отложить.')
+    else:
+        details.append('Для прогулки к морю погода подходит.')
+    details.append('Тестовая публикация. Вы сегодня пойдёте к морю? 👍 / 👎')
+    category, query = weather_image_query(data, n.date())
+    image = select_weather_image(s, category, query)
+    item = {
+        'kind': 'weather_update', 'kind_label': 'Тестовый прогноз погоды',
+        'headline': 'Тест погоды в Нячанге', 'title': 'Тест погоды в Нячанге',
+        'body': '\n\n'.join(details), 'source_attribution_html': '',
+        'reaction_line': '', 'urgent': False, 'weather_hours': weather_hours,
+        'weather_image_category': category, 'image_query': query,
+        'image_url': (image or {}).get('url', ''),
+        'image_credit_html': (image or {}).get('credit_html', ''),
+        'idempotency_key': 'weather_test:' + n.strftime('%Y%m%d%H%M')
+    }
+    result = publish_weather_alert(s, item)
+    save_state(s)
+    print('One-time weather test published:', result['message_id'])
+    return result
+
+
 def apply_review_photo(item, file_id):
     """Apply a replacement photo to the actual published media payload, including albums."""
     item['image_file_id'] = file_id
@@ -931,10 +1066,17 @@ def send_review_preview(item):
                         caption = '🇻🇳 Новости Нячанга'
                     method = 'sendVideo' if media_type == 'video' else 'sendPhoto'
                     field = 'video' if media_type == 'video' else 'photo'
-                    sent = api(method, {
-                        'chat_id': admin_id, field: media_id,
-                        'caption': caption, 'parse_mode': 'HTML'
-                    })
+                    if item.get('kind') == 'weather_update' and not item.get('weather_card_ready'):
+                        card = make_weather_card(item)
+                        sent = api_multipart('sendPhoto', {
+                            'chat_id': admin_id, 'caption': caption, 'parse_mode': 'HTML'
+                        }, {'photo': ('nhatrang-weather.jpg', card, 'image/jpeg')})
+                        item['weather_card_ready'] = True
+                    else:
+                        sent = api(method, {
+                            'chat_id': admin_id, field: media_id,
+                            'caption': caption, 'parse_mode': 'HTML'
+                        })
                     if not isinstance(sent, dict) or not sent.get('message_id'):
                         raise RuntimeError('Telegram did not confirm the preview media.')
                     item['image_file_id'] = (
@@ -958,15 +1100,37 @@ def send_review_preview(item):
                 admin_id, review_status_text(item),
                 review_keyboard(item['id'], item.get('version', 1))
             )
-            if status and status.get('message_id'):
-                ref = {'chat_id': admin_id, 'message_id': status['message_id']}
-                item['preview_messages'].append(ref)
-                item['review_status_messages'].append(ref)
+            if not status or not status.get('message_id'):
+                raise RuntimeError('Telegram did not confirm the preview controls.')
+            ref = {'chat_id': admin_id, 'message_id': status['message_id']}
+            item['preview_messages'].append(ref)
+            item['review_status_messages'].append(ref)
             delivered.add(admin_id)
         except Exception as exc:
             print('Review preview failed for one editor:', type(exc).__name__, str(exc)[:180])
 
-    return delivered == set(admins) and bool(item.get('preview_messages'))
+    delivered_to_all = delivered == set(admins) and bool(item.get('preview_messages'))
+    if delivered_to_all:
+        planned = parse_dt_strict(item.get('planned_at')) or now()
+        due = max(planned, now() + timedelta(minutes=15))
+        if due != planned:
+            item['planned_at'] = iso(due)
+            timer_visible_to_all = True
+            for ref in item.get('review_status_messages', []):
+                try:
+                    updated = api('editMessageText', {
+                        'chat_id': ref['chat_id'], 'message_id': ref['message_id'],
+                        'text': review_status_text(item), 'parse_mode': 'HTML',
+                        'reply_markup': json.dumps(review_keyboard(item['id'], item.get('version', 1)), ensure_ascii=False)
+                    })
+                    if updated is None or updated is False:
+                        timer_visible_to_all = False
+                except Exception as exc:
+                    print('Could not refresh review timer after preview:', type(exc).__name__)
+                    timer_visible_to_all = False
+            if not timer_visible_to_all:
+                return False
+    return delivered_to_all
 
 
 
@@ -1032,6 +1196,8 @@ def promote_next_review_item(s):
             item['status'] = 'needs_edit'
             item['needs_edit_reason'] = 'caption_too_long'
         if send_review_preview(item):
+            planned = parse_dt_strict(item.get('planned_at')) or now()
+            item['planned_at'] = iso(max(planned, now() + timedelta(minutes=15)))
             if item.get('status') != 'needs_edit':
                 item['status'] = 'pending_review'
                 item.pop('needs_edit_reason', None)
@@ -1158,6 +1324,9 @@ def queue_review_item(s, item, planned_at=None, slot_key=None):
         print('Private preview failed; candidate kept in queue:', item_id)
         return True
 
+    planned = parse_dt_strict(item.get('planned_at')) or now()
+    item['planned_at'] = iso(max(planned, now() + timedelta(minutes=15)))
+
     s['pending_news_review'] = item
     s['review_editing'] = {}
     print('Queued for review:', item_id, 'planned_at=', item['planned_at'], 'kind=', item.get('kind'))
@@ -1216,24 +1385,15 @@ def publish_review_item(s, item, preserve_pending=False):
             if not isinstance(result, dict) or not result.get('message_id'):
                 raise RuntimeError('Telegram did not confirm the news media.')
         except Exception as exc:
-            print('Saved media id failed; retrying with article/Commons/fallback image:', type(exc).__name__)
-            result = post_with_image(
-                post_text_value,
-                image_url=item.get('image_url') or None,
-                image_query=item.get('image_query') or None
-            )
+            print('Saved preview media id failed; retrying the same reviewed image URL:', type(exc).__name__)
+            image_url = normalize_image_url(item.get('image_url') or '')
+            result = send_photo_url_or_upload(image_url, caption) if image_url else None
     else:
-        try:
-            result = post_with_image(
-                post_text_value,
-                image_url=item.get('image_url') or None,
-                image_file_id=item.get('image_file_id') or None,
-                image_query=item.get('image_query') or None
-            )
-        except MediaCaptionTooLongError:
+        caption, continuation = split_photo_caption(post_text_value, limit=950)
+        if continuation:
             return hold_item_for_text_edit(item)
-        if not result and review_caption_too_long(item):
-            return hold_item_for_text_edit(item)
+        image_url = normalize_image_url(item.get('image_url') or '')
+        result = send_photo_url_or_upload(image_url, caption) if image_url else None
 
     if not result:
         raise RuntimeError('Публикация не вернула подтверждение Telegram.')
@@ -1258,6 +1418,10 @@ def publish_review_item(s, item, preserve_pending=False):
         }])[-100:]
         s['last_news_hour'] = now().strftime('%Y-%m-%d-%H')
         s['last_news_published_at'] = timestamp
+    if item.get('kind') in ('morning_greeting','night'):
+        history=s.setdefault('routine_published',[])
+        history.append({'kind':item.get('kind'),'published_at':timestamp})
+        s['routine_published']=[entry for entry in history if parse_dt_strict(entry.get('published_at')) and parse_dt_strict(entry.get('published_at')).date()>=now().date()-timedelta(days=7)][-20:]
     bump_today(s)
     if not preserve_pending:
         delete_review_previews(item)
@@ -1362,6 +1526,23 @@ def process_news_review(s):
 
     kind = str(item.get('kind') or '')
     priority_weather = kind.startswith('weather') or bool(item.get('urgent'))
+    if kind == 'news' and not item.get('urgent'):
+        last_news = parse_dt_strict(s.get('last_news_published_at'))
+        if last_news and timedelta(0) <= now() - last_news < timedelta(hours=2):
+            item['planned_at'] = iso(last_news + timedelta(hours=2))
+            for ref in item.get('review_status_messages', []):
+                try:
+                    api('editMessageText', {
+                        'chat_id': ref['chat_id'], 'message_id': ref['message_id'],
+                        'text': review_status_text(item), 'parse_mode': 'HTML',
+                        'reply_markup': json.dumps(review_keyboard(item['id'], item.get('version', 1)), ensure_ascii=False)
+                    })
+                except Exception as exc:
+                    print('News-spacing status update failed:', type(exc).__name__)
+            for admin_id in sorted(ADMIN_USER_IDS):
+                try: send_dm(admin_id, f'🕒 Новость <code>{html.escape(item.get("id", ""))}</code> перенесена: между обычными новостями выдерживается минимум 2 часа.')
+                except Exception: pass
+            return
     if is_paused(s) and not priority_weather:
         later = top_pause_until(s)
         planned = later if later > now() else now() + timedelta(minutes=5)
@@ -1636,7 +1817,7 @@ def commons_image_candidates(query, max_candidates=8):
             errors.append(type(exc).__name__)
             continue
         # One or two viable images are enough; continue once more only to build retry choices.
-        if len(results) >= min(3, max_candidates):
+        if len(results) >= min(15, max_candidates):
             break
     if errors:
         print('Commons multi-query search encountered recoverable errors:', ','.join(errors[:3]))
@@ -1647,6 +1828,28 @@ def commons_image(query):
     """Backward-compatible first-result wrapper for Commons image search."""
     matches = commons_image_candidates(query, max_candidates=1)
     return matches[0] if matches else None
+
+
+def select_weather_image(s, category, query):
+    """Maintain a reusable licensed image pool per weather type and rotate recent choices."""
+    library=s.setdefault('weather_image_library', {})
+    recent=s.setdefault('weather_image_recent', {})
+    pool=library.get(category) if isinstance(library.get(category), list) else []
+    if len(pool)<15:
+        found=commons_image_candidates(query,max_candidates=15)
+        by_url={entry.get('url'):entry for entry in pool if isinstance(entry,dict) and entry.get('url')}
+        for entry in found:
+            if isinstance(entry,dict) and entry.get('url'):
+                by_url.setdefault(entry['url'],entry)
+        pool=list(by_url.values())[:15]
+        library[category]=pool
+    used=set(recent.get(category) or [])
+    candidate=next((entry for entry in pool if entry.get('url') not in used),None)
+    if not candidate and pool:
+        candidate=pool[0]
+    if candidate:
+        recent[category]=(list(recent.get(category) or [])+[candidate['url']])[-10:]
+    return candidate
 
 
 
@@ -1812,21 +2015,8 @@ def post_with_image(text, image_url=None, illustration=False, image_query=None, 
         if isinstance(result, dict) and result.get('message_id'):
             return result
 
-    # Final guarantee: do not ask the editor for an image and do not strand the post in the queue.
-    # The fallback is an original generic illustration, not a claim that it depicts the reported event.
-    fallback_png = fallback_editorial_png(query)
-    try:
-        result = api_multipart(
-            'sendPhoto',
-            {'chat_id': CHANNEL, 'caption': caption, 'parse_mode': 'HTML'},
-            {'photo': ('nhatrang-life-editorial.png', fallback_png, 'image/png')}
-        )
-        if isinstance(result, dict) and result.get('message_id'):
-            print('Published with original fallback illustration after topical image providers failed.')
-            return result
-    except Exception as exc:
-        print('Telegram rejected original fallback illustration:', type(exc).__name__)
-    print('All image providers and final illustration upload failed; publication will retry automatically.')
+    # Do not silently replace the reviewed image with a generic illustration.
+    print('No reviewed image could be published; the post remains queued for a safe retry.')
     return None
 
 
@@ -2119,6 +2309,37 @@ def count_today(s):
         return 0
     return int(daily_counts.get(key, 0))
 
+
+def count_ads_on_date(s, day=None, exclude=None):
+    day=(day or now().date()).isoformat()
+    count=0
+    for ad in s.get('ads',[]):
+        if ad is exclude: continue
+        published=parse_dt_strict(ad.get('published_at'))
+        scheduled=parse_dt_strict(ad.get('scheduled_at'))
+        if (published and published.date().isoformat()==day) or (scheduled and scheduled.date().isoformat()==day):
+            count+=1
+    pending=s.get('pending_ad') or {}
+    if pending and pending is not exclude and not pending.get('awaiting_content'):
+        scheduled=parse_dt_strict(pending.get('scheduled_at'))
+        due=parse_dt_strict(pending.get('review_due_at'))
+        expected=scheduled or due
+        if expected and expected.date().isoformat()==day: count+=1
+    return count
+
+
+def ad_weather_gap_end(moment):
+    """Return the next time outside the three-hour buffer around the 08:00/18:00 forecast."""
+    if not isinstance(moment,datetime): moment=now()
+    targets=[]
+    for offset in (-1,0,1,2):
+        day=moment.date()+timedelta(days=offset)
+        targets.extend(datetime(day.year,day.month,day.day,hour,0,tzinfo=TZ) for hour in (8,18))
+    for target in sorted(targets):
+        if abs(moment-target)<timedelta(hours=3):
+            return target+timedelta(hours=3)
+    return None
+
 def bump_today(s):
     key = now().date().isoformat(); s['daily_counts'][key] = int(s['daily_counts'].get(key,0))+1
     s['daily_counts'] = {k:v for k,v in s['daily_counts'].items() if k >= (now().date()-timedelta(days=3)).isoformat()}
@@ -2241,94 +2462,45 @@ def split_manual_content(content):
 
 
 def publish_manual_post(item, s, uid=None):
-    """Publish an explicitly approved tip without generated headline or source URL."""
+    """Move a legacy manual submission into the shared preview-and-timer queue."""
     if is_paused(s):
         raise ValueError('Публикации на паузе из-за ручной или рекламной паузы.')
     if count_today(s) >= MAX_DAILY_POSTS:
         raise ValueError(f'Достигнут дневной лимит в {MAX_DAILY_POSTS} публикаций.')
-
-    raw = clean_multiline((item.get('content') or '').strip())
-    title, body = split_manual_content(raw)
-    source_match = re.search(r'https?://[^\s<>]+', raw)
-    source_link = source_match.group(0).rstrip('.,);]') if source_match else ''
-    body = re.sub(r'(?i)(?:источник|source|ссылка на источник)\s*:\s*https?://\S+', '', body)
-    body = re.sub(r'https?://\S+', '', body)
-    body = clean_multiline(body)
+    raw=clean_multiline((item.get('content') or '').strip())
+    headline,body=split_manual_content(raw)
+    source_match=re.search(r'https?://[^\s<>]+',raw)
+    source_url=source_match.group(0).rstrip('.,);]') if source_match else ''
+    body=re.sub(r'(?i)(?:источник|source|ссылка на источник)\s*:\s*https?://\S+','',body)
+    body=clean_multiline(re.sub(r'https?://\S+','',body))
     if not body:
-        raise ValueError('В материале не осталось текста новости после удаления заголовка и ссылок. Добавь описание и повтори публикацию.')
-    body_html = html.escape(body)
-    result = None
-    post_type = item.get('type') or 'text'
-    file_id = item.get('file_id')
-
-    if post_type == 'album' and item.get('media_items'):
-        media_items = item.get('media_items') or []
-        if len(media_items) < 2:
-            raise ValueError('В альбоме должно быть минимум два фото или видео.')
-        body_excerpt = body[:420].strip()
-        caption = ((html.escape(body_excerpt) + footer()) if body_excerpt else footer()).strip()
-        if len(caption) > 1024:
-            raise ValueError('Подпись альбома превышает лимит Telegram 1024 символа.')
-        media = []
-        for media_item in media_items[:10]:
-            if media_item.get('type') not in ('photo', 'video') or not media_item.get('file_id'):
-                continue
-            element = {'type': media_item['type'], 'media': media_item['file_id']}
-            if not media:
-                element['caption'] = caption
-                element['parse_mode'] = 'HTML'
-            media.append(element)
-        if len(media) < 2:
-            raise ValueError('В альбоме должно быть минимум два допустимых медиафайла.')
-        album_result = api('sendMediaGroup', {'chat_id': CHANNEL, 'media': json.dumps(media, ensure_ascii=False)})
-        item['published_message_ids'] = [message.get('message_id') for message in (album_result or []) if message.get('message_id')]
-        result = {'message_id': item['published_message_ids'][0]} if item.get('published_message_ids') else None
-        if len(body) > 420:
-            for part in split_html_text(html.escape(body[420:].strip())):
-                post_text(part)
-                time.sleep(0.2)
-    elif post_type in ('photo', 'video') and file_id:
-        body_excerpt, remainder = body, ''
-        if len(body) > 420:
-            cut = body.rfind(' ', 0, 420)
-            if cut < 250:
-                cut = 420
-            body_excerpt = body[:cut].strip()
-            remainder = body[cut:].strip()
-        caption = (html.escape(body_excerpt).strip() + footer()).strip()
-        if len(caption) > 1024:
-            raise ValueError('Подпись к медиа превышает лимит Telegram 1024 символа.')
-        method, field = ('sendPhoto', 'photo') if post_type == 'photo' else ('sendVideo', 'video')
-        result = api(method, {'chat_id': CHANNEL, field: file_id, 'caption': caption, 'parse_mode': 'HTML'})
-        if remainder:
-            for part in split_html_text(html.escape(remainder)):
-                post_text(part)
-                time.sleep(0.2)
-    else:
-        result = post_with_image(
-            (body_html + footer()).strip(),
-            image_query=news_image_query(title, body)
-        )
-
-    if not isinstance(result, dict) or not result.get('message_id'):
-        raise ValueError('Telegram не подтвердил публикацию. Материал оставлен в очереди и не отмечен опубликованным; проверь фото и повтори предпросмотр.')
-    item['status'] = 'published'
-    item['published_at'] = iso(now())
-    item['published_message_id'] = result.get('message_id')
-    item['title'] = title
-    s['published_news'] = (s.get('published_news', []) + [{
-        'title': title, 'summary': body, 'link': source_link,
-        'published_at': iso(now()), 'source_published_at': iso(now()),
-        'urgent': False, 'manual': True
-    }])[-100:]
-    if source_link:
-        s['seen_links'] = (s.get('seen_links', []) + [source_link])[-1000:]
-    s['seen_titles'] = (s.get('seen_titles', []) + [title])[-500:]
-    s['seen_fingerprints'] = (s.get('seen_fingerprints', []) + [title_fingerprint(title)])[-1000:]
-    bump_today(s)
+        raise ValueError('В материале не осталось текста после отделения заголовка и ссылки. Добавь описание и повтори попытку.')
+    post_type=item.get('type') or 'text'
+    candidate={
+        'kind':'news' if source_url else 'manual_tip',
+        'kind_label':'Предложенная новость' if source_url else 'Материал редактора',
+        'headline':headline,'title':headline,'source_title':headline,'body':body,
+        'link':source_url,'source_url':source_url,
+        'source_name':source_name_from_url(source_url) if source_url else '',
+        'image_query':news_image_query(headline,body),
+        'image_file_id':item.get('file_id','') if post_type in ('photo','video') else '',
+        'media_type':post_type if post_type in ('photo','video') else '',
+        'media_items':item.get('media_items') or [],'urgent':False,
+        'idempotency_key':'legacy-manual:'+str(item.get('id',''))
+    }
+    queued=queue_review_item(s,candidate)
+    if not queued:
+        raise ValueError('Материал не попал в очередь предпросмотра. Возможно, он уже добавлен.')
+    review=(s.get('pending_news_review') or {})
+    if review.get('idempotency_key')!=candidate['idempotency_key']:
+        review=next((entry for entry in s.get('review_queue',[]) if entry.get('idempotency_key')==candidate['idempotency_key']),{})
+    item['status']='queued_for_review'
+    item['review_id']=review.get('id','')
+    item['title']=headline
+    item['queued_at']=iso(now())
     if uid:
-        send_dm(uid, f'Материал <code>{html.escape(item["id"])}</code> опубликован в канале.')
-    return result
+        send_dm(uid,f'✅ Материал <code>{html.escape(str(item.get("id","")))}</code> добавлен в предпросмотр. Публикация возможна после успешной проверки и 15-минутного таймера.')
+    return {'queued':True,'review_id':item['review_id']}
 
 def handle_admin_album(messages, s):
     """Queue a manual media album through the same private editorial flow as every other post."""
@@ -2729,6 +2901,8 @@ def handle_admin_message(msg, s):
         if not WEATHERAPI_KEY:
             send_dm(uid, 'Создание/публикация рекламы заблокированы, пока не настроен WEATHERAPI_KEY. Добавь его в GitHub Actions Secrets и повтори /ads.')
             return
+        if count_ads_on_date(s,now().date())>=MAX_DAILY_ADS:
+            send_dm(uid,f'На сегодня уже запланирована или опубликована реклама (лимит: {MAX_DAILY_ADS}). Черновик не перезаписан.',main_menu()); return
         if (s.get('pending_manual_post') or {}).get('awaiting_content'):
             send_dm(uid, 'Сначала отправь материал для очереди новостей или отмени этот черновик командой /cancel.')
             return
@@ -2778,6 +2952,11 @@ def handle_admin_message(msg, s):
             send_dm(uid,'Формат: /schedule 2026-10-25 14:30'); return
         if when<=now():
             send_dm(uid,'Время должно быть в будущем.'); return
+        if count_ads_on_date(s,when.date(),exclude=ad)>=MAX_DAILY_ADS:
+            send_dm(uid,f'На {when:%d.%m.%Y} уже запланирована или опубликована реклама (лимит: {MAX_DAILY_ADS}).'); return
+        gap_end=ad_weather_gap_end(when)
+        if gap_end:
+            send_dm(uid,f'Выбери время не ближе трёх часов к прогнозу погоды. Ближайшее допустимое время: {gap_end:%d.%m.%Y %H:%M} (Нячанг).'); return
         ad['scheduled_at']=iso(when); ad['awaiting_content']=False; ad['created_by']=uid; ad['id']=str(int(time.time())); ad.pop('review_due_at',None); ad['review_status']='scheduled'
         s['ads'].append(ad); s['pending_ad']={}
         send_dm(uid,f'Реклама запланирована на {when.strftime("%d.%m.%Y %H:%M")} по времени Нячанга. ID: <code>{ad["id"]}</code>.')
@@ -2937,6 +3116,7 @@ def handle_admin_message(msg, s):
             '<b>Настройки бота</b>',
             f'Максимум публикаций в день: {MAX_DAILY_POSTS}',
             f'Максимум обычных новостей в день: {MAX_DAILY_NEWS}',
+            f'Максимум рекламы в день: {MAX_DAILY_ADS} · интервал от прогноза: 3 часа',
             'Разрешённые реакции: ❤️ 🙏 😱 👍 🤣',
             f'ИИ-редактор: {"подключён" if GEMINI_API_KEY else "не подключён (правиловый резервный режим)"}',
             f'Приватное хранилище: {"Supabase настроен" if supabase_state_configured() else "не настроено"}',
@@ -2957,6 +3137,7 @@ def handle_admin_message(msg, s):
             f'Время Нячанга: {now().strftime("%d.%m.%Y %H:%M:%S")}\n'
             f'Постов сегодня: {count_today(s)}/{MAX_DAILY_POSTS}\n'
             f'Обычных новостей за день: {count_news_pipeline(s)}/{MAX_DAILY_NEWS}\n'
+            f'Реклам сегодня: {count_ads_on_date(s)}/{MAX_DAILY_ADS}\n'
             f'Материалов в очереди: {len(s.get("review_queue", []))}{review_status}\n'
             f'Новости: {"на паузе" if is_paused(s) else "разрешены"}\n'
             f'Окно рекламной паузы до: {until.strftime("%d.%m %H:%M") if until > now() else "нет"}\n'
@@ -2971,6 +3152,13 @@ def handle_admin_message(msg, s):
 def publish_ad(ad,s,uid=None):
     if not WEATHERAPI_KEY:
         raise ValueError('Перед размещением рекламы настрой secret WEATHERAPI_KEY: бесплатный Open-Meteo endpoint предназначен для некоммерческого режима. WeatherAPI.com предлагает бесплатный тариф с коммерческим использованием.')
+    if count_today(s)>=MAX_DAILY_POSTS:
+        raise ValueError(f'Достигнут дневной лимит {MAX_DAILY_POSTS} публикаций; рекламный черновик сохранён.')
+    if count_ads_on_date(s,now().date(),exclude=ad)>=MAX_DAILY_ADS:
+        raise ValueError(f'Достигнут лимит {MAX_DAILY_ADS} рекламной публикации в сутки; черновик сохранён.')
+    gap_end=ad_weather_gap_end(now())
+    if gap_end:
+        raise ValueError(f'Рекламу нельзя размещать ближе чем за 3 часа к погодному выпуску. Ближайшее допустимое время: {gap_end:%d.%m %H:%M} (Нячанг).')
     top=int(ad['top_hours']); life=int(ad['life_hours']); t=now()
     result=send_ad_content(ad)
     ad['id']=ad.get('id') or str(result['message_id'])
@@ -3394,6 +3582,12 @@ def routine_posts(s):
     if is_paused(s) or count_today(s) >= MAX_DAILY_POSTS:
         return
     n = now()
+    week_start=n.date()-timedelta(days=n.weekday())
+    recent=[entry for entry in s.get('routine_published',[]) if parse_dt_strict(entry.get('published_at')) and parse_dt_strict(entry.get('published_at')).date()>=week_start]
+    routine_items=[s.get('pending_news_review') or {}]+list(s.get('review_queue') or [])
+    today_queued=any(item and item.get('kind') in ('morning_greeting','night') and str(item.get('created_at','')).startswith(n.date().isoformat()) for item in routine_items)
+    if len(recent)>=3 or today_queued:
+        return
 
     # Exact morning-engagement slot from the channel brief; don't emit it outside its catch-up window.
     morning_key = 'review_morning'
@@ -3422,6 +3616,7 @@ def routine_posts(s):
         planned = morning_target if n < morning_target else n + timedelta(minutes=15)
         if queue_review_item(s, morning_item, planned_at=planned, slot_key=morning_key):
             mark_slot(s, morning_key)
+            return
 
     # The night-game starting name varies by date; no additional reaction-bait block is added.
     night_key = 'review_night'
@@ -3608,39 +3803,88 @@ def weather_period_summary(data, target_date, start_hour, end_hour):
 
 
 def format_weather_forecast(data, period, current_time):
+    """Render the short public forecast: temperature, rain probability, wind and update time."""
     target = current_time.date() if period == 'morning' else current_time.date()+timedelta(days=1)
     idx=weather_daily_index(data,target)
     cur=data.get('current') or {}
-    icons={0:'☀️',1:'🌤️',2:'⛅',3:'☁️',45:'🌫️',48:'🌫️',51:'🌦️',53:'🌦️',55:'🌧️',61:'🌦️',63:'🌧️',65:'⛈️',80:'🌦️',81:'🌧️',82:'⛈️',95:'⛈️',96:'⛈️',99:'⛈️'}
     parts=[]
-    if period=='morning':
-        temp=_numeric(cur.get('temperature_2m')); feels=_numeric(cur.get('apparent_temperature')); wind=_numeric(cur.get('wind_speed_10m'))
-        if temp is None: parts.append('Сейчас не удалось получить подтверждённую температуру.')
-        else:
-            now_text=f'Сейчас в Нячанге {round(temp)}°C'
-            if feels is not None: now_text+=f', по ощущениям {round(feels)}°C'
-            now_text+=f', {weather_condition_name(cur.get("weather_code"))} {icons.get(cur.get("weather_code"),"🌤️")}.'
-            if wind is not None: now_text+=f' Ветер {round(wind)} км/ч.'
-            parts.append(now_text)
     lo=_weather_daily(data,'temperature_2m_min',idx); hi=_weather_daily(data,'temperature_2m_max',idx)
-    code=_weather_daily(data,'weather_code',idx); rain=_weather_daily(data,'precipitation_probability_max',idx)
-    label='Сегодня' if period=='morning' else 'Завтра'
-    if lo is not None and hi is not None: parts.append(f'{label} ({target:%d.%m}): {round(lo)}–{round(hi)}°C, {weather_condition_name(code)} {icons.get(code,"🌤️")}.')
-    elif code is not None: parts.append(f'{label} ({target:%d.%m}): {weather_condition_name(code)}.')
-    else: parts.append(f'{label} ({target:%d.%m}): дневной прогноз частично недоступен.')
-    parts.append('Максимальная вероятность дождя за день: нет данных.' if rain is None else f'Максимальная вероятность дождя за день: {round(rain)}%.')
-    parts.append('Почасовой прогноз:')
-    for start,end in ((6,12),(12,18),(18,24)): parts.append('• '+weather_period_summary(data,target,start,end)['text'])
-    updated=_weather_time(data.get('retrieved_at')) or current_time
-    parts.append(f'Обновлено: {updated:%d.%m.%Y %H:%M} по времени Нячанга (UTC+7).')
-    parts.append('Прогноз может меняться; при опасной погоде проверяйте официальные предупреждения.')
+    code=_weather_daily(data,'weather_code',idx); daily_rain=_weather_daily(data,'precipitation_probability_max',idx)
     if period=='morning':
-        questions=('Как началось утро? ❤️ — отлично; 🙏 — хочу спокойный день; 😱 — планы уже меняет погода.',
-                   'Вы сегодня за прогулку? 👍 — гулять; ❤️ — к морю; 🙏 — лучше спокойно.')
-        parts.append(questions[int(current_time.strftime('%j'))%len(questions)])
-    headline='Погода в Нячанге: прогноз на сегодня' if period=='morning' else 'Погода в Нячанге: прогноз на завтра'
-    return headline,'\n\n'.join(parts),target
+        temp=_numeric(cur.get('temperature_2m')); feels=_numeric(cur.get('apparent_temperature'))
+        if temp is not None:
+            line=f'Сейчас {round(temp)}°C'
+            if feels is not None: line+=f', ощущается как {round(feels)}°C'
+            line+=f', {weather_condition_name(cur.get("weather_code"))}.'
+            parts.append(line)
+        label='Сегодня'
+    else:
+        label='Завтра'
+    if lo is not None and hi is not None:
+        parts.append(f'{label}: {round(lo)}–{round(hi)}°C, {weather_condition_name(code)}.')
+    elif code is not None:
+        parts.append(f'{label}: {weather_condition_name(code)}.')
 
+    hourly=data.get('hourly') or {}
+    rain_rows=[]
+    for i,raw_time in enumerate(hourly.get('time') or []):
+        dt=_weather_time(str(raw_time)); values=hourly.get('precipitation_probability') or []
+        value=_numeric(values[i]) if i<len(values) else None
+        if dt and dt.date()==target and value is not None: rain_rows.append((dt,value))
+    peak=max((value for _,value in rain_rows),default=daily_rain)
+    likely=[dt for dt,value in rain_rows if peak is not None and value>=max(20,peak-10)]
+    if likely:
+        span=max(likely)-min(likely)
+        window='в течение дня' if span>=timedelta(hours=12) else (f'{min(likely):%H:%M}–{(max(likely)+timedelta(hours=1)):%H:%M}' if len(likely)>1 else f'около {likely[0]:%H:%M}')
+        parts.append(f'Дождь: до {round(peak)}%, вероятнее {window}.')
+    else:
+        parts.append('Дождь: нет данных.' if peak is None else f'Дождь: до {round(peak)}%.')
+    wind=_weather_daily(data,'wind_gusts_10m_max',idx)
+    if wind is not None: parts.append(f'Порывы ветра до {round(wind)} км/ч.')
+    if period=='evening':
+        night=[]; temps=hourly.get('temperature_2m') or []
+        for i,raw_time in enumerate(hourly.get('time') or []):
+            dt=_weather_time(str(raw_time)); value=_numeric(temps[i]) if i<len(temps) else None
+            if dt and dt.date()==target and dt.hour<6 and value is not None: night.append(value)
+        if night: parts.append(f'Ночью около {round(min(night))}°C.')
+    updated=_weather_time(data.get('retrieved_at')) or current_time
+    parts.append(f'Обновлено {updated:%H:%M}, Нячанг.')
+    headline='Погода в Нячанге: прогноз на сегодня' if period=='morning' else 'Погода в Нячанге: прогноз на завтра'
+    return headline,'\n'.join(parts),target
+
+
+WEATHER_IMAGE_CATEGORIES = {
+    'sunny': 'clear sunny beach morning blue sky',
+    'variable_clouds': 'partly cloudy tropical coast clouds and sun',
+    'overcast': 'overcast cloudy Nha Trang coastal city',
+    'light_rain': 'light tropical rain Nha Trang street',
+    'heavy_rain': 'heavy tropical rain flooded street Nha Trang',
+    'thunderstorm': 'thunderstorm lightning tropical coast Nha Trang',
+    'showers': 'tropical showers wet beach Nha Trang',
+    'fog_mist': 'mist fog coastal bay Nha Trang Vietnam',
+    'windy_sea': 'strong wind rough sea waves Nha Trang coast',
+    'storm': 'tropical storm high waves Nha Trang Vietnam',
+}
+
+
+def weather_image_query(data, target_date):
+    """Choose one of ten weather-specific, Nha Trang-focused image search categories."""
+    idx=weather_daily_index(data,target_date)
+    code=_weather_daily(data,'weather_code',idx)
+    rain=_weather_daily(data,'precipitation_probability_max',idx)
+    wind=_weather_daily(data,'wind_gusts_10m_max',idx)
+    code=int(code) if code is not None else None
+    if wind is not None and wind>=60: category='storm'
+    elif code in (95,96,99): category='thunderstorm'
+    elif wind is not None and wind>=45: category='windy_sea'
+    elif code in (45,48): category='fog_mist'
+    elif code in (65,67,82) or (rain is not None and rain>=70): category='heavy_rain'
+    elif code in (80,81): category='showers'
+    elif code in (51,53,55,61,63) or (rain is not None and rain>=25): category='light_rain'
+    elif code==3: category='overcast'
+    elif code in (1,2): category='variable_clouds'
+    else: category='sunny'
+    return category, f'Nha Trang Khanh Hoa Vietnam {WEATHER_IMAGE_CATEGORIES[category]} real photograph'
 
 def _weather_next_window(data, now_dt, hours=6):
     hourly=data.get('hourly') or {}; rows=[]
@@ -3664,8 +3908,8 @@ def weather_change_decision(previous, current):
     if not isinstance(previous,dict) or not isinstance(current,dict): return False,''
     old=_numeric(previous.get('rain_max')); new=_numeric(current.get('rain_max'))
     if old is not None and new is not None:
-        if new>=80 and old<60: return True,f'вероятность дождя выросла с {round(old)}% до {round(new)}%'
-        if new-old>=30 and new>=70: return True,f'вероятность дождя выросла с {round(old)}% до {round(new)}%'
+        if new>=85 and old<60: return True,f'вероятность дождя выросла с {round(old)}% до {round(new)}%'
+        if new-old>=35 and new>=80: return True,f'вероятность дождя выросла с {round(old)}% до {round(new)}%'
     if current.get('severe_code') is not None and previous.get('severe_code') is None:
         return True,f'появился прогноз: {weather_condition_name(current["severe_code"])}'
     oldwind=_numeric(previous.get('wind_max')); newwind=_numeric(current.get('wind_max'))
@@ -3675,11 +3919,11 @@ def weather_change_decision(previous, current):
 
 
 def check_weather_changes(s):
-    """Check forecasts every 30 minutes and never ignore newly issued provider alerts."""
+    """Poll hourly; post only material changes and keep ordinary alerts six hours apart."""
     state = s.setdefault('weather_alert_state', {})
     n = now()
     checked = _weather_time(state.get('last_checked_at'))
-    if checked and timedelta(0) <= n - checked < timedelta(minutes=30):
+    if checked and timedelta(0) <= n - checked < timedelta(hours=1):
         return
     try:
         data = fetch_weather_data()
@@ -3731,55 +3975,91 @@ def check_weather_changes(s):
     last_alert = _weather_time(state.get('last_alert_at'))
     severe_escalation = current.get('severe_code') is not None and previous.get('severe_code') is None
     # A new official warning is not suppressed by the ordinary two-hour forecast cooldown.
-    if last_alert and timedelta(0) <= n - last_alert < timedelta(hours=2) and not severe_escalation and not new_official_alerts:
+    if last_alert and timedelta(0) <= n - last_alert < timedelta(hours=6) and not severe_escalation and not new_official_alerts:
         state['official_alert_fingerprints'] = all_fingerprints[-300:]
         return
 
     old_rain = _numeric(previous.get('rain_max'))
     new_rain = _numeric(current.get('rain_max'))
-    details = [
-        f'Прогноз на ближайшие 6 часов заметно изменился: {reason}.',
-        f'Период: {n:%H:%M}–{(n + timedelta(hours=6)):%H:%M} по времени Нячанга.'
-    ]
+    current_weather = data.get('current') or {}
+    temp = _numeric(current_weather.get('temperature_2m'))
+    feels = _numeric(current_weather.get('apparent_temperature'))
+    details = []
+    if temp is not None:
+        line = f'Сейчас {round(temp)}°C'
+        if feels is not None:
+            line += f', ощущается как {round(feels)}°C'
+        details.append(line + '.')
+    condition = weather_condition_name(current_weather.get('weather_code'))
+    if condition and condition != 'переменная облачность':
+        details.append(condition.capitalize() + '.')
     if old_rain is not None and new_rain is not None:
-        details.append(f'Вероятность дождя: было {round(old_rain)}%, стало {round(new_rain)}%.')
+        rain_times = []
+        hourly = data.get('hourly') or {}
+        for i, raw_time in enumerate(hourly.get('time') or []):
+            dt = _weather_time(str(raw_time))
+            values = hourly.get('precipitation_probability') or []
+            value = _numeric(values[i]) if i < len(values) else None
+            if dt and n <= dt < n + timedelta(hours=6) and value == new_rain:
+                rain_times.append(dt)
+        when = f' около {min(rain_times):%H:%M}' if rain_times else ''
+        details.append(f'Дождь в ближайшие 6 ч: {round(old_rain)}% → {round(new_rain)}%{when}.')
     elif new_rain is not None:
-        details.append(f'Максимальная вероятность дождя в новом прогнозе: {round(new_rain)}%.')
+        details.append(f'Дождь: вероятность до {round(new_rain)}%.')
+    else:
+        details.append('Вероятность дождя: нет данных.')
     if current.get('wind_max') is not None:
-        details.append(f'Порывы ветра по прогнозу — до {round(current["wind_max"])} км/ч.')
+        details.append(f'Ветер до {round(current["wind_max"])} км/ч.')
+    if new_rain is not None and new_rain >= 70 or current.get('severe_code') is not None:
+        details.append('К морю лучше выйти до дождя; долгую прогулку отложить.')
+    else:
+        details.append('Для прогулки к морю погода пока подходит.')
+    details.append('Вы сегодня пойдёте к морю? 👍 / 👎')
 
-    for alert in new_official_alerts[:2]:
-        details.append('Официальное предупреждение: ' + alert['title'] + '.')
-        if alert.get('severity') or alert.get('certainty'):
-            meta = ' · '.join(x for x in (alert.get('severity'), alert.get('certainty')) if x)
-            details.append('Уровень/достоверность: ' + meta + '.')
-        if alert.get('effective'):
-            details.append('Начало действия: ' + alert['effective'] + '.')
-        if alert.get('expires'):
-            details.append('Окончание действия: ' + alert['expires'] + '.')
-        if alert.get('description'):
-            details.append(alert['description'][:650])
-
-    details.append(f'Данные получены {n:%d.%m.%Y %H:%M}; источник: {data.get("provider", "погодный API")}.')
-    details.append('При опасных условиях проверьте официальные указания местных служб перед поездками.')
-    headline = 'Предупреждение о погоде в Нячанге' if new_official_alerts else 'Погода в Нячанге резко меняется'
-    attribution = (
-        'Источник прогноза: <a href="' +
-        html.escape(data.get('provider_url') or 'https://open-meteo.com/', quote=True) +
-        '">' + html.escape(data.get('provider') or 'погодный API') +
-        '</a> · данные получены ' + html.escape(data.get('retrieved_at') or iso(n))
-    )
+    for alert in new_official_alerts[:1]:
+        details.append('Официально: ' + alert['title'][:110] + '.')
+    headline = 'Погода в Нячанге меняется' if not new_official_alerts else 'Погодное предупреждение в Нячанге'
     fingerprint_suffix = new_official_alerts[0]['fingerprint'][:16] if new_official_alerts else n.strftime('%Y-%m-%d-%H')
+    image_category,image_query=weather_image_query(data,n.date())
+    image_candidate=select_weather_image(s,image_category,image_query)
+    hourly = data.get('hourly') or {}
+    weather_hours = []
+    times = hourly.get('time') or []
+    temps = hourly.get('temperature_2m') or []
+    rain_values = hourly.get('precipitation_probability') or []
+    for i, raw_time in enumerate(times):
+        dt = _weather_time(str(raw_time))
+        if not dt or not n <= dt < n + timedelta(hours=6):
+            continue
+        hour_temp = _numeric(temps[i]) if i < len(temps) else None
+        hour_rain = _numeric(rain_values[i]) if i < len(rain_values) else None
+        weather_hours.append({
+            'time': dt.strftime('%H:%M'),
+            'temp': round(hour_temp) if hour_temp is not None else '—',
+            'rain': round(hour_rain) if hour_rain is not None else '—',
+        })
     item = {
         'kind': 'weather_update', 'kind_label': 'Изменение прогноза погоды',
         'headline': headline, 'title': headline, 'body': '\n\n'.join(details),
-        'source_attribution_html': attribution, 'reaction_line': '', 'urgent': True,
-        'image_query': 'Nha Trang Vietnam official weather warning tropical storm heavy rain flooded city street real photograph',
+        'source_attribution_html': '', 'reaction_line': '', 'urgent': True,
+        'weather_hours': weather_hours,
+        'image_query': image_query, 'weather_image_category': image_category,
+        'image_url':(image_candidate or {}).get('url',''),
+        'image_credit_html':(image_candidate or {}).get('credit_html',''),
         'idempotency_key': 'weather_update:' + fingerprint_suffix
     }
-    queued = queue_review_item(s, item)
+    try:
+        published = publish_weather_alert(s, item)
+    except Exception as exc:
+        print('Urgent weather publication failed:', type(exc).__name__, str(exc)[:180])
+        for uid in sorted(ADMIN_USER_IDS):
+            try:
+                send_dm(uid, f'⚠️ Срочное изменение погоды не удалось опубликовать: {html.escape(type(exc).__name__)}.')
+            except Exception:
+                pass
+        published = None
     state['official_alert_fingerprints'] = all_fingerprints[-300:]
-    if queued:
+    if published:
         state['last_alert_at'] = iso(n)
         state['last_alert_reason'] = reason
         state['last_alert_window'] = current
@@ -3787,7 +4067,7 @@ def check_weather_changes(s):
             try:
                 send_dm(
                     uid,
-                    f'🌧 <b>Обнаружено изменение погоды</b>\n{html.escape(reason)}\nМатериал добавлен в приоритетную очередь предпросмотра.'
+                    f'🌧 <b>Обнаружено изменение погоды</b>\n{html.escape(reason)}\nОпубликовано сразу, вне очереди.'
                 )
             except Exception:
                 pass
@@ -3807,20 +4087,18 @@ def weather_post(s, period):
     if not target-timedelta(minutes=15)<=n<=target+timedelta(hours=5): return
     try:
         data=fetch_weather_data(); headline,body,target_date=format_weather_forecast(data,period,n)
-        day_index=weather_daily_index(data,target_date)
-        rain_probability=_weather_daily(data,'precipitation_probability_max',day_index)
-        daily_code=_weather_daily(data,'weather_code',day_index)
-        if (rain_probability is not None and rain_probability >= 60) or daily_code in (65,67,82,95,96,99):
-            image='Nha Trang Vietnam heavy rain storm clouds flooded street tropical downpour real photograph'
-        elif rain_probability is not None and rain_probability >= 35:
-            image='Nha Trang Vietnam rainy weather wet streets tropical rain real photograph'
+        image_category,image_query=weather_image_query(data,target_date)
+        image_candidate=select_weather_image(s,image_category,image_query)
         attribution='Источник прогноза: <a href="'+html.escape(data.get('provider_url') or 'https://open-meteo.com/',quote=True)+'">'+html.escape(data.get('provider') or 'погодный API')+'</a> · данные получены '+html.escape(data.get('retrieved_at') or iso(n))
         if data.get('provider')=='Open-Meteo' and not WEATHERAPI_KEY:
             attribution+=' · бесплатный тестовый режим; перед размещением рекламы настрой коммерческий источник'
         queued=queue_review_item(s,{
             'kind':'weather_'+period,'kind_label':'Погода на сегодня' if period=='morning' else 'Погода на завтра',
             'headline':headline,'title':headline,'body':body,'source_attribution_html':attribution,
-            'reaction_line':'','image_query':image,'urgent':False,'forecast_date':target_date.isoformat(),
+            'reaction_line':'','image_query':image_query,'weather_image_category':image_category,
+            'image_url':(image_candidate or {}).get('url',''),
+            'image_credit_html':(image_candidate or {}).get('credit_html',''),
+            'urgent':False,'forecast_date':target_date.isoformat(),
             'forecast_retrieved_at':data.get('retrieved_at'),'forecast_provider':data.get('provider'),
             'forecast_latitude':12.2388,'forecast_longitude':109.1967,'idempotency_key':key+':'+target_date.isoformat()
         },planned_at=target if n<target else n+timedelta(minutes=15),slot_key=key)
@@ -3871,33 +4149,6 @@ def source_date_rejection_reason(published_at, current_time=None, urgent=False):
     return ''
 
 
-def is_verified_urgent_source(source_url, title, body, source_date_basis, image_url):
-    """Auto-release only fresh, visibly safety-critical stories from trusted sources with an article image."""
-    if not URGENT_AUTO_PUBLISH or not source_url or not image_url or not source_date_basis:
-        return False
-    host = (urllib.parse.urlparse(source_url).hostname or '').casefold().strip('.')
-    if host.startswith('www.'):
-        host = host[4:]
-    official = host.endswith('.gov.vn') or host.endswith('.gov') or host in (
-        'gov.vn', 'chmf.gov.vn', 'vndms.gov.vn'
-    )
-    trusted_news = any(host == domain or host.endswith('.' + domain) for domain in (
-        'baokhanhhoa.vn', 'tuoitre.vn', 'vnexpress.net', 'thanhnien.vn',
-        'dantri.com.vn', 'laodong.vn', 'vov.vn', 'vietnamnews.vn',
-        'nld.com.vn', 'congan.com.vn'
-    ))
-    if not (official or trusted_news):
-        return False
-    text = clean((title or '') + ' ' + (body or '')).casefold()
-    safety_phrases = (
-        'cảnh báo', 'khẩn cấp', 'sơ tán', 'ngập lụt', 'lũ quét', 'lũ lớn',
-        'sạt lở', 'cháy lớn', 'cấm tắm biển', 'đóng đường khẩn cấp',
-        'emergency', 'evacuation', 'flood warning', 'flash flood',
-        'landslide warning', 'beach closure', 'road closure', 'storm warning'
-    )
-    return is_urgent_news(text) and any(contains_term(text, term) for term in safety_phrases)
-
-
 def publish_news(s):
     """Find one high-value local story, verify the source date and queue it for private review."""
     n = now()
@@ -3909,7 +4160,7 @@ def publish_news(s):
         'stale': 0, 'missing_date': 0, 'future_date': 0, 'cached_date_skip': 0,
         'date_fallback_checked': 0, 'date_fallback_deferred': 0,
         'duplicate': 0, 'short_body': 0, 'low_score': 0, 'ai_rejected': 0,
-        'ai_failed': 0, 'image_missing': 0, 'queued': 0, 'urgent_published': 0
+        'ai_failed': 0, 'image_missing': 0, 'queued': 0
     }
     items = []
     links = set()
@@ -4169,33 +4420,7 @@ def publish_news(s):
             'idempotency_key': link
         }
 
-        verified_urgent = is_verified_urgent_source(
-            final_source_url, title, source_text, date_basis, image_url
-        )
-        # Do not bypass an existing identical draft; otherwise a verified urgent alert may
-        # publish immediately while the user's unrelated editor draft remains untouched.
-        pending_items = [s.get('pending_news_review') or {}] + list(s.get('review_queue') or [])
-        same_pending = any(
-            pending_item and (
-                (pending_item.get('link') and pending_item.get('link') == link)
-                or (pending_item.get('idempotency_key') and pending_item.get('idempotency_key') == link)
-            )
-            for pending_item in pending_items
-        )
-        if verified_urgent and not same_pending:
-            try:
-                publish_result = publish_review_item(s, item, preserve_pending=True)
-                if publish_result:
-                    stats['urgent_published'] += 1
-                    print('Published verified urgent alert immediately from trusted source:', final_source_url)
-                    break
-                if item.get('status') == 'needs_edit':
-                    queued = queue_review_item(s, item)
-                    if queued:
-                        stats['queued'] += 1
-                    break
-            except Exception as exc:
-                print('Immediate urgent publication failed; falling back to private review:', type(exc).__name__)
+        # Urgent items receive priority in the review queue; they never bypass the editor timer.
         queued = queue_review_item(s, item)
         if queued:
             stats['queued'] += 1
@@ -4245,8 +4470,6 @@ def main():
     process_news_review(s)
     if not is_paused(s):
         routine_posts(s)
-        weather_post(s, 'morning')
-        weather_post(s, 'evening')
     # Screen stories even during quiet windows so real safety alerts can still bypass review/pause.
     publish_news(s)
     save_state(s)
@@ -4264,4 +4487,8 @@ def main():
 
 
 if __name__=='__main__':
-    main()
+    if sys.argv[1:] == ['--test-weather-now']:
+        ensure_production_state_backend()
+        publish_weather_test_now(load_state())
+    else:
+        main()

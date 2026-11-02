@@ -10,6 +10,11 @@ on:
         required: true
         type: boolean
         default: false
+      test_weather_now:
+        description: 'Publish one live weather test post now (main only)'
+        required: true
+        type: boolean
+        default: false
   pull_request:
     branches: [main]
 
@@ -45,7 +50,7 @@ jobs:
   run-bot:
     name: Scheduled production run
     needs: test
-    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_bot == true && github.ref == 'refs/heads/main') }}
+    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.run_bot == true || inputs.test_weather_now == true) && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -60,11 +65,12 @@ jobs:
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       WEATHERAPI_KEY: ${{ secrets.WEATHERAPI_KEY }}
-      MAX_DAILY_POSTS: '10'
-      MAX_DAILY_NEWS: '6'
+      MAX_DAILY_POSTS: '6'
+      MAX_DAILY_NEWS: '3'
+      MAX_DAILY_ADS: '1'
       MAX_AI_CALLS_PER_DAY: '40'
-      URGENT_AUTO_PUBLISH: 'true'
-      AUTO_PUBLISH_DIRECT: 'true'
+      # Every public item must first reach the editor as a private preview.
+      AUTO_PUBLISH_DIRECT: 'false'
     steps:
       - name: Checkout main
         uses: actions/checkout@v4
@@ -74,7 +80,13 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Install weather card image processing
+        run: python -m pip install Pillow
       - name: Compile production code
         run: python -m py_compile bot.py
+      - name: Publish one weather test post
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_weather_now == true }}
+        run: python bot.py --test-weather-now
       - name: Run news and weather pipeline
+        if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_bot == true && inputs.test_weather_now != true) }}
         run: python bot.py

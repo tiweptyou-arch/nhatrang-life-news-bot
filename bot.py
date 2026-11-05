@@ -1506,7 +1506,7 @@ def queue_review_item(s, item, planned_at=None, slot_key=None):
 def publish_review_item(s, item, preserve_pending=False):
     """Publish one image-led item after verifying that its full caption fits one media message."""
     auto_publish_news = bool(
-        AUTO_PUBLISH and OPENAI_API_KEY and item.get('kind') == 'news'
+        AUTO_PUBLISH and item.get('kind') == 'news'
         and item.get('verification_level') == 'GREEN'
         and item.get('category') not in {'safety', 'transport', 'rules', 'weather'}
         and not item.get('urgent') and not item.get('uncertainties')
@@ -4317,7 +4317,7 @@ def editorial_verification_level(item, source_url=''):
 
 def maybe_auto_publish_green_news(s, item):
     """Publish only eligible GREEN news when explicitly enabled; failures remain editor drafts."""
-    if not AUTO_PUBLISH or not OPENAI_API_KEY or not item or item.get('kind') != 'news':
+    if not AUTO_PUBLISH or not item or item.get('kind') != 'news':
         return False
     if (item.get('verification_level') != 'GREEN' or item.get('urgent')
             or item.get('category') in {'safety', 'transport', 'rules', 'weather', 'health'}

@@ -43,7 +43,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install image card processing
-        run: python -m pip install Pillow
+        run: python -m pip install -r requirements.txt
       - name: Compile Python
         run: python -m py_compile bot.py imagegen.py
       - name: Run unit tests
@@ -65,20 +65,26 @@ jobs:
       SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
       SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
       SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      OPENAI_TEXT_MODEL: 'gpt-6-luna'
+      OPENAI_DAILY_BUDGET_USD: '0.75'
+      OPENAI_MONTHLY_BUDGET_USD: '8.0'
+      MAX_SINGLE_IMAGE_RESERVE_USD: '0.15'
+      MAX_AI_CALLS_PER_DAY: '40'
+      AUTO_PUBLISH: ${{ vars.AUTO_PUBLISH || 'false' }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       IMAGE_PROVIDER: 'openai'
       OPENAI_IMAGE_MODEL: 'gpt-image-2.5-flare'
       OPENAI_IMAGE_QUALITY: 'low'
       WEATHERAPI_KEY: ${{ secrets.WEATHERAPI_KEY }}
       MAX_DAILY_POSTS: '10'
-      MAX_DAILY_NEWS: '3'
+      MAX_DAILY_NEWS: '4'
       MAX_DAILY_ADS: '1'
-      MAX_AI_CALLS_PER_DAY: '40'
       MAX_IMAGE_GENERATIONS_PER_DAY: '8'
       MAX_IMAGE_SPEND_USD_PER_DAY: '0.25'
       MAX_IMAGE_SPEND_USD_PER_MONTH: '7.0'
-      # The Telegram API adapter also blocks writes to every non-editor chat.
+      # Channel writes are limited to the explicit GREEN-news pathway when AUTO_PUBLISH is enabled.
+      NEWS_SOURCES_FILE: 'sources.json'
+      # Legacy direct publication remains disabled; AUTO_PUBLISH has its own GREEN-only guard.
       AUTO_PUBLISH_DIRECT: 'false'
     steps:
       - name: Checkout main
@@ -90,7 +96,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install weather card image processing
-        run: python -m pip install Pillow
+        run: python -m pip install -r requirements.txt
       - name: Compile production code
         run: python -m py_compile bot.py
       - name: Prepare one private weather test draft

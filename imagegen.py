@@ -72,6 +72,8 @@ def render_card(image_bytes, title, weather_hours=None):
     overlay = Image.new('RGBA', image.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     rows = list(weather_hours or [])[:6]
+    draw.rounded_rectangle((64, 42, 430, 100), radius=18, fill=(8, 38, 58, 224))
+    draw.rounded_rectangle((1100, 42, 1472, 100), radius=18, fill=(8, 38, 58, 224))
     if rows:
         draw.rounded_rectangle((48, 535, 1488, 824), radius=26, fill=(3, 14, 25, 220))
     else:
@@ -92,6 +94,9 @@ def render_card(image_bytes, title, weather_hours=None):
             continue
     if font is None:
         font = ImageFont.load_default()
+    brand_font = ImageFont.truetype(font_path, 25) if font_path else font
+    draw.text((86, 56), 'НЯЧАНГ ЛАЙФ', font=brand_font, fill=(255, 210, 77, 255))
+    draw.text((1125, 56), 'ИЛЛЮСТРАЦИЯ', font=brand_font, fill=(255, 255, 255, 255))
     text = (title or '').strip()
     if len(text) > 76:
         text = text[:73].rsplit(' ', 1)[0].rstrip('.,:;!?') + '…'
@@ -124,11 +129,23 @@ def prompt_for(item):
         scene = f'Nha Trang Vietnam coast showing {category}, realistic local tropical weather'
     else:
         query = item.get('image_query') or item.get('headline') or 'Nha Trang Vietnam'
-        scene = f'editorial documentary-style illustration of {query} in Vietnam'
+        category = item.get('category') or 'life'
+        style = {
+            'safety': 'calm public-safety explainer illustration, no injured people or identifiable incident',
+            'weather': 'tropical weather explainer illustration, dramatic but not catastrophic',
+            'transport': 'urban mobility explainer illustration, ordinary streets without identifiable crash scenes',
+            'rules': 'neutral documents and civic information still life, no readable text or official seals',
+            'services': 'welcoming local service illustration',
+            'city': 'local urban-life editorial illustration',
+            'health': 'neutral healthcare explainer, no patients or medical claims',
+            'life': 'everyday local-life editorial illustration',
+        }.get(category, 'everyday local-life editorial illustration')
+        scene = f'{style} inspired by {query} in Vietnam; generic concept, not a photograph of a specific event or place'
     return (
-        'Create a realistic, tasteful 16:9 editorial photograph for a Russian-language local news channel. '
-        f'Scene: {scene}. Show no readable text, letters, logos, charts, watermarks, or fabricated news details. '
-        'Natural photographic light, uncluttered composition, suitable as a Telegram news cover.'
+        'Create a tasteful, realistic-looking 16:9 editorial illustration for a Russian-language local news channel. '
+        f'Scene: {scene}. This is illustrative artwork, not documentary photography. '
+        'Show no readable text, letters, logos, charts, watermarks, identifiable people, or fabricated event details. '
+        'Natural light, uncluttered composition, suitable as a Telegram news cover.'
     )
 
 

@@ -841,6 +841,8 @@ def review_status_text(item):
         provider = html.escape(clean(item.get('forecast_provider')))
         retrieved = html.escape(clean(item.get('forecast_retrieved_at') or 'не указано'))
         source_block = f'\nПогодный API для проверки: {provider}\nПолучено: {retrieved}'
+    if item.get('image_source') == 'free_local_illustration':
+        source_block += '\nИзображение: бесплатная локальная иллюстрация (OpenAI не использовался).'
     image_credit = item.get('image_credit_html') or ''
     if image_credit:
         source_block += '\nИзображение и лицензия: ' + image_credit
@@ -1051,7 +1053,7 @@ def send_review_preview(item, s=None):
         for entry in item.get('media_items', [])
     ) and item.get('media_type') != 'video':
         if not prepare_generated_image(s, item):
-            raise RuntimeError('Generated image is not available; add a photo or configure OPENAI_API_KEY.')
+            raise RuntimeError('Бесплатная иллюстрация не подготовилась; прикрепи фото или проверь установку Pillow.')
     media_items = [
         entry for entry in (item.get('media_items') or [])
         if entry.get('type') in ('photo', 'video') and entry.get('file_id')
@@ -1222,8 +1224,21 @@ def prepare_generated_image(s, item):
         item['image_generated'] = True
         return True
     if not OPENAI_API_KEY:
-        item['image_hold_reason'] = 'missing_openai_api_key'
-        return False
+        try:
+            background = fallback_editorial_png(item.get('image_query') or item.get('headline') or 'Nha Trang Vietnam')
+            image = imagegen.render_card(background, imagegen.title_for(item), item.get('weather_hours'))
+            output = BytesIO()
+            image.save(output, format='JPEG', quality=88, optimize=True)
+            item['_generated_image_b64'] = base64.b64encode(output.getvalue()).decode('ascii')
+            item['image_generated'] = False
+            item['image_source'] = 'free_local_illustration'
+            item['image_generation_cost_usd'] = 0.0
+            item.pop('image_hold_reason', None)
+            return True
+        except Exception as exc:
+            item['image_hold_reason'] = 'local_illustration_failed'
+            print('Free local illustration failed:', type(exc).__name__)
+            return False
 
     today = now().date().isoformat()
     month = today[:7]
@@ -1444,7 +1459,7 @@ def queue_review_item(s, item, planned_at=None, slot_key=None):
         reason = item.get('image_hold_reason') or 'image_unavailable'
         message = (
             f'🖼 Для черновика «{html.escape(item["headline"][:120])}» пока нет сгенерированной картинки '
-            f'({html.escape(reason)}). Добавь OPENAI_API_KEY в GitHub Secrets или прикрепи своё фото.'
+            f'({html.escape(reason)}). Проверь установку Pillow или прикрепи своё фото.'
         )
         for admin_id in sorted(ADMIN_USER_IDS):
             try:
@@ -1491,7 +1506,7 @@ def queue_review_item(s, item, planned_at=None, slot_key=None):
 def publish_review_item(s, item, preserve_pending=False):
     """Publish one image-led item after verifying that its full caption fits one media message."""
     auto_publish_news = bool(
-        AUTO_PUBLISH and item.get('kind') == 'news'
+        AUTO_PUBLISH and OPENAI_API_KEY and item.get('kind') == 'news'
         and item.get('verification_level') == 'GREEN'
         and item.get('category') not in {'safety', 'transport', 'rules', 'weather'}
         and not item.get('urgent') and not item.get('uncertainties')
@@ -3277,7 +3292,7 @@ def handle_admin_message(msg, s):
             f'Лимит рекламных черновиков: {MAX_DAILY_ADS} в день',
             'Разрешённые реакции: ❤️ 🙏 😱 👍 🤣',
             f'ИИ-редактор: {f"{OPENAI_TEXT_MODEL} подключён" if OPENAI_API_KEY else "не подключён (правиловый резервный режим)"}',
-            f'Генерация изображений: {"OpenAI подключён" if OPENAI_API_KEY else "нет OPENAI_API_KEY; черновики ждут фото"}',
+            f'Изображения: {"OpenAI подключён" if OPENAI_API_KEY else "бесплатные локальные иллюстрации"}',
             f'Приватное хранилище: {"Supabase настроен" if supabase_state_configured() else "не настроено"}',
             f'Погодный API для коммерческого режима: {"WeatherAPI.com подключён" if WEATHERAPI_KEY else "не подключён"}',
             'Часовой пояс: Asia/Ho_Chi_Minh (UTC+7)',
@@ -4302,7 +4317,7 @@ def editorial_verification_level(item, source_url=''):
 
 def maybe_auto_publish_green_news(s, item):
     """Publish only eligible GREEN news when explicitly enabled; failures remain editor drafts."""
-    if not AUTO_PUBLISH or not item or item.get('kind') != 'news':
+    if not AUTO_PUBLISH or not OPENAI_API_KEY or not item or item.get('kind') != 'news':
         return False
     if (item.get('verification_level') != 'GREEN' or item.get('urgent')
             or item.get('category') in {'safety', 'transport', 'rules', 'weather', 'health'}

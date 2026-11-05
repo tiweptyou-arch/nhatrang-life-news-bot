@@ -102,6 +102,24 @@ class EditorialUpgradeTests(unittest.TestCase):
         self.assertIn('дождевик', body)
 
 
+
+    def test_missing_openai_key_uses_free_local_illustration(self):
+        class LocalCard:
+            def save(self, output, **_kwargs):
+                output.write(b'free-local-jpeg')
+
+        state = {'generated_image_cache': {}}
+        item = {'kind': 'news', 'headline': 'Изменение в городе', 'category': 'city',
+                'image_query': 'Nha Trang city life'}
+        with patch.object(bot, 'OPENAI_API_KEY', ''), \
+             patch.object(bot, 'fallback_editorial_png', return_value=b'local-png'), \
+             patch.object(bot.imagegen, 'render_card', return_value=LocalCard()), \
+             patch.object(bot.imagegen, 'generate') as paid_generate:
+            self.assertTrue(bot.prepare_generated_image(state, item))
+        self.assertEqual(item['image_source'], 'free_local_illustration')
+        self.assertEqual(item['image_generation_cost_usd'], 0.0)
+        paid_generate.assert_not_called()
+
     def test_image_generation_stops_when_daily_budget_is_exhausted(self):
         today = bot.now().date().isoformat()
         state = {'image_usage': {'day': today, 'daily_usd': 0.25, 'daily_count': 1}}

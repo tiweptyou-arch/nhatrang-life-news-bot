@@ -1,0 +1,55 @@
+name: Bootstrap Nha Trang bot on Mac
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: nhatrang-life-news-bot
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    runs-on: [self-hosted, macOS, ARM64, nha-trang-life-bot]
+    timeout-minutes: 15
+    env:
+      GITHUB_TOKEN: ${{ github.token }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      GITHUB_API_URL: ${{ github.api_url }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      ADMIN_USER_ID: ${{ secrets.ADMIN_USER_ID }}
+      ADMIN_USER_IDS: ${{ secrets.ADMIN_USER_IDS }}
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SECRET_KEY: ${{ secrets.SUPABASE_SECRET_KEY }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      WEATHERAPI_KEY: ${{ secrets.WEATHERAPI_KEY }}
+      AI_PROVIDER: openrouter
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      OPENROUTER_MODEL: deepseek/deepseek-v4-flash:free
+      OPENAI_TEXT_MODEL: gpt-6-luna
+      OPENAI_DAILY_BUDGET_USD: '0.75'
+      OPENAI_MONTHLY_BUDGET_USD: '8.0'
+      MAX_SINGLE_IMAGE_RESERVE_USD: '0.15'
+      MAX_AI_CALLS_PER_DAY: '40'
+      AUTO_PUBLISH: 'true'
+      IMAGE_PROVIDER: openai
+      OPENAI_IMAGE_MODEL: gpt-image-2.5-flare
+      OPENAI_IMAGE_QUALITY: low
+      MAX_DAILY_POSTS: '10'
+      MAX_DAILY_NEWS: '4'
+      MAX_DAILY_ADS: '1'
+      MAX_IMAGE_GENERATIONS_PER_DAY: '8'
+      MAX_IMAGE_SPEND_USD_PER_DAY: '0.25'
+      MAX_IMAGE_SPEND_USD_PER_MONTH: '7.0'
+    steps:
+      - name: Checkout trusted main branch
+        uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Install macOS launch service from GitHub Secrets
+        run: python3 bootstrap_mac_service.py

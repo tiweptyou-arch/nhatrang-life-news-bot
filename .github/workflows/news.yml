@@ -28,6 +28,7 @@ concurrency:
 jobs:
   test:
     name: Compile and unit tests (no Telegram publishing)
+    if: ${{ github.event_name != 'schedule' || vars.RUN_ON_MAC != 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -52,7 +53,7 @@ jobs:
   run-bot:
     name: Scheduled production run
     needs: test
-    if: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && (inputs.run_bot == true || inputs.preview_weather_now == true) && github.ref == 'refs/heads/main') }}
+    if: ${{ (github.event_name == 'schedule' && vars.RUN_ON_MAC != 'true') || (github.event_name == 'workflow_dispatch' && (inputs.run_bot == true || inputs.preview_weather_now == true) && github.ref == 'refs/heads/main') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

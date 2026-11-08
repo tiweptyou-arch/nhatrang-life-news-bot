@@ -7,24 +7,35 @@
 ## Что реализовано
 
 - Источники вынесены в [sources.json](sources.json); настройки RSS, погода, редакционная очередь и Supabase state сохранены.
-- Свежесть проверяется по RSS и метаданным страницы; повторные ссылки и заголовки фильтруются.
-- OpenAI Responses API использует `gpt-6-luna` для перевода, краткой редакторской переработки и разметки. Без ключа остаётся правиловый режим и бесплатный локальный шаблон иллюстрации.
-- Картинки по-прежнему создаются через OpenAI Images API (`gpt-image-2.5-flare`, low); заголовок накладывает Pillow. На изображении есть фирменная плашка и метка «Иллюстрация».
+- Свежесть подтверждается датой публикации из RSS или метаданными публикации страницы; даты обновления страницы не обновляют возраст новости; повторные ссылки и заголовки фильтруются.
+- Редактура может идти через OpenRouter с DeepSeek V4 Flash Free либо через OpenAI; без ключа остаётся правиловый режим. Локальный Mac-процесс описан ниже.
+- При наличии `OPENAI_API_KEY` изображения создаются через OpenAI Images API (`gpt-image-2.5-flare`, low); без ключа используется бесплатная локальная иллюстрация. Заголовок накладывает Pillow, на изображении есть фирменная плашка и метка «Иллюстрация».
 - Не более четырёх новостей в день. Погодные карточки используют существующие данные и не создают новую иллюстрацию при каждом обновлении.
 - Уровни проверки: `GREEN`, `YELLOW`, `RED`; редакционная оценка не является независимым подтверждением.
 - Команды редактора: `/start`, `/help`, `/status`, `/weather`, `/sources`, `/pause`, `/resume`, `/budget`, `/test`.
 - Журнал расхода содержит модель, токены/качество, размер, стоимость и ID/URL материала. OpenAI budget: $0.75 в день и $8 в месяц; картинки ограничены $0.25 в день и $7 в месяц. Уведомления при $5 и $7, оставлен резерв $2.
-- GitHub Actions запускается по расписанию и остаётся периодическим исполнителем, не постоянным процессом. Команды Telegram могут обрабатываться с задержкой до следующего запуска.
+- До установки Mac-сервиса GitHub Actions остаётся периодическим исполнителем; после bootstrap-переключения постоянный `launchd`-демон на Mac обрабатывает Telegram-команды.
 
 ## Настройка
 
 См. [DEPLOYMENT.md](DEPLOYMENT.md). Для Supabase выполните базовую схему `supabase_schema.sql`; `supabase_migrations/20261105_bot_state_security.sql` безопасно подтверждает RLS и права на существующей таблице без удаления данных.
 
-Основные GitHub Secrets: `TELEGRAM_BOT_TOKEN`, `ADMIN_USER_ID` или `ADMIN_USER_IDS`, `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `WEATHERAPI_KEY`. `OPENAI_API_KEY` необязателен для бесплатного режима. `AUTO_PUBLISH` — GitHub Actions **Variable**, не secret, и по умолчанию `false`.
+Основные GitHub Secrets: `TELEGRAM_BOT_TOKEN`, `ADMIN_USER_ID` или `ADMIN_USER_IDS`, `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `WEATHERAPI_KEY`. `OPENAI_API_KEY` необязателен для бесплатного режима. `AUTO_PUBLISH` локально по умолчанию `false`; production GitHub Actions сейчас задаёт его как `true`. Меняйте production-переключатель только осознанно.
+
+## Локальный запуск на Mac
+
+Для использования GitHub Secrets установите на Mac self-hosted runner с меткой `nha-trang-life-bot` по [инструкции GitHub](https://docs.github.com/en/actions/how-tos/manage-runners/self-hosted-runners/add-runners). Создайте `OPENROUTER_API_KEY` в GitHub Actions Secrets, затем после слияния этой ветки запустите на `main` workflow **Bootstrap Nha Trang bot on Mac**. Он получает существующие GitHub Secrets через Actions, сохраняет их в `~/Library/Application Support/NhaTrangLifeNewsBot/secrets.json` с правами `600` (каталог — `700`) и включает постоянный `launchd`-демон. Значения секретов вручную копировать в чат или исходный код не нужно.
+
+Демон опрашивает Telegram каждые 5 секунд и источники новостей — с существующим 30-минутным интервалом. После успешного запуска workflow ставит GitHub Actions Variable `RUN_ON_MAC=true`, чтобы остановить конкурирующие запуски на GitHub-hosted runner. Редакторский ИИ использует `deepseek/deepseek-v4-flash:free`; бесплатный API имеет лимиты, а ответы могут занимать несколько секунд.
+
+Автопубликация включена только для материалов GREEN; остальные остаются в очереди редактора. Журнал: `tail -f "$HOME/Library/Application Support/NhaTrangLifeNewsBot/service.log"`. Для остановки: `launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.nhatranglife.newsbot.plist"`.
+
+Локальная установка включает автопубликацию только GREEN-материалов; остальные остаются в очереди редактора. Журнал: `tail -f "$HOME/Library/Application Support/NhaTrangLifeNewsBot/service.log"`. Для остановки: `launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.nhatranglife.newsbot.plist"`.
 
 ## Модели и стоимость
 
-- Текст: `gpt-6-luna`, Responses API. На дату проверки официальная цена Standard — $0.10 за 1M входных токенов и $0.50 за 1M выходных токенов. Расход измеряется по ответу API.
+- Локальный free-профиль: `deepseek/deepseek-v4-flash:free` через OpenRouter; модель указана как бесплатная, но сервис требует ключ и ограничивает бесплатные запросы. Текущий OpenRouter free-list ограничивает варианты `:free` 50 запросами в сутки и 20 в минуту.
+- Платный OpenAI профиль остаётся совместимым: `gpt-6-luna`, Responses API. Изображения через OpenAI доступны отдельно при наличии `OPENAI_API_KEY`; иначе работает локальная иллюстрация.
 - Изображение: `gpt-image-2.5-flare`, low, 1536×864 JPEG. Стоимость зависит от фактического числа текстовых и графических токенов; цена одной генерации не фиксирована. Бот рассчитывает её по `usage` API и прекращает генерацию при лимитах.
 - Расчётное ограничение расходов приложения — максимум $8 за месяц, с резервом $2 до пользовательского лимита $10. Фактический счёт зависит от длины запросов и числа изображений; проверьте usage в OpenAI Platform.
 

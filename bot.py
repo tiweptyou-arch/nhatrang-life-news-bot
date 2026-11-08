@@ -21,6 +21,8 @@ MAX_DAILY_ADS = int(os.environ.get('MAX_DAILY_ADS', '1'))
 AUTO_PUBLISH_DIRECT = False
 OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '').strip()
 OPENAI_TEXT_MODEL = os.environ.get('OPENAI_TEXT_MODEL', 'gpt-6-luna').strip()
+AI_PROVIDER = os.environ.get('AI_PROVIDER', 'openrouter' if os.environ.get('OPENROUTER_API_KEY') else 'openai').strip().casefold()
+OPENROUTER_MODEL = os.environ.get('OPENROUTER_MODEL', 'deepseek/deepseek-v4-flash:free').strip()
 OPENAI_DAILY_BUDGET_USD = float(os.environ.get('OPENAI_DAILY_BUDGET_USD', '0.75'))
 OPENAI_MONTHLY_BUDGET_USD = float(os.environ.get('OPENAI_MONTHLY_BUDGET_USD', '8.0'))
 MAX_SINGLE_IMAGE_RESERVE_USD = float(os.environ.get('MAX_SINGLE_IMAGE_RESERVE_USD', '0.15'))
@@ -130,13 +132,12 @@ def is_recent_source_date(published_at, current_time=None, urgent=False):
 
 
 def extract_article_date_candidates(page_html):
-    """Extract trustworthy-looking publication/update dates from common article metadata."""
+    """Extract publication dates; modification timestamps do not prove a new story."""
     source = html.unescape(page_html or '')
     values = []
     date_keys = {
-        'article:published_time', 'og:published_time', 'datepublished', 'datepublished',
+        'article:published_time', 'og:published_time', 'datepublished',
         'pubdate', 'publishdate', 'date', 'dc.date', 'dc.date.issued',
-        'article:modified_time', 'og:updated_time', 'datemodified', 'lastmod'
     }
     for tag in re.findall(r'<meta\b[^>]*>', source, flags=re.I | re.S):
         attrs = {
@@ -152,7 +153,7 @@ def extract_article_date_candidates(page_html):
             if parsed:
                 values.append(parsed)
     for match in re.finditer(
-        r'["\'](?:datePublished|dateModified|dateCreated|uploadDate)["\']\s*:\s*["\']([^"\']{8,40})["\']',
+        r'["\'](?:datePublished|dateCreated|uploadDate)["\']\s*:\s*["\']([^"\']{8,40})["\']',
         source, flags=re.I
     ):
         parsed = parse_source_date(match.group(1))
@@ -541,7 +542,7 @@ URGENT_NEWS_TERMS = (
     'tai nạn nghiêm trọng', 'mất tích', 'nguy hiểm', 'cấm tắm biển', 'sóng lớn',
     'dịch bệnh', 'đóng đường khẩn cấp', 'emergency', 'flood', 'storm', 'evacuation'
 )
-ALLOWED_REACTIONS = ('❤️', '🙏', '😱', '👍', '🤣')
+ALLOWED_REACTIONS = ('❤️', '👍', '😭', '😂', '🙏')
 
 
 def contains_term(text, term):
@@ -688,7 +689,7 @@ def reaction_line(text):
     if any(contains_term(value, x) for x in ('câu chuyện cảm động', 'đoàn tụ', 'giúp đỡ trẻ em', 'lan tỏa yêu thương')):
         return '❤️ — такая история заслуживает поддержки.'
     if any(contains_term(value, x) for x in ('hài hước', 'buồn cười', 'dở khóc dở cười', 'tình huống hài')):
-        return '🤣 — редкий повод улыбнуться.'
+        return '😂 — редкий повод улыбнуться.'
     if any(contains_term(value, x) for x in ('giao thông', 'xe buýt', 'bệnh viện', 'trường học', 'quy định', 'giá điện', 'giá nước', 'dịch vụ', 'công trình', 'khai trương', 'mở cửa', 'транспорт', 'больница', 'школа', 'правила', 'цены', 'услуги', 'открытие', 'ремонт дороги')):
         return '👍 — полезно; ❤️ — хочу больше такой информации.'
     return '👍 — полезно; ❤️ — хочу больше таких новостей.'
@@ -765,7 +766,7 @@ def sanitize_reaction_line(value):
     """Keep reaction prompts within the channel's approved reaction allowlist."""
     if not value:
         return ''
-    allowed = ('❤️', '🙏', '😱', '👍', '🤣')
+    allowed = ALLOWED_REACTIONS
     lines = []
     for raw_line in clean_multiline(value).splitlines():
         line = raw_line.strip()
@@ -984,7 +985,7 @@ def publish_weather_test_now(s):
         details.append('К морю лучше выйти до дождя; долгую прогулку отложить.')
     else:
         details.append('Для прогулки к морю погода подходит.')
-    details.append('Тестовая публикация. Вы сегодня пойдёте к морю? 👍 / 👎')
+    details.append('Тестовая публикация. Вы сегодня пойдёте к морю? 👍 / 🙏')
     category, query = weather_image_query(data, n.date())
     image = select_weather_image(s, category, query)
     item = {
@@ -2160,7 +2161,7 @@ def translate(text):
             data = json.loads(get_url('https://translate.googleapis.com/translate_a/single?' + q).decode())
             translated.append(''.join(x[0] for x in data[0] if x[0]).strip())
         except Exception as e:
-            print('Translation error:', e)
+            print('Translation error:', type(e).__name__)
             # Do not pretend that an untranslated source passage was successfully translated.
             return ''
     return '\n\n'.join(part for part in translated if part).strip()
@@ -2285,10 +2286,28 @@ def openai_monthly_spend(s):
     return image_total + editorial_total
 
 
+def editorial_api_key():
+    if AI_PROVIDER == 'openrouter':
+        return os.environ.get('OPENROUTER_API_KEY', '').strip()
+    if AI_PROVIDER == 'deepseek':
+        return os.environ.get('DEEPSEEK_API_KEY', '').strip()
+    return OPENAI_API_KEY
+
+
+def editorial_model_name():
+    if AI_PROVIDER == 'openrouter':
+        return OPENROUTER_MODEL
+    if AI_PROVIDER == 'deepseek':
+        return os.environ.get('DEEPSEEK_MODEL', 'deepseek-flash')
+    return OPENAI_TEXT_MODEL
+
+
 def ai_editorial_review(s, source_title, source_text, source_url, published_at, urgent=False):
-    """Use OpenAI as a constrained translator/editor; it cannot publish or verify claims."""
-    if not OPENAI_API_KEY:
+    """Use a constrained hosted editor; its assessment never verifies facts or publishes."""
+    api_key = editorial_api_key()
+    if not api_key:
         return None
+    model = editorial_model_name()
     today = now().date().isoformat()
     month = today[:7]
     usage = s.setdefault('openai_usage', {})
@@ -2299,13 +2318,21 @@ def ai_editorial_review(s, source_title, source_text, source_url, published_at, 
     image_daily_spend = float(image_usage.get('daily_usd', 0) or 0) if image_usage.get('day') == today else 0.0
     combined_monthly_spend = openai_monthly_spend(s)
     estimated_input_tokens = max(1, len(source_text or '') // 3 + len(source_title or '') // 3 + 900)
-    estimated_cost = estimated_input_tokens * 0.10 / 1_000_000 + 1800 * 0.50 / 1_000_000
+    if AI_PROVIDER == 'openrouter' and model.endswith(':free'):
+        estimated_cost = 0.0
+    elif AI_PROVIDER == 'deepseek':
+        estimated_cost = estimated_input_tokens * 0.30 / 1_000_000 + 1800 * 1.20 / 1_000_000
+    elif AI_PROVIDER == 'openrouter':
+        # Conservative ceiling based on current DeepSeek Pro peak rates if a paid model is configured.
+        estimated_cost = estimated_input_tokens * 1.32 / 1_000_000 + 1800 * 3.96 / 1_000_000
+    else:
+        estimated_cost = estimated_input_tokens * 0.10 / 1_000_000 + 1800 * 0.50 / 1_000_000
     if calls_today >= MAX_AI_CALLS_PER_DAY:
-        print('OpenAI editorial review skipped: daily call limit reached.')
+        print('AI editorial review skipped: daily call limit reached.')
         return None
     if (daily_spend + image_daily_spend + estimated_cost > OPENAI_DAILY_BUDGET_USD
             or combined_monthly_spend + estimated_cost > OPENAI_MONTHLY_BUDGET_USD):
-        print('OpenAI editorial review skipped: spending reserve would exceed budget.')
+        print('AI editorial review skipped: spending reserve would exceed budget.')
         return None
 
     prompt = (
@@ -2316,7 +2343,7 @@ def ai_editorial_review(s, source_title, source_text, source_url, published_at, 
         'Верни только JSON: decision (draft|hold|reject), local_relevance, practical_usefulness, source_confidence, '
         'freshness_confidence, novelty (целые 0..5), why_it_matters, audience_question, headline_ru, body_ru, category '
         '(weather|safety|transport|rules|health|services|city|tourism|life), image_query_en, reaction_prompt '
-        '([{emoji,text}], только ❤️ 🙏 😱 👍 🤣), uncertainties (массив строк), verification_notes (кратко). '
+        '([{emoji,text}], только ❤️ 👍 😭 😂 🙏), uncertainties (массив строк), verification_notes (кратко). '
         'Не предлагай реакции для трагедий/опасных происшествий. Не используй кликбейт. '
         f'URL первоисточника: {source_url}\nДата публикации источника: {published_at.isoformat() if published_at else "неизвестна"}\n'
         f'Срочная тема по ключевым словам: {bool(urgent)}\nЗаголовок источника: {(source_title or "")[:1200]}\n'
@@ -2324,46 +2351,75 @@ def ai_editorial_review(s, source_title, source_text, source_url, published_at, 
     )
     usage['day'], usage['month'] = today, month
     usage['daily_calls'] = calls_today + 1
-    request = urllib.request.Request(
-        'https://api.openai.com/v1/responses',
-        data=json.dumps({'model': OPENAI_TEXT_MODEL, 'input': prompt,
-                         'reasoning': {'effort': 'low'}, 'max_output_tokens': 1800,
-                         'text': {'format': {'type': 'json_object'}}}, ensure_ascii=False).encode('utf-8'),
-        headers={'Authorization': 'Bearer ' + OPENAI_API_KEY, 'Content-Type': 'application/json',
-                 'User-Agent': 'NhaTrangLifeNewsBot/4.0'}, method='POST')
+    if AI_PROVIDER == 'openrouter':
+        request_url = 'https://openrouter.ai/api/v1/chat/completions'
+        request_payload = {'model': model, 'messages': [{'role': 'user', 'content': prompt}],
+                           'max_tokens': 1800, 'response_format': {'type': 'json_object'}}
+        request_headers = {'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json',
+                           'HTTP-Referer': 'https://t.me/NhaTrangLifeNews',
+                           'X-Title': 'Nha Trang Life News Bot', 'User-Agent': 'NhaTrangLifeNewsBot/4.0'}
+    elif AI_PROVIDER == 'deepseek':
+        request_url = 'https://api.deepseek.com/chat/completions'
+        request_payload = {'model': os.environ.get('DEEPSEEK_MODEL', 'deepseek-flash'),
+                           'messages': [{'role': 'user', 'content': prompt}],
+                           'max_tokens': 1800, 'response_format': {'type': 'json_object'}}
+        model = request_payload['model']
+        request_headers = {'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json',
+                           'User-Agent': 'NhaTrangLifeNewsBot/4.0'}
+    else:
+        request_url = 'https://api.openai.com/v1/responses'
+        request_payload = {'model': model, 'input': prompt, 'reasoning': {'effort': 'low'},
+                           'max_output_tokens': 1800, 'text': {'format': {'type': 'json_object'}}}
+        request_headers = {'Authorization': 'Bearer ' + api_key, 'Content-Type': 'application/json',
+                           'User-Agent': 'NhaTrangLifeNewsBot/4.0'}
+    request = urllib.request.Request(request_url,
+        data=json.dumps(request_payload, ensure_ascii=False).encode('utf-8'),
+        headers=request_headers, method='POST')
     try:
         with urllib.request.urlopen(request, timeout=45) as response:
             response_data = json.loads(response.read().decode('utf-8'))
     except Exception as exc:
         status = getattr(exc, 'code', None)
-        print('OpenAI editorial review failed safely:', 'HTTP ' + str(status) if status else type(exc).__name__)
+        print('AI editorial review failed safely:', 'HTTP ' + str(status) if status else type(exc).__name__)
         # The request may have reached the provider even if the response was lost.
         usage['daily_usd'] = round(daily_spend + estimated_cost, 8)
         usage['monthly_usd'] = round(monthly_spend + estimated_cost, 8)
         ledger = usage.setdefault('ledger', [])
-        ledger.append({'at': iso(now()), 'model': OPENAI_TEXT_MODEL, 'estimated_cost_usd': round(estimated_cost, 8),
+        ledger.append({'at': iso(now()), 'provider': AI_PROVIDER, 'model': model, 'estimated_cost_usd': round(estimated_cost, 8),
                        'status': 'response_unavailable', 'source_url': source_url[:500]})
         usage['ledger'] = ledger[-500:]
         notify_budget_thresholds(s)
         return None
 
     api_usage = response_data.get('usage') or {}
-    input_tokens, output_tokens = int(api_usage.get('input_tokens', 0) or 0), int(api_usage.get('output_tokens', 0) or 0)
-    actual_cost = input_tokens * 0.10 / 1_000_000 + output_tokens * 0.50 / 1_000_000
+    input_tokens = int(api_usage.get('input_tokens', api_usage.get('prompt_tokens', 0)) or 0)
+    output_tokens = int(api_usage.get('output_tokens', api_usage.get('completion_tokens', 0)) or 0)
+    if AI_PROVIDER in {'openrouter', 'deepseek'}:
+        if AI_PROVIDER == 'openrouter' and model.endswith(':free'):
+            actual_cost = float(api_usage.get('cost', 0) or 0)
+        elif AI_PROVIDER == 'deepseek':
+            actual_cost = input_tokens * 0.30 / 1_000_000 + output_tokens * 1.20 / 1_000_000
+        else:
+            actual_cost = float(api_usage.get('cost', estimated_cost) or estimated_cost)
+    else:
+        actual_cost = input_tokens * 0.10 / 1_000_000 + output_tokens * 0.50 / 1_000_000
     usage['daily_usd'] = round(daily_spend + actual_cost, 8)
     usage['monthly_usd'] = round(monthly_spend + actual_cost, 8)
     usage['input_tokens'] = int(usage.get('input_tokens', 0) or 0) + input_tokens
     usage['output_tokens'] = int(usage.get('output_tokens', 0) or 0) + output_tokens
     ledger = usage.setdefault('ledger', [])
-    ledger.append({'at': iso(now()), 'model': OPENAI_TEXT_MODEL, 'input_tokens': input_tokens,
+    ledger.append({'at': iso(now()), 'provider': AI_PROVIDER, 'model': model, 'input_tokens': input_tokens,
                    'output_tokens': output_tokens, 'cost_usd': round(actual_cost, 8), 'source_url': source_url[:500]})
     usage['ledger'] = ledger[-500:]
     notify_budget_thresholds(s)
     try:
-        output_text = response_data.get('output_text') or ''.join(
-            part.get('text', '') for block in response_data.get('output', [])
-            for part in block.get('content', [])
-            if isinstance(part, dict) and part.get('type') == 'output_text')
+        if AI_PROVIDER in {'openrouter', 'deepseek'}:
+            output_text = response_data['choices'][0]['message']['content']
+        else:
+            output_text = response_data.get('output_text') or ''.join(
+                part.get('text', '') for block in response_data.get('output', [])
+                for part in block.get('content', [])
+                if isinstance(part, dict) and part.get('type') == 'output_text')
         result = json.loads(output_text)
     except (TypeError, ValueError, json.JSONDecodeError):
         print('OpenAI editorial review returned invalid JSON; charged usage was recorded.')
@@ -2560,7 +2616,7 @@ def capture_manual_post(msg, s, uid):
 
     image_query = news_image_query(headline, body)
     reaction = reaction_line(headline + ' ' + body)
-    if OPENAI_API_KEY:
+    if editorial_api_key():
         try:
             ai_result = ai_editorial_review(s, headline, text_only, source_url, now(), urgent=False)
             if not ai_result or ai_result.get('decision') != 'draft':
@@ -3113,7 +3169,7 @@ def handle_admin_message(msg, s):
         item = {
             'kind': 'morning_greeting', 'kind_label': 'Доброе утро',
             'headline': '☀️ Доброе утро!', 'title': '☀️ Доброе утро!',
-            'body': 'Желаем вам хорошего дня!\n\nВыспались?\n👍 — да!\n😴 — ещё сплю\n😭 — нет…',
+            'body': 'Желаем вам хорошего дня!\n\nВыспались?\n👍 — да!\n😂 — ещё сплю\n😭 — нет…',
             'image_query': 'Nha Trang Vietnam sunrise morning coast palm trees',
             'idempotency_key': 'morning-greeting:' + current_day, 'urgent': False
         }
@@ -3290,8 +3346,8 @@ def handle_admin_message(msg, s):
             f'Автопубликация GREEN: {"включена" if AUTO_PUBLISH else "выключена"}; RED/YELLOW — только редактору',
             f'Черновиков новостей в день: максимум {MAX_DAILY_NEWS}',
             f'Лимит рекламных черновиков: {MAX_DAILY_ADS} в день',
-            'Разрешённые реакции: ❤️ 🙏 😱 👍 🤣',
-            f'ИИ-редактор: {f"{OPENAI_TEXT_MODEL} подключён" if OPENAI_API_KEY else "не подключён (правиловый резервный режим)"}',
+            'Разрешённые реакции: ❤️ 👍 😭 😂 🙏',
+            f'ИИ-редактор: {f"{editorial_model_name()} подключён" if editorial_api_key() else "не подключён (правиловый резервный режим)"}',
             f'Изображения: {"OpenAI подключён" if OPENAI_API_KEY else "бесплатные локальные иллюстрации"}',
             f'Приватное хранилище: {"Supabase настроен" if supabase_state_configured() else "не настроено"}',
             f'Погодный API для коммерческого режима: {"WeatherAPI.com подключён" if WEATHERAPI_KEY else "не подключён"}',
@@ -3695,7 +3751,7 @@ def routine_posts(s):
                 'Желаем вам хорошего дня!\n\n'
                 'Выспались?\n'
                 '👍 — да!\n'
-                '😴 — ещё сплю\n'
+                '😂 — ещё сплю\n'
                 '😭 — нет…'
             ),
             'reaction_line': '',
@@ -4164,7 +4220,7 @@ def check_weather_changes(s):
         details.append('К морю лучше выйти до дождя; долгую прогулку отложить.')
     else:
         details.append('Для прогулки к морю погода пока подходит.')
-    details.append('Вы сегодня пойдёте к морю? 👍 / 👎')
+    details.append('Вы сегодня пойдёте к морю? 👍 / 🙏')
 
     for alert in new_official_alerts[:1]:
         details.append('Официально: ' + alert['title'][:110] + '.')
@@ -4303,6 +4359,16 @@ def editorial_verification_level(item, source_url=''):
                    'убийств', 'нападен', 'ограб', 'похищ', 'мошеннич', 'арест')
     if any(term in text for term in crime_terms):
         return 'YELLOW'
+    sensitive_terms = (
+        'health', 'medical', 'medicine', 'hospital', 'clinic', 'disease', 'outbreak', 'vaccine',
+        'visa', 'immigration', 'residency', 'deportation', 'legal', 'law', 'regulation',
+        'migration', 'здравоохран', 'медицин', 'лекарств', 'больниц', 'клиник', 'болезн',
+        'вспышк', 'вакцин', 'виза', 'миграц', 'иммиграц', 'вид на жительство', 'депортац',
+        'закон', 'юридическ', 'правил пребыван', 'правила пребывания', 'визов', 'y tế', 'bệnh viện', 'phòng khám',
+        'dịch bệnh', 'vắc xin', 'nhập cư', 'cư trú', 'trục xuất', 'pháp luật', 'quy định', 'luật'
+    )
+    if any(term in text for term in sensitive_terms):
+        return 'YELLOW'
     sensitive = {'safety', 'rules', 'transport', 'weather', 'health'}
     if item.get('category') in sensitive or item.get('urgent'):
         return 'YELLOW'
@@ -4320,6 +4386,7 @@ def maybe_auto_publish_green_news(s, item):
     if not AUTO_PUBLISH or not item or item.get('kind') != 'news':
         return False
     if (item.get('verification_level') != 'GREEN' or item.get('urgent')
+            or editorial_verification_level(item, item.get('source_url', '')) != 'GREEN'
             or item.get('category') in {'safety', 'transport', 'rules', 'weather', 'health'}
             or item.get('uncertainties') or not item.get('image_file_id')
             or review_caption_too_long(item)):
@@ -4546,7 +4613,7 @@ def publish_news(s, force=False):
 
         # AI is a constrained editor, not a source of facts. If configured but unavailable,
         # stay in safe mode and skip this candidate instead of silently pretending AI ran.
-        if OPENAI_API_KEY:
+        if editorial_api_key():
             ai_result = ai_editorial_review(
                 s, title, source_text, final_source_url, source_published_at, urgent=urgent_candidate
             )
@@ -4712,7 +4779,7 @@ def main():
         'review_pending=', bool(pending),
         'review_queue=', len(s.get('review_queue', [])),
         'review_due=', pending.get('planned_at', ''),
-        'ai_mode=', OPENAI_TEXT_MODEL if OPENAI_API_KEY else 'rule-based-fallback',
+        'ai_mode=', editorial_model_name() if editorial_api_key() else 'rule-based-fallback',
         'state_store=', 'supabase' if supabase_state_configured() else 'local-development'
     )
 

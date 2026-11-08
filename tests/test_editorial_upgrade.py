@@ -19,6 +19,29 @@ class EditorialUpgradeTests(unittest.TestCase):
         self.assertEqual(bot.editorial_verification_level(
             {'category': 'city', 'headline': 'Слух о преступлении', 'score_parts': {'source_confidence': 5}}, official), 'RED')
 
+    def test_risk_gate_detects_sensitive_topics_even_when_model_calls_them_life(self):
+        official = 'https://example.gov.vn/news'
+        for headline in (
+            'Hospital changes medicine guidance', 'New visa and residency rules',
+            'Больница обновила рекомендации по лекарствам', 'Новые правила пребывания и виз'
+        ):
+            with self.subTest(headline=headline):
+                self.assertEqual(bot.editorial_verification_level({
+                    'category': 'life', 'headline': headline,
+                    'score_parts': {'source_confidence': 5}
+                }, official), 'YELLOW')
+
+    def test_green_auto_publish_gate_rejects_sensitive_headline_even_if_mislabeled(self):
+        item = {
+            'kind': 'news', 'category': 'life', 'headline': 'New visa and residency rules',
+            'verification_level': 'GREEN', 'image_file_id': 'cached-file-id',
+            'source_url': 'https://example.gov.vn/news',
+            'score_parts': {'source_confidence': 5}
+        }
+        with patch.object(bot, 'AUTO_PUBLISH', True), patch.object(bot, 'publish_review_item') as publish:
+            self.assertFalse(bot.maybe_auto_publish_green_news({}, item))
+        publish.assert_not_called()
+
     def test_auto_publish_channel_write_requires_explicit_internal_marker(self):
         with patch.object(bot, 'AUTO_PUBLISH', True):
             with self.assertRaises(RuntimeError):
@@ -68,6 +91,44 @@ class EditorialUpgradeTests(unittest.TestCase):
         self.assertEqual(result['category'], 'city')
         self.assertAlmostEqual(state['openai_usage']['monthly_usd'], 0.0002)
         self.assertEqual(state['openai_usage']['ledger'][0]['input_tokens'], 500)
+
+    def test_openrouter_deepseek_free_uses_chat_completions_and_zero_cost(self):
+        output = {
+            'decision': 'draft', 'local_relevance': 4, 'practical_usefulness': 4,
+            'source_confidence': 4, 'freshness_confidence': 4, 'novelty': 4,
+            'headline_ru': 'В городе изменили расписание автобусов',
+            'audience_question': 'Этим маршрутом пользуетесь?',
+            'body_ru': 'Власти города сообщили об изменении расписания автобусов. Новый график начнёт действовать на следующей неделе. Пассажирам следует проверить маршрут перед поездкой.',
+            'category': 'city', 'why_it_matters': 'Это помогает планировать поездки.',
+            'image_query_en': 'Nha Trang city bus route', 'reaction_prompt': [],
+            'uncertainties': [], 'verification_notes': 'Официальное сообщение'
+        }
+        response_body = json.dumps({
+            'choices': [{'message': {'content': json.dumps(output, ensure_ascii=False)}}],
+            'usage': {'prompt_tokens': 500, 'completion_tokens': 300}
+        }).encode()
+
+        class Response(BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *_args): self.close()
+
+        state = {'image_usage': {}}
+        with patch.object(bot, 'AI_PROVIDER', 'openrouter'), \
+             patch.object(bot, 'OPENROUTER_MODEL', 'deepseek/deepseek-v4-flash:free'), \
+             patch.dict(os.environ, {'OPENROUTER_API_KEY': 'unit-test-router-key'}), \
+             patch.object(bot, 'now', return_value=datetime(2026, 11, 5, 12, 0, tzinfo=bot.TZ)), \
+             patch.object(bot.urllib.request, 'urlopen', return_value=Response(response_body)) as open_url:
+            result = bot.ai_editorial_review(
+                state, 'Bus schedule change', 'The city announced bus schedule changes starting next week.',
+                'https://example.gov.vn/news', bot.now())
+
+        request = open_url.call_args.args[0]
+        payload = json.loads(request.data.decode())
+        self.assertEqual(request.full_url, 'https://openrouter.ai/api/v1/chat/completions')
+        self.assertEqual(request.get_header('Authorization'), 'Bearer unit-test-router-key')
+        self.assertEqual(payload['model'], 'deepseek/deepseek-v4-flash:free')
+        self.assertEqual(result['category'], 'city')
+        self.assertEqual(state['openai_usage']['monthly_usd'], 0.0)
 
 
     def test_public_news_template_contains_why_question_and_clickable_footer(self):

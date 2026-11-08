@@ -767,7 +767,7 @@ class NewsQualityTests(unittest.TestCase):
         self.assertEqual(candidate["headline"], "☀️ Доброе утро!")
         self.assertIn("Желаем вам хорошего дня!", candidate["body"])
         self.assertIn("Выспались?", candidate["body"])
-        self.assertIn("😴 — ещё сплю", candidate["body"])
+        self.assertIn("😂 — ещё сплю", candidate["body"])
         self.assertEqual(candidate["reaction_line"], "")
         self.assertEqual(queue_mock.call_args.kwargs["slot_key"], "review_morning")
         self.assertEqual(queue_mock.call_args.kwargs["planned_at"], current + timedelta(minutes=15))
@@ -1090,7 +1090,7 @@ class NewsQualityTests(unittest.TestCase):
             "kind": "news",
             "headline": "Nha Trang changes the road access rules",
             "body": "Residents should check the new route before travelling through the district.",
-            "reaction_line": "😂 — это смешно\n👍 — полезная информация",
+            "reaction_line": "👍 — полезная информация",
             "link": "https://publisher.example/road-story",
             "source_url": "https://publisher.example/road-story",
             "source_published_at": "2026-10-27T09:00:00+07:00",
@@ -1106,16 +1106,15 @@ class NewsQualityTests(unittest.TestCase):
         self.assertIn('<a href="https://publisher.example/road-story">publisher.example</a>', status)
         self.assertIn("Дата источника", status)
         self.assertNotIn("<blockquote", rendered)
-        self.assertNotIn("😂", rendered)
         self.assertIn("👍 — полезная информация", rendered)
         self.assertIn("ПОДПИСАТЬСЯ", rendered)
         self.assertIn("ПРЕДЛОЖИТЬ НОВОСТЬ", rendered)
 
     def test_reactions_reject_every_emoji_outside_the_allowlist(self):
-        value = "😂 — нет\n🔥 — нет\n❤️ — да\n🙏 — да\n😱 — да\n👍 — да\n🤣 — да\n🙂 — нет"
+        value = "🔥 — нет\n🔥 — нет\n❤️ — да\n🙏 — да\n😭 — да\n👍 — да\n😂 — да\n🙂 — нет"
         actual = bot.sanitize_reaction_line(value)
         self.assertEqual(actual.splitlines(), [
-            "❤️ — да", "🙏 — да", "😱 — да", "👍 — да", "🤣 — да"
+            "❤️ — да", "🙏 — да", "😭 — да", "👍 — да", "😂 — да"
         ])
 
     def test_image_search_failure_keeps_post_unpublished_instead_of_using_generic_art(self):
@@ -1138,12 +1137,18 @@ class NewsQualityTests(unittest.TestCase):
             '</head><body></body></html>'
         )
         dates = bot.extract_article_date_candidates(page)
-        self.assertEqual(len(dates), 2)
+        self.assertEqual(len(dates), 1)
         current = datetime(2026, 10, 27, 9, 0, tzinfo=bot.TZ)
         recent = bot.extract_recent_article_date(page, current_time=current)
         self.assertIsNotNone(recent)
         self.assertEqual(recent.hour, 8)
-        self.assertEqual(recent.minute, 45)
+        self.assertEqual(recent.minute, 15)
+
+    def test_recent_modified_date_does_not_refresh_old_publication(self):
+        page = ('<meta property="article:published_time" content="2026-10-20T08:15:00+07:00">'
+                '<meta property="og:updated_time" content="2026-10-27T08:45:00+07:00">')
+        current = datetime(2026, 10, 27, 9, 0, tzinfo=bot.TZ)
+        self.assertIsNone(bot.extract_recent_article_date(page, current_time=current))
 
     def test_weather_alert_decision_requires_a_material_measurable_change(self):
         changed, reason = bot.weather_change_decision(
@@ -1196,15 +1201,15 @@ class NewsQualityTests(unittest.TestCase):
 
     def test_gemini_reaction_prompt_is_whitelisted_and_limited(self):
         line = bot.format_ai_reaction_prompt([
-            {"emoji": "😂", "text": "не разрешено"},
+            {"emoji": "😂", "text": "смех"},
             {"emoji": "❤️", "text": "приятно"},
             {"emoji": "❤️", "text": "повтор"},
             {"emoji": "🙏", "text": "спасибо"},
             {"emoji": "🔥", "text": "не разрешено"},
-            {"emoji": "😱", "text": "третья реакция"},
+            {"emoji": "😭", "text": "третья реакция"},
         ])
-        self.assertEqual(line, "❤️ — приятно; 🙏 — спасибо")
-        self.assertEqual(bot.format_ai_reaction_prompt([{"emoji": "😱", "text": "опасность"}], serious=True), "")
+        self.assertEqual(line, "😂 — смех; ❤️ — приятно")
+        self.assertEqual(bot.format_ai_reaction_prompt([{"emoji": "🔥", "text": "опасность"}], serious=True), "")
 
     def test_review_keyboard_uses_only_short_callback_payloads(self):
         markup = bot.review_keyboard("rv0123456789abcdefab", version=3)
